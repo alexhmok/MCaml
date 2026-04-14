@@ -94,6 +94,8 @@ let push_cmds (st : state) (prefix : string) (cmds : string list) : unit =
    helpers, and param_N is set per-call so its old value is meaningless. *)
 let is_reserved_slot (s : string) : bool =
   s = "$ret" || s = "$arr_result" || s = "$tick_iters" ||
+  s = "$scratch_next" || s = "$permheap_next" || s = "$conspool_next" ||
+  s = "$arr_idx" ||
   (String.length s >= 5 && String.sub s 0 5 = "$ref_") ||
   (String.length s > 6
    && String.sub s 0 6 = "param_"

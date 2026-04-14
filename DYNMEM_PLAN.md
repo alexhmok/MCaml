@@ -41,7 +41,7 @@ work.
 
 ### Phase A — Dynamic arrays
 - [x] A1. Type system: add `TArrStatic`/`TArrDyn` split in `ast.ml`, `typing.ml`
-- [ ] A2. Runtime layout: `mcaml:scratch cells`, `mcaml:permheap cells`, bump counters
+- [x] A2. Runtime layout: `mcaml:scratch cells`, `mcaml:permheap cells`, bump counters
 - [ ] A3. IR: `IHeapAlloc`/`IHeapGet`/`IHeapSet` in `cfg.ml`
 - [ ] A4. knormal lowering for `Array.make` / dynamic access
 - [ ] A5. cfg_build emits new IR ops
