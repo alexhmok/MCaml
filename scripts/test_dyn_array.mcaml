@@ -1,10 +1,54 @@
-(* Phase A smoke test: const-size dynamic array via array_make.
-   Allocates 4 cells in the scratch pool, writes four distinct values,
-   reads one back. Expected $ret = 30. *)
-fun main () : int =
+(* Phase A exit tests for dynamic arrays (TArrDyn via array_make).
+   Each fun is a parameterless entry point invoked from the sim harness
+   in /tmp/mcaml_out/test_dyn_array.py. Every entry is straight-line —
+   cross-function passing and for-loops over dyn arrays are blocked by
+   deferred knormal work (TArrDyn params in normalize_fun / for_lift).
+
+   Expected $ret values:
+     test_basic          ->  30
+     test_rmw            ->  40
+     test_multi_alloc    -> 211
+     test_mixed          -> 302 *)
+
+fun test_basic () : int =
   let a = array_make(4, 0) in
   array_set(a, 0, 10);
   array_set(a, 1, 20);
   array_set(a, 2, 30);
   array_set(a, 3, 40);
   array_get(a, 2)
+
+(* Read-modify-write: a[1] := a[0] + a[2]. Exercises the array_get
+   App path producing values into fresh temps that feed a BinOp whose
+   result is then array_set's value operand. *)
+fun test_rmw () : int =
+  let a = array_make(3, 0) in
+  array_set(a, 0, 10);
+  array_set(a, 1, 20);
+  array_set(a, 2, 30);
+  array_set(a, 1, array_get(a, 0) + array_get(a, 2));
+  array_get(a, 1)
+
+(* Two independent allocations in the same pool; verifies the bump
+   counter advances so base_b = base_a + len_a, and reads from one
+   don't leak into the other. *)
+fun test_multi_alloc () : int =
+  let a = array_make(3, 0) in
+  let b = array_make(2, 0) in
+  array_set(a, 0, 7);
+  array_set(a, 2, 11);
+  array_set(b, 0, 100);
+  array_set(b, 1, 200);
+  array_get(a, 2) + array_get(b, 1)
+
+(* Static array and dynamic array coexisting in one function. s is a
+   compile-time storage-id alias (hits arr_env + per-aid macro helper);
+   d is a runtime handle (hits dyn_env + the shared scratch helpers).
+   The two paths share no state; we sum one element from each. *)
+fun test_mixed () : int =
+  let s = [| 1; 2; 3 |] in
+  let d = array_make(3, 0) in
+  array_set(d, 0, 100);
+  array_set(d, 1, 200);
+  array_set(d, 2, 300);
+  s[1] + array_get(d, 2)

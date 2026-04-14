@@ -51,7 +51,14 @@ work.
 - [x] A8. Allocator init lines in `init.mcfunction` (via `tools/pack_datapack.py`)
       (Already landed in A2 `204c42a` — six §4.3 lines are in `INIT_MCFUNCTION`.)
 - [x] A9. Per-invocation arena reset at public entry-point exits
-- [ ] A10. Test program + simulator coverage
+- [x] A10. Test program + simulator coverage
+      (`scripts/test_dyn_array.mcaml` has four straight-line sub-tests — basic,
+      read-modify-write, multi-alloc, mixed static+dyn — validated through
+      `/tmp/mcaml_out/test_dyn_array.py` against sim.py with zero simulator
+      changes. **Deferred**: cross-function TArrDyn passing and for-loops over
+      dyn arrays both need normalize_fun + cfg_build to seed dyn_env for
+      TArrDyn params; pick up alongside Phase B plumbing or as a standalone
+      follow-up.)
 
 ### Phase B — Lists and cons
 - [ ] B1. Parser: `::`, `[]`, list literal desugaring in `parser.mly`/`lexer.mll`
