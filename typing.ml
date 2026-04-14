@@ -195,6 +195,8 @@ let rec infer env e =
        | TList TInt -> TList TInt
        | _ -> raise (Error ":: tail must be a list of int"))
 
+  | Region e -> infer env e
+
   | For (i, lo, hi, body) ->
       if infer env lo <> TInt then raise (Error "for: lo must be int");
       if infer env hi <> TInt then raise (Error "for: hi must be int");

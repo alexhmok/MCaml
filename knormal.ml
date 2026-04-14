@@ -466,6 +466,12 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
   | App ("array_make", _) ->
       failwith "array_make must appear as the rhs of a let binding"
 
+  | Region _ ->
+      (* Phase C / C3 will lower this to IRegionEnter/IRegionExit brackets
+         around the body. Until then, a loud failure is better than silent
+         inlining of the body without the snapshot/restore pair. *)
+      failwith "Region: lowering lands in C3"
+
   | Nil ->
       (* Empty list sentinel: -1, per §4.2. *)
       (match dest with

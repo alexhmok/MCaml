@@ -37,6 +37,7 @@ type expr =
   | For of string * expr * expr * expr     (* For(i, lo, hi, body) *)
   | Nil                                    (* [] : TList t — empty list literal *)
   | Cons of expr * expr                    (* h :: t — cons cell *)
+  | Region of expr                         (* region (fun () -> body) — lexical arena bracket; thunk stripped at parse time *)
 
 type def =
   | Val of string * expr

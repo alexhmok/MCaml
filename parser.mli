@@ -20,6 +20,7 @@ type token =
   | SEMICOLON
   | SELECTOR of (string)
   | RPAREN
+  | REGION
   | REF
   | RBRACK
   | RBRACE
@@ -60,6 +61,7 @@ type token =
   | CARET
   | BELOW_SEMI
   | BANG
+  | ARROW
   | AND
 
 (* This exception is raised by the monolithic API functions. *)

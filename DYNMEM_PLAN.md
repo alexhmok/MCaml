@@ -147,8 +147,26 @@ work.
       lets helpers declare `(l: list) : list` and types unify.)
 
 ### Phase C — Regions and copy-on-escape
-- [ ] C1. Surface syntax: `region (fun () -> body)` in parser + AST
-- [ ] C2. Type-level region tracking in `typing.ml` (minimal — just escape rule)
+- [x] C1. Surface syntax: `region (fun () -> body)` in parser + AST
+      (Dedicated production `REGION LPAREN FUN LPAREN RPAREN ARROW
+      seq_expr RPAREN` strips the thunk at parse time and builds
+      `Region of expr`. New tokens: `REGION` keyword, `ARROW` (`->`).
+      Inert structural arms in `alpha.ml`, `for_lift.ml` (both
+      `free_vars` and `walk`). `knormal.ml` uses a loud failwith stub
+      `"Region: lowering lands in C3"` — same pattern B4 used before
+      B6 — so any pre-C3 program that reaches knormal with a Region
+      node fails fast rather than silently inlining the body without
+      the snapshot/restore pair. Probe
+      `fun main() : int = region (fun () -> 42)` reaches the stub,
+      proving parse → alpha → for_lift → typing all accepted the
+      syntax. All five canaries byte-identical pre-/post-edit.)
+- [x] C2. Type-level region tracking in `typing.ml` (minimal — just escape rule)
+      (Single trivial arm: `| Region e -> infer env e`. No
+      representability check, no escape rule, no region polymorphism
+      — v1 accepts all return types per §C2 and relies on the C5
+      per-type deep-copy walker for correctness. Landed together with
+      C1 because it's a one-liner and the two form a frontend-only
+      unit that emits no new IR.)
 - [ ] C3. IR: `IRegionEnter`/`IRegionExit`
 - [ ] C4. codegen: snapshot/restore bump pointers, `data remove` truncation loop
 - [ ] C5. Per-return-type deep-copy helper generation

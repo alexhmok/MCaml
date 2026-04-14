@@ -19,6 +19,7 @@
 %token TILDE CARET EOF
 %token LBAR RBAR LBRACK RBRACK
 %token CONS
+%token REGION ARROW
 
 /* Virtual precedence marker used to lower seq_expr reduction below operators */
 %token BELOW_SEMI
@@ -145,6 +146,8 @@ expr:
       { List.fold_right (fun h t -> Cons(h, t)) elems Nil }
   | e = expr LBRACK i = expr RBRACK { Index1(e, i) }
   | e = expr LBRACK i = expr COMMA j = expr RBRACK { Index2(e, i, j) }
+
+  | REGION LPAREN FUN LPAREN RPAREN ARROW body = seq_expr RPAREN { Region body }
 
 expr_semi_list:
   | { [] }
