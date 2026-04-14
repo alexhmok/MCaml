@@ -56,6 +56,7 @@ rule read = parse
   | "("      { LPAREN }
   | ")"      { RPAREN }
   | ","      { COMMA }
+  | "::"     { CONS }
   | ":"      { COLON }
   | ";"      { SEMICOLON }
   | "="      { EQUAL }

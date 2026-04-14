@@ -40,6 +40,8 @@ let rec g env e =
   | RefSet (Index2 (a, i, j), v) ->
       IndexSet2 (g env a, g env i, g env j, g env v)
   | RefSet (r, v) -> RefSet (g env r, g env v)
+  | Nil -> Nil
+  | Cons (h, t) -> Cons (g env h, g env t)
   | For (i, lo, hi, body) ->
       let i' = new_name i in
       let env' = M.add i i' env in

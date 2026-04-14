@@ -51,6 +51,7 @@ type token =
   | DONE
   | DO
   | DIV
+  | CONS
   | COMMA
   | COLON
   | COLEQ

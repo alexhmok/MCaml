@@ -61,8 +61,13 @@ work.
       follow-up.)
 
 ### Phase B — Lists and cons
-- [ ] B1. Parser: `::`, `[]`, list literal desugaring in `parser.mly`/`lexer.mll`
-- [ ] B2. Type system: `TList of typ`
+- [x] B1. Parser: `::`, `[]`, list literal desugaring in `parser.mly`/`lexer.mll`
+      (CONS token in lexer, `%right CONS` between comparison and PLUS/MINUS,
+      list literal desugars in parser action via `List.fold_right`.)
+- [x] B2. Type system: `TList of typ`
+      (v1 monomorphic int lists: `Nil → TList TInt`, `Cons` rejects
+      non-int head and non-`TList TInt` tail. `head`/`tail`/`is_nil` go
+      through App fallback — no fun_sigs entries needed for v1.)
 - [ ] B3. Runtime: `mcaml:conspool pairs` pool, `$conspool_next`
 - [ ] B4. IR: `ICons`/`IHead`/`ITail`
 - [ ] B5. knormal/cfg_build lowering

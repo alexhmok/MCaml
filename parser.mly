@@ -18,6 +18,7 @@
 %token EQUAL PLUS MINUS TIMES DIV LT GT LEQ GEQ NEQ AND OR
 %token TILDE CARET EOF
 %token LBAR RBAR LBRACK RBRACK
+%token CONS
 
 /* Virtual precedence marker used to lower seq_expr reduction below operators */
 %token BELOW_SEMI
@@ -52,6 +53,7 @@
 %left OR
 %left AND
 %left EQUAL NEQ LT GT LEQ GEQ
+%right CONS
 %left PLUS MINUS
 %left TIMES DIV
 %nonassoc BANG REF
@@ -116,6 +118,7 @@ expr:
   | CMD s = STRING { Command s }
 
   | e1 = expr op = binop e2 = expr { BinOp(op, e1, e2) }
+  | e1 = expr CONS e2 = expr { Cons(e1, e2) }
 
   | LET x = ID EQUAL e1 = seq_expr IN e2 = seq_expr { Let(x, e1, e2) }
   | IF cond = expr THEN e1 = expr ELSE e2 = expr { If(cond, e1, e2) }
@@ -136,6 +139,9 @@ expr:
   | FOR i = ID EQUAL lo = expr TO hi = expr DO body = seq_expr DONE { For(i, lo, hi, body) }
 
   | LBAR elems = expr_semi_list RBAR { Array elems }
+  | LBRACK RBRACK { Nil }
+  | LBRACK elems = nonempty_expr_semi_list RBRACK
+      { List.fold_right (fun h t -> Cons(h, t)) elems Nil }
   | e = expr LBRACK i = expr RBRACK { Index1(e, i) }
   | e = expr LBRACK i = expr COMMA j = expr RBRACK { Index2(e, i, j) }
 

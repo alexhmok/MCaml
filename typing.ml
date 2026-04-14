@@ -165,6 +165,20 @@ let rec infer env e =
        | TRef _ -> raise (Error "ref := value type mismatch")
        | _ -> raise (Error ":= requires a ref on the left"))
 
+  | Nil ->
+      (* v1: monomorphic int lists. Nil defaults to TList TInt; the Cons
+         rule below rejects anything else. *)
+      TList TInt
+
+  | Cons (h, t) ->
+      let th = infer env h in
+      let tt = infer env t in
+      if th <> TInt then
+        raise (Error "::: v1 only supports int lists (head must be int)");
+      (match tt with
+       | TList TInt -> TList TInt
+       | _ -> raise (Error ":: tail must be a list of int"))
+
   | For (i, lo, hi, body) ->
       if infer env lo <> TInt then raise (Error "for: lo must be int");
       if infer env hi <> TInt then raise (Error "for: hi must be int");

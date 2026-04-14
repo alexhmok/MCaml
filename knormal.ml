@@ -459,6 +459,9 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
   | App ("array_make", _) ->
       failwith "array_make must appear as the rhs of a let binding"
 
+  | Nil | Cons _ ->
+      failwith "knormal: list literals / :: not yet lowered (Phase B / B5)"
+
   | App (f, args) ->
       let rec bind_args args acc = match args with
         | [] ->

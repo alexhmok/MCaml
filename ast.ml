@@ -4,6 +4,7 @@ type typ = TInt | TBool | TUnit | TSelector | TPos
          | TArrDyn of typ             (* dynamic array: element type; length is runtime *)
          | TMat of typ * int * int    (* element type, rows, cols *)
          | TRef of typ                (* ref cell holding T *)
+         | TList of typ               (* cons list: element type; handle at runtime *)
 type binop = Add | Sub | Mult | Div | Eq | Neq | Lt | Leq | Gt | Geq | And | Or
 
 (* Phase A: dynamic-heap pool tag. Lives in ast.ml (not cfg.ml) so that
@@ -34,6 +35,8 @@ type expr =
   | Deref of expr                          (* !r — read cell *)
   | RefSet of expr * expr                  (* r := e — write cell *)
   | For of string * expr * expr * expr     (* For(i, lo, hi, body) *)
+  | Nil                                    (* [] : TList t — empty list literal *)
+  | Cons of expr * expr                    (* h :: t — cons cell *)
 
 type def =
   | Val of string * expr
