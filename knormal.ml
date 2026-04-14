@@ -1,6 +1,11 @@
 (* knormal.ml *)
 open Ast
 
+(* Phase A dynamic-heap pool tag. Mirrors Cfg.heap_pool; cfg_build translates
+   between the two. Defined here (not imported from Cfg) because the build
+   order puts knormal.ml before cfg.ml. *)
+type heap_pool = PoolScratch | PoolPermheap
+
 type kexpr =
   | KUnit
   | KInt of int
@@ -27,6 +32,13 @@ type kexpr =
   | KArrSetStatic of string * int * string
   (* KArrSet(id, idx_temp, val_temp) — storage[id][idx] := val, idx runtime *)
   | KArrSet of string * string * string
+  (* --- Phase A dynamic-heap primitives --- *)
+  (* KDynAlloc(base_dest, pool, n_vreg) — base_dest := alloc pool(n_vreg) *)
+  | KDynAlloc of string * heap_pool * string
+  (* KHeapGet(dest, pool, base_vreg, idx_vreg) — dest := pool[base+idx] *)
+  | KHeapGet of string * heap_pool * string * string
+  (* KHeapSet(pool, base_vreg, idx_vreg, val_vreg) — pool[base+idx] := val *)
+  | KHeapSet of heap_pool * string * string * string
 
 let counter = ref 0
 let new_temp () = incr counter; Printf.sprintf "$t%d" !counter
@@ -39,6 +51,14 @@ let new_arr_id () = incr arr_counter; Printf.sprintf "arr%d" !arr_counter
 (* Helper for coords *)
 let str_of_coord p =
   match p with Abs f -> string_of_float f | Rel None -> "~" | Rel (Some f) -> "~" ^ string_of_float f | Local None -> "^" | Local (Some f) -> "^" ^ string_of_float f
+
+(* Phase A: compile-time side-channel for TArrDyn-typed binders. Maps the
+   user binder name (alpha-renamed) to the companion length vreg. The base
+   handle is carried in an ordinary vreg sharing the binder's name, so all
+   downstream passes (regalloc/inline/unroll/...) see the base as a plain
+   int vreg. Disjoint from [arr_env] — TArrDyn bindings never touch it, so
+   the static path is bit-identical on static-only programs. *)
+let dyn_env : (string, string) Hashtbl.t = Hashtbl.create 16
 
 (* Compile-time environment mapping user-level binder names to array storage IDs.
    Arrays are NOT first-class runtime values in Milestone 1: a `let a = [|..|]`
@@ -108,6 +128,29 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
 
   | Unit ->
       (match dest with Some d -> KLet(d, KInt 0, KUnit) | None -> KUnit)
+
+  | Let (x, App ("Array.make", [n_expr; v_expr]), e2) ->
+      (* Phase A dynamic-heap allocation.
+         v1 scope: requires v_expr = Int 0 (non-zero init needs a runtime
+         fill loop, deferred to A7). n_expr may be any int expression. *)
+      (match v_expr with
+       | Int 0 -> ()
+       | _ -> failwith "Array.make: v1 only supports initializer 0");
+      let t_n = new_temp () in
+      let k_n = normalize_to (Some t_n) n_expr in
+      let len_slot = "$dyn_len_" ^ x in
+      Hashtbl.replace dyn_env x len_slot;
+      (* Emit:
+           <k_n>;                 (* t_n := n *)
+           len_slot := t_n;       (* record length *)
+           x := alloc(t_n)        (* base handle *)
+           <k_body>                                                       *)
+      let alloc = KDynAlloc(x, PoolScratch, t_n) in
+      let k_body = normalize_to dest e2 in
+      KLet(t_n, KUnit,
+        KSeq(k_n,
+          KLet(len_slot, KVar t_n,
+            KSeq(alloc, k_body))))
 
   | Let (x, Ref e1, e2) ->
       (* Allocate a stable ref slot for x. The slot name uses the alpha-
@@ -379,6 +422,37 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
        | None -> assign
        | Some d -> KSeq(assign, KLet(d, KInt 0, KUnit)))
 
+  | App ("array_get", [Var a; i_expr]) when Hashtbl.mem dyn_env a ->
+      (* Phase A dyn-array read. Base handle lives in the vreg named [a];
+         length slot exists in dyn_env but isn't needed for the read. *)
+      (match dest with
+       | None -> KUnit
+       | Some d ->
+           let t_i = new_temp () in
+           let k_i = normalize_to (Some t_i) i_expr in
+           KLet(t_i, KUnit,
+             KSeq(k_i,
+               KLet(d, KUnit, KHeapGet(d, PoolScratch, a, t_i)))))
+
+  | App ("array_set", [Var a; i_expr; v_expr]) when Hashtbl.mem dyn_env a ->
+      (* Phase A dyn-array write. Unit-typed, side-effecting. *)
+      let t_i = new_temp () in
+      let t_v = new_temp () in
+      let k_i = normalize_to (Some t_i) i_expr in
+      let k_v = normalize_to (Some t_v) v_expr in
+      let assign =
+        KLet(t_i, KUnit,
+          KSeq(k_i,
+            KLet(t_v, KUnit,
+              KSeq(k_v, KHeapSet(PoolScratch, a, t_i, t_v)))))
+      in
+      (match dest with
+       | None -> assign
+       | Some d -> KSeq(assign, KLet(d, KInt 0, KUnit)))
+
+  | App ("Array.make", _) ->
+      failwith "Array.make must appear as the rhs of a let binding"
+
   | App (f, args) ->
       let rec bind_args args acc = match args with
         | [] ->
@@ -402,6 +476,7 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
 let normalize e =
   Hashtbl.clear arr_env;
   Hashtbl.clear arr_dims;
+  Hashtbl.clear dyn_env;
   (* ref_env is NOT cleared — ref slot bindings persist across definitions
      so that for-loop helpers can see refs defined in their enclosing
      function. Alpha-renaming keeps binder names globally unique. *)
@@ -414,6 +489,7 @@ let normalize e =
 let normalize_fun (params : (string * Ast.typ) list) (body : expr) : kexpr =
   Hashtbl.clear arr_env;
   Hashtbl.clear arr_dims;
+  Hashtbl.clear dyn_env;
   List.iteri (fun i (name, ty) ->
     match ty with
     | TArrStatic (_, n) ->

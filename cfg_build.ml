@@ -166,6 +166,14 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
       let _ = dest in
       add_instr b.cur (IArrSet (id, idx, v))
 
+  | Knormal.KDynAlloc _
+  | Knormal.KHeapGet  _
+  | Knormal.KHeapSet  _ ->
+      (* Phase A / A5: real lowering lands in the next commit. For now the
+         stubs keep the match exhaustive; knormal never emits these unless
+         a program uses Array.make / array_get / array_set. *)
+      failwith "cfg_build: dynamic-heap lowering (A5) not yet implemented"
+
 (* ---- finalization: reverse instrs, populate preds ---- *)
 
 let finalize_all (blocks : block array) : unit =
