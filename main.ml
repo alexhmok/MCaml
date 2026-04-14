@@ -152,6 +152,54 @@ let () =
         end
       ) fn_order;
 
+    (* Phase A / A9: compute the public-entry set and the any-dyn-heap
+       flag before Phase 3 fires. A non-template function is "public"
+       iff no other non-template function calls it via ICall. The flag
+       gates reset emission so static-only programs stay byte-identical
+       against the pre-Phase-A baseline — reset is a no-op when no
+       IHeap* ever fires. *)
+    let called_by_other : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+    let any_dyn_heap_use = ref false in
+    Hashtbl.iter (fun _ (cfg : Cfg.cfg_func) ->
+      if not cfg.Cfg.is_template then
+        Array.iter (fun (b : Cfg.block) ->
+          List.iter (fun instr ->
+            (match instr with
+             | Cfg.ICall (_, f, _) -> Hashtbl.replace called_by_other f ()
+             | Cfg.IHeapAllocConst _ | Cfg.IHeapAlloc _
+             | Cfg.IHeapGet _ | Cfg.IHeapSet _ -> any_dyn_heap_use := true
+             | _ -> ())
+          ) b.Cfg.instrs
+        ) cfg.Cfg.blocks
+    ) fn_table;
+    let is_public_entry (name : string) : bool =
+      match Hashtbl.find_opt fn_table name with
+      | Some cfg when not cfg.Cfg.is_template ->
+          not (Hashtbl.mem called_by_other name)
+      | _ -> false
+    in
+    (* Reset block from DYNMEM_PLAN.md §4.4. permheap is intentionally
+       excluded — it persists across invocations by design. *)
+    let reset_cmds = [
+      "data modify storage mcaml:scratch cells set value []";
+      "scoreboard players set $scratch_next vars 0";
+      "data modify storage mcaml:conspool pairs set value []";
+      "scoreboard players set $conspool_next vars 0";
+    ] in
+    (* Target: the body file if LICM split fired (else the main file).
+       Append must happen before tick_split so reset commands ride into
+       the terminal __cont slice naturally. *)
+    let append_reset (name : string)
+        (files : (string * string list) list)
+        : (string * string list) list =
+      let body_name = name ^ "__body" in
+      let has_body = List.exists (fun (f, _) -> f = body_name) files in
+      let target = if has_body then body_name else name in
+      List.map (fun (f, cmds) ->
+        if f = target then (f, cmds @ reset_cmds) else (f, cmds)
+      ) files
+    in
+
     (* Phase 3: optimize, regalloc, codegen. Accumulate files first so
        Phase 4 (tick-split) can see the full program before anything
        hits disk. Alongside the files, collect the names of every
@@ -187,6 +235,11 @@ let () =
       let cfg = Hashtbl.find fn_table name in
       if cfg.Cfg.is_template then () else
       let files = Codegen.compile_cfg_to_files ~fn_table cfg in
+      let files =
+        if !any_dyn_heap_use && is_public_entry name
+        then append_reset name files
+        else files
+      in
       if has_self_tail cfg then guarded_funs := name :: !guarded_funs;
       if dump_costs then begin
         let est = Cost.estimate_func cfg in

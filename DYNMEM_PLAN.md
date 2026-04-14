@@ -50,7 +50,7 @@ work.
       (Surface builtin name is `array_make`, not `Array.make` — lexer forbids `.` in idents.)
 - [x] A8. Allocator init lines in `init.mcfunction` (via `tools/pack_datapack.py`)
       (Already landed in A2 `204c42a` — six §4.3 lines are in `INIT_MCFUNCTION`.)
-- [ ] A9. Per-invocation arena reset at public entry-point exits
+- [x] A9. Per-invocation arena reset at public entry-point exits
 - [ ] A10. Test program + simulator coverage
 
 ### Phase B — Lists and cons
