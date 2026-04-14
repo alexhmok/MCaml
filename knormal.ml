@@ -42,6 +42,13 @@ type kexpr =
   | KHeapGet of string * heap_pool * string * string
   (* KHeapSet(pool, base_vreg, idx_vreg, val_vreg) — pool[base+idx] := val *)
   | KHeapSet of heap_pool * string * string * string
+  (* --- Phase B cons-list primitives --- *)
+  (* KCons(d, h_vreg, t_vreg) — d := cons(h, t); conspool append. *)
+  | KCons of string * string * string
+  (* KHead(d, c_vreg) — d := head(c) *)
+  | KHead of string * string
+  (* KTail(d, c_vreg) — d := tail(c) *)
+  | KTail of string * string
 
 let counter = ref 0
 let new_temp () = incr counter; Printf.sprintf "$t%d" !counter
@@ -459,8 +466,66 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
   | App ("array_make", _) ->
       failwith "array_make must appear as the rhs of a let binding"
 
-  | Nil | Cons _ ->
-      failwith "knormal: list literals / :: not yet lowered (Phase B / B5)"
+  | Nil ->
+      (* Empty list sentinel: -1, per §4.2. *)
+      (match dest with
+       | None -> KUnit
+       | Some d -> KLet(d, KInt (-1), KUnit))
+
+  | Cons (h, t) ->
+      (* Evaluate both operands into temps regardless of dest, mirroring
+         the BinOp pattern — if dest is None we still evaluate sub-
+         expressions (for any nested side effects) and drop the cons
+         allocation itself (pure expression; regions reclaim). *)
+      let t_h = new_temp () in
+      let t_t = new_temp () in
+      let k_h = normalize_to (Some t_h) h in
+      let k_t = normalize_to (Some t_t) t in
+      (match dest with
+       | None ->
+           KLet(t_h, KUnit,
+             KSeq(k_h,
+               KLet(t_t, KUnit, k_t)))
+       | Some d ->
+           KLet(t_h, KUnit,
+             KSeq(k_h,
+               KLet(t_t, KUnit,
+                 KSeq(k_t,
+                   KLet(d, KUnit, KCons(d, t_h, t_t)))))))
+
+  | App ("head", [arg]) ->
+      let t_l = new_temp () in
+      let k_l = normalize_to (Some t_l) arg in
+      (match dest with
+       | None -> KLet(t_l, KUnit, k_l)
+       | Some d ->
+           KLet(t_l, KUnit,
+             KSeq(k_l,
+               KLet(d, KUnit, KHead(d, t_l)))))
+
+  | App ("tail", [arg]) ->
+      let t_l = new_temp () in
+      let k_l = normalize_to (Some t_l) arg in
+      (match dest with
+       | None -> KLet(t_l, KUnit, k_l)
+       | Some d ->
+           KLet(t_l, KUnit,
+             KSeq(k_l,
+               KLet(d, KUnit, KTail(d, t_l)))))
+
+  | App ("is_nil", [arg]) ->
+      (* Desugar to equality against the -1 sentinel. KBinOp Eq already
+         lowers to the standard boolean-as-int compile. *)
+      let t_l = new_temp () in
+      let k_l = normalize_to (Some t_l) arg in
+      (match dest with
+       | None -> KLet(t_l, KUnit, k_l)
+       | Some d ->
+           let t_neg = new_temp () in
+           KLet(t_l, KUnit,
+             KSeq(k_l,
+               KLet(t_neg, KInt (-1),
+                 KLet(d, KBinOp(Eq, t_l, t_neg), KUnit)))))
 
   | App (f, args) ->
       let rec bind_args args acc = match args with

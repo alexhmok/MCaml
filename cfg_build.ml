@@ -182,6 +182,18 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
       let _ = dest in
       add_instr b.cur (IHeapSet (p, base, idx, v))
 
+  | Knormal.KCons (d, h, t) ->
+      let _ = dest in
+      add_instr b.cur (ICons (d, h, t))
+
+  | Knormal.KHead (d, c) ->
+      let _ = dest in
+      add_instr b.cur (IHead (d, c))
+
+  | Knormal.KTail (d, c) ->
+      let _ = dest in
+      add_instr b.cur (ITail (d, c))
+
 (* ---- finalization: reverse instrs, populate preds ---- *)
 
 let finalize_all (blocks : block array) : unit =

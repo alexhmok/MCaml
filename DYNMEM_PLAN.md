@@ -89,7 +89,16 @@ work.
       pending B6. `main.ml`'s `any_dyn_heap_use` gate now counts cons
       ops so cons-only programs trip the arena reset (resolves the
       B3 deferral).)
-- [ ] B5. knormal/cfg_build lowering
+- [x] B5. knormal/cfg_build lowering
+      (kexpr gains `KCons`/`KHead`/`KTail`; `normalize_to` rules:
+      `Nil → KInt -1`, `Cons(h,t)` normalizes both operands to temps
+      then emits `KCons(d, t_h, t_t)`, `head`/`tail` dispatch from the
+      App arm before the generic fallback, and `is_nil` desugars to
+      `KBinOp(Eq, t_l, -1)` — no new primitive needed. cfg_build adds
+      three one-line arms lowering to `ICons`/`IHead`/`ITail`. Probe
+      `fun main()=is_nil([])` codegens cleanly and returns 1; a
+      `cons/head/tail` program reaches codegen and fires the B6
+      failwith stub as expected.)
 - [ ] B6. codegen: `cons_head.mcfunction`, `cons_tail.mcfunction`, 5-command `cons` inline
 - [ ] B7. Nil sentinel handling (`-1`), `is_nil` builtin
 - [ ] B8. Test program (e.g., tail-recursive Fibonacci list)
