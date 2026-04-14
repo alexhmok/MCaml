@@ -1,0 +1,126 @@
+(* primitives_v1.mcaml — Stage 1 of §4 (primitives before weights).
+   The cheapest inference primitives that do NOT need fixed-point
+   arithmetic. Integer-only; Q15.16 is deferred to the stage that
+   first needs it (layer_norm / softmax).
+
+   STAGE 1 SCOPE: dot (N=4), vec_add_into (N=4), vec_scale_into (N=4).
+
+   IArrSet landed in the "Add IArrSet end-to-end" session — indexed
+   assignment (`dst[i] := v`) now parses, types, knormalizes, and
+   survives every optimization pass. The in-place primitives are the
+   first consumer and double as the end-to-end validation.
+
+   N is a compile-time constant because `arr[int, N]` requires an
+   integer literal in the parser. Stage 1 pins N=4. Wider dot (N=128)
+   is a separate monomorphization target once we know whether to
+   instantiate per-N at the source level or extend the type to accept
+   a polymorphic length. *)
+
+fun dot(a: arr[int, 4], b: arr[int, 4]): int =
+  let acc = ref 0 in
+  for i = 0 to 4 do
+    acc := !acc + a[i] * b[i]
+  done;
+  !acc
+
+(* Test drivers. Each one pins a pair of arrays then calls dot. The
+   sim harness invokes them by name and reads $ret. Arrays cannot
+   cross the function-call boundary from outside the language, so
+   per-input-pair helpers are the only way to exercise the primitive
+   from the sim. *)
+
+fun dot_t1(x: int): int =
+  let u = [| 1; 2; 3; 4 |] in
+  let v = [| 5; 6; 7; 8 |] in
+  dot(u, v)
+
+fun dot_t2(x: int): int =
+  let u = [| 0; 0; 0; 0 |] in
+  let v = [| 9; 9; 9; 9 |] in
+  dot(u, v)
+
+fun dot_t3(x: int): int =
+  let u = [| 10; 20; 30; 40 |] in
+  let v = [| 1; 0; 1; 0 |] in
+  dot(u, v)
+
+fun dot_t4(x: int): int =
+  let u = [| 7; 11; 13; 17 |] in
+  let v = [| 2; 3; 5; 7 |] in
+  dot(u, v)
+
+fun dot_t5(x: int): int =
+  let u = [| 0; 1; 2; 3 |] in
+  let v = [| 0; 0; 0; 0 |] in
+  dot(u, v)
+
+(* Deliberately negative entries — integer dot handles them via
+   scoreboard signed arithmetic; worth exercising before softmax
+   gets anywhere near the same code path. *)
+fun dot_t6(x: int): int =
+  let u = [| 1; 0 - 2; 3; 0 - 4 |] in
+  let v = [| 5; 6; 0 - 7; 8 |] in
+  dot(u, v)
+
+(* -------- in-place vector primitives -------- *)
+
+(* dst := a + b, element-wise. Returns 0 (unit is not a valid function
+   return type in the current grammar; sum of dst entries is read
+   from the driver function instead). *)
+fun vec_add_into(dst: arr[int, 4], a: arr[int, 4], b: arr[int, 4]): int =
+  for i = 0 to 4 do
+    dst[i] := a[i] + b[i]
+  done;
+  0
+
+(* dst := a * k, element-wise. *)
+fun vec_scale_into(dst: arr[int, 4], a: arr[int, 4], k: int): int =
+  for i = 0 to 4 do
+    dst[i] := a[i] * k
+  done;
+  0
+
+(* Drivers for vec_add_into. Each allocates three 4-element arrays, runs
+   the primitive, and returns the sum of the destination to give the sim
+   a single scalar to read back. *)
+
+fun vec_add_t1(x: int): int =
+  let d = [| 0; 0; 0; 0 |] in
+  let u = [| 1; 2; 3; 4 |] in
+  let v = [| 10; 20; 30; 40 |] in
+  vec_add_into(d, u, v);
+  d[0] + d[1] + d[2] + d[3]
+
+fun vec_add_t2(x: int): int =
+  let d = [| 0; 0; 0; 0 |] in
+  let u = [| 0; 0; 0; 0 |] in
+  let v = [| 7; 7; 7; 7 |] in
+  vec_add_into(d, u, v);
+  d[0] + d[1] + d[2] + d[3]
+
+fun vec_add_t3(x: int): int =
+  let d = [| 0; 0; 0; 0 |] in
+  let u = [| 1; 0 - 2; 3; 0 - 4 |] in
+  let v = [| 0 - 5; 6; 0 - 7; 8 |] in
+  vec_add_into(d, u, v);
+  d[0] + d[1] + d[2] + d[3]
+
+(* Drivers for vec_scale_into. *)
+
+fun vec_scale_t1(x: int): int =
+  let d = [| 0; 0; 0; 0 |] in
+  let u = [| 1; 2; 3; 4 |] in
+  vec_scale_into(d, u, 3);
+  d[0] + d[1] + d[2] + d[3]
+
+fun vec_scale_t2(x: int): int =
+  let d = [| 0; 0; 0; 0 |] in
+  let u = [| 10; 20; 30; 40 |] in
+  vec_scale_into(d, u, 0);
+  d[0] + d[1] + d[2] + d[3]
+
+fun vec_scale_t3(x: int): int =
+  let d = [| 0; 0; 0; 0 |] in
+  let u = [| 2; 3; 5; 7 |] in
+  vec_scale_into(d, u, 0 - 2);
+  d[0] + d[1] + d[2] + d[3]

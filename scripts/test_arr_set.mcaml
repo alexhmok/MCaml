@@ -1,0 +1,43 @@
+(* test_arr_set.mcaml — end-to-end test for IArrSet/IArrSetStatic.
+
+   Exercises:
+     - static indexed store:  a[0] := 10
+     - dynamic indexed store: a[i] := expr  (driven by a for loop)
+     - matrix static store:   m[0, 1] := v
+     - read-after-write in the same function
+     - the new <id>_set macro helper emission + sim handling *)
+
+(* All-constant indices → lowers to IArrSetStatic only. Expected: 100. *)
+fun set_test(x: int): int =
+  let a = [| 0; 0; 0; 0 |] in
+  a[0] := 10;
+  a[1] := 20;
+  a[2] := 30;
+  a[3] := 40;
+  a[0] + a[1] + a[2] + a[3]
+
+(* Dynamic index via for loop. Writes a[i] := (i+1)*10.
+   Expected: 10 + 20 + 30 + 40 = 100. *)
+fun set_dyn(x: int): int =
+  let a = [| 0; 0; 0; 0 |] in
+  for i = 0 to 4 do
+    a[i] := (i + 1) * 10
+  done;
+  a[0] + a[1] + a[2] + a[3]
+
+(* Read-modify-write: a[i] := a[i] + 1. Expected: 1+2+3+4 = 10. *)
+fun set_rmw(x: int): int =
+  let a = [| 0; 1; 2; 3 |] in
+  for i = 0 to 4 do
+    a[i] := a[i] + 1
+  done;
+  a[0] + a[1] + a[2] + a[3]
+
+(* Matrix static store. Expected: 7. *)
+fun set_mat(x: int): int =
+  let m = [| [| 0; 0 |]; [| 0; 0 |] |] in
+  m[0, 0] := 1;
+  m[0, 1] := 2;
+  m[1, 0] := 3;
+  m[1, 1] := 1;
+  m[0, 0] + m[0, 1] + m[1, 0] + m[1, 1]

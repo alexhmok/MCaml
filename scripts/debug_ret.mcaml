@@ -1,0 +1,20 @@
+fun fib_tco(n: int, a: int, b: int): int =
+  if n = 0 then
+    a
+  else
+    if n = 1 then
+      b
+    else
+      fib_tco(n - 1, b, a + b)
+
+fun test_trace(n: int): int =
+  let result = fib_tco(n, 0, 1) in (
+    (* DEBUG: Force a check on the global return register immediately *)
+    cmd! "scoreboard players operation debug_res vars = $ret vars";
+    
+    if result = 55 then
+      cmd! "say PASSED"
+    else
+      cmd! "say FAILED";
+    result
+  )

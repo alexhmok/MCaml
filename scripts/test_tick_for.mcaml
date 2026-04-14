@@ -1,0 +1,25 @@
+(* test_tick_for.mcaml — confirms for-loop tick guarding.
+
+   `for_lift.ml` rewrites every `for` into a synthesized top-level
+   tail-recursive helper. Those helpers carry self-TTail terminators
+   exactly like hand-written loops, so tick_guard.ml's "every function
+   with a self-TTail gets a guard" rule covers them with no special
+   case. main_for sums 1..30 via a for loop, then squares it via
+   another for loop, then stores the difference of the two in a third
+   for loop's accumulator. Expected: sum = 465, sum_sq = 9455,
+   diff_loop returns 9455 - 465 = 8990. *)
+
+fun main_for(): int =
+  let s = ref 0 in
+  for i = 1 to 31 do
+    s := !s + i
+  done;
+  let sq = ref 0 in
+  for i = 1 to 31 do
+    sq := !sq + i * i
+  done;
+  let diff = ref 0 in
+  for i = 0 to 1 do
+    diff := !sq - !s
+  done;
+  !diff

@@ -1,0 +1,80 @@
+(* dce.ml — Dead code elimination using liveness.
+
+   Part of the M3a local optimization set. Runs liveness once, then walks
+   each block and drops any instruction whose def is not live after the
+   instruction, provided the instruction has no side effects. Self-copies
+   (ICopy(d, d)) are dropped unconditionally — they are structurally
+   no-ops regardless of liveness.
+
+   Liveness handles guard-chain pinning internally, so DCE does not need
+   to worry about guard conds being removed: any vreg appearing in a
+   block's guards list is live at every instruction in that block.
+
+   Reserved vregs ($ret, $arr_result, param_N) are never removed —
+   their writes have extrinsic meaning (read by caller/callee). *)
+
+open Cfg
+
+(* Mirror of regalloc_cfg.ml / liveness.ml's is_reserved, kept local for
+   module decoupling. *)
+let is_reserved (n : string) : bool =
+  n = "$ret" || n = "$arr_result" || n = "$tick_iters" ||
+  (String.length n >= 5 && String.sub n 0 5 = "$ref_") ||
+  (String.length n > 6
+   && String.sub n 0 6 = "param_"
+   && let suf = String.sub n 6 (String.length n - 6) in
+      suf <> "" && String.for_all (function '0'..'9' -> true | _ -> false) suf)
+
+(* An instruction is "side-effecting" if removing it would change program
+   behavior even when its def is not live downstream.
+
+   - ICommand: raw Minecraft command, arbitrary world effect.
+   - ICall:    function may have side effects regardless of result use.
+   - IArrLitConst / IArrLitDyn: write to storage (observable).
+   - IArrGet / IArrGetStatic: conservatively kept — they read storage and
+     have a hidden $arr_result write documented in cfg.ml. A dedicated
+     dead-store / dead-load pass for arrays is M4+.
+
+   Safely removable when dead: IConst, ICopy, IBinOp. *)
+let is_side_effecting (i : instr) : bool =
+  match i with
+  | ICommand _ | ICall _
+  | IArrLitConst _ | IArrLitDyn _
+  | IArrGetStatic _ | IArrGet _
+  | IArrSetStatic _ | IArrSet _ -> true
+  | IConst _ | ICopy _ | IBinOp _ -> false
+
+let run (cfg : cfg_func) : bool =
+  let liveness = Liveness.analyze cfg in
+  let changed = ref false in
+  Array.iter (fun (b : block) ->
+    let per_instr = liveness.Liveness.per_instr.(b.label) in
+    (* per_instr has length (num_instrs + 1); per_instr.(i) for
+       i in [0, num_instrs-1] is the set of vregs live AFTER instr i
+       finishes. That is exactly the "is the def used downstream?"
+       question we want to ask. *)
+    let kept = ref [] in
+    List.iteri (fun i instr ->
+      let drop =
+        match instr with
+        | ICopy (d, s) when d = s ->
+            (* Self-copies are structural no-ops: they write the same
+               value they read. Always safe to remove, regardless of
+               what liveness says about d. *)
+            true
+        | _ ->
+            if is_side_effecting instr then false
+            else begin
+              match instr_def instr with
+              | None -> false
+              | Some d ->
+                  if is_reserved d then false
+                  else not (Liveness.VSet.mem d per_instr.(i))
+            end
+      in
+      if drop then changed := true
+      else kept := instr :: !kept
+    ) b.instrs;
+    b.instrs <- List.rev !kept
+  ) cfg.blocks;
+  !changed

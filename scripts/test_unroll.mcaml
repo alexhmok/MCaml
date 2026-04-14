@@ -1,0 +1,8 @@
+(* test_unroll.mcaml — M4 §3 v1: full unroll of constant-trip for loops.
+   Expected: sum_const = 1 + 2 + 3 + 4 + 5 = 15. *)
+fun sum_const(): int =
+  let r = ref 0 in
+  for i = 1 to 6 do
+    r := !r + i
+  done;
+  !r

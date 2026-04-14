@@ -1,0 +1,225 @@
+(* demo_classifier.mcaml — end-to-end MCaml demo for Minecraft.
+
+   A 3-class integer scoring pipeline ("who wins this batch") built on the
+   stage-1 primitives: vec_add_into, vec_scale_into, dot. The shape is
+   deliberately the same one we'll need later for microGPT inference:
+
+     preprocess(sample) = scale * (sample + bias)
+     score_k(x)         = dot(x, W_k)
+     classify(x)        = argmax over k of score_k(x)
+     batch_run()        = iterate over a 4-sample batch, classify each,
+                          accumulate per-class vote counts, return a
+                          deterministic fingerprint so the caller can
+                          verify end-to-end output.
+
+   Why this exercises tick scheduling:
+
+     - Each for-loop iteration classifies four samples. Per sample the
+       pipeline dispatches score_one three times (once per class weight
+       vector); each score_one runs preprocess (vec_add_into +
+       vec_scale_into) and one dot call. Four samples × three classes =
+       12 full pipeline evaluations per iter.
+
+     - Measured expansion (counting inline commands in every
+       monomorphized clone reachable from the for-helper's body):
+       ~1700 Minecraft commands per iteration. The default
+       MCAML_LOOP_ITER_LIMIT=1024 would therefore pack ~1.7 million
+       commands into a single tick — ~26x the 65 536 per-tick chain
+       ceiling a single /function invocation can execute.
+
+     - The compiler's Phase-5 tick_guard prepends a per-iteration budget
+       guard to every TCO'd self-loop entry, yielding via `schedule … 1t`
+       + `return 0` once the counter hits LOOP_ITER_LIMIT. Next tick the
+       scheduled continuation resumes with the loop's in-flight params
+       (because params live on the [vars] scoreboard and scoreboard state
+       persists across ticks). To fit under the 65k/tick ceiling on this
+       particular loop, compile with a tighter bound:
+
+         MCAML_LOOP_ITER_LIMIT=30 ./mcaml -o build < demo_classifier.mcaml
+
+       30 iters * ~1700 commands ≈ 51 000 commands per tick, safely under
+       the Minecraft ceiling. With 500 iterations total the loop spans
+       ~17 ticks. Bump to 60 iters/tick for faster throughput if your
+       server can sustain it.
+
+     - tick_split (Phase 4) is wired in too but doesn't fire on this
+       program: the heavy work lives behind the for-helper's tail
+       recursion, which tick_guard owns. tick_split only fans out
+       straight-line .mcfunction files that exceed MCAML_TICK_BUDGET
+       (default 50 000); the largest file here is ~130 lines.
+
+   Run in Minecraft:
+
+     /function mcaml:main
+     /scoreboard players get $ret vars         # fingerprint
+     /scoreboard players get $ref_votes_a_N vars
+     /scoreboard players get $ref_votes_b_N vars
+     /scoreboard players get $ref_votes_c_N vars
+
+   (The _N suffix is alpha's globally-unique rename; inspect the emitted
+   main.mcfunction to find the actual slot names, or just read $ret.) *)
+
+(* -------- stage-1 primitives --------
+
+   MCaml has no module / import system: the primitive definitions have
+   to live in the same compilation unit as the caller. These are copied
+   verbatim from scripts/primitives_v1.mcaml; change them there first,
+   then sync here. *)
+
+fun dot(a: arr[int, 4], b: arr[int, 4]): int =
+  let acc = ref 0 in
+  for i = 0 to 4 do
+    acc := !acc + a[i] * b[i]
+  done;
+  !acc
+
+fun vec_add_into(dst: arr[int, 4], a: arr[int, 4], b: arr[int, 4]): int =
+  for i = 0 to 4 do
+    dst[i] := a[i] + b[i]
+  done;
+  0
+
+fun vec_scale_into(dst: arr[int, 4], a: arr[int, 4], k: int): int =
+  for i = 0 to 4 do
+    dst[i] := a[i] * k
+  done;
+  0
+
+(* -------- pipeline helpers --------
+
+   These are top-level functions. They take arrays as parameters, which
+   makes them templates under MCaml's current language surface —
+   monomorphize will clone each per distinct (aid0, aid1, …) at every
+   call site. That's fine: there are only a handful of aid combinations
+   in the whole program because main reuses [bias] and the three class
+   weights across every call. *)
+
+(* dst := k * (src + bias). [vec_scale_into] is called with dst as both
+   destination and source, which works because the compiled body reads
+   each element before writing it back. *)
+fun preprocess(dst: arr[int, 4], src: arr[int, 4], bias: arr[int, 4], k: int): int =
+  vec_add_into(dst, src, bias);
+  vec_scale_into(dst, dst, k);
+  0
+
+(* Single-class score. Allocates a compile-time scratch array (one aid
+   per source occurrence, regardless of call count), runs preprocessing,
+   returns dot(scratch, w). *)
+fun score_one(
+      sample: arr[int, 4],
+      bias: arr[int, 4],
+      k: int,
+      w: arr[int, 4]): int =
+  let scratch = [| 0; 0; 0; 0 |] in
+  preprocess(scratch, sample, bias, k);
+  dot(scratch, w)
+
+(* -------- main entry point -------- *)
+
+fun main(x: int): int =
+  (* Reset the global tick_guard counter. $tick_iters is a single
+     shared scoreboard slot across every guarded loop in the program,
+     and scoreboard state persists across /function invocations — so a
+     stale value from a previous run can cause the for-helper below to
+     yield on its very first iteration, leaving the vote refs at zero
+     and the fingerprint computed as 0. Zeroing it at the top of main
+     makes the loop start clean on every entry. *)
+  cmd! "scoreboard players set $tick_iters vars 0";
+
+  (* Four sample vectors, one bias vector, three class weight vectors.
+     Every [let x = [| … |]] allocates a fresh compile-time aid. *)
+  let sample0 = [| 3; 7; 2; 5 |] in
+  let sample1 = [| 10; 0 - 2; 4; 1 |] in
+  let sample2 = [| 0 - 1; 5; 8; 0 - 3 |] in
+  let sample3 = [| 6; 6; 0; 0 - 4 |] in
+
+  let bias = [| 1; 0 - 1; 2; 0 |] in
+  let w_a  = [| 2; 3; 0 - 1; 4 |] in
+  let w_b  = [| 0 - 2; 1; 5; 0 - 1 |] in
+  let w_c  = [| 1; 1; 1; 1 |] in
+
+  (* Vote accumulators. Refs lower to fixed scoreboard slot names of the
+     form $ref_<alpha-renamed-binder>, so the for-loop body (which
+     for_lift hoists into a tail-recursive helper) can reference them
+     directly by name without needing them as helper parameters. Survive
+     every tick_guard yield point because scoreboard state persists
+     across ticks. *)
+  let votes_a = ref 0 in
+  let votes_b = ref 0 in
+  let votes_c = ref 0 in
+  (* Persistent result slot. $ret is clobbered on every function-call
+     exit (every for_lift helper writes $ret := 0 as its unit return
+     value, including the scheduled continuations that resume this
+     loop across tick boundaries). A ref lowers to a stable scoreboard
+     slot [$ref_result_N] that no function touches except via explicit
+     user code, so it survives those clobbers. The slot is updated on
+     every iteration, so whichever iteration runs last writes the
+     cumulative fingerprint. *)
+  let result = ref 0 in
+
+  (* Debug tracer scoreboards. Each `cmd!` writes a persistent marker;
+     read back with /scoreboard players get $dbg_* after running main
+     to see how far execution reached. *)
+  cmd! "scoreboard players set $dbg_main_entered vars 1";
+  cmd! "scoreboard players set $dbg_before_loop vars 1";
+
+  (* Batch loop. 500 iterations × 4 samples × (1 preprocess + 3 dots) =
+     6000 full primitive pipelines per run, well above any single-tick
+     command budget. See the header comment for the recommended
+     MCAML_LOOP_ITER_LIMIT. *)
+  for iter = 0 to 500 do
+    (* --- sample 0, scale = 2 --- *)
+    let a0 = score_one(sample0, bias, 2, w_a) in
+    let b0 = score_one(sample0, bias, 2, w_b) in
+    let c0 = score_one(sample0, bias, 2, w_c) in
+    if a0 >= b0 then
+      if a0 >= c0 then votes_a := !votes_a + 1
+      else votes_c := !votes_c + 1
+    else
+      if b0 >= c0 then votes_b := !votes_b + 1
+      else votes_c := !votes_c + 1;
+
+    (* --- sample 1, scale = 3 --- *)
+    let a1 = score_one(sample1, bias, 3, w_a) in
+    let b1 = score_one(sample1, bias, 3, w_b) in
+    let c1 = score_one(sample1, bias, 3, w_c) in
+    if a1 >= b1 then
+      if a1 >= c1 then votes_a := !votes_a + 1
+      else votes_c := !votes_c + 1
+    else
+      if b1 >= c1 then votes_b := !votes_b + 1
+      else votes_c := !votes_c + 1;
+
+    (* --- sample 2, scale = 2 --- *)
+    let a2 = score_one(sample2, bias, 2, w_a) in
+    let b2 = score_one(sample2, bias, 2, w_b) in
+    let c2 = score_one(sample2, bias, 2, w_c) in
+    if a2 >= b2 then
+      if a2 >= c2 then votes_a := !votes_a + 1
+      else votes_c := !votes_c + 1
+    else
+      if b2 >= c2 then votes_b := !votes_b + 1
+      else votes_c := !votes_c + 1;
+
+    (* --- sample 3, scale = 3 --- *)
+    let a3 = score_one(sample3, bias, 3, w_a) in
+    let b3 = score_one(sample3, bias, 3, w_b) in
+    let c3 = score_one(sample3, bias, 3, w_c) in
+    if a3 >= b3 then
+      if a3 >= c3 then votes_a := !votes_a + 1
+      else votes_c := !votes_c + 1
+    else
+      if b3 >= c3 then votes_b := !votes_b + 1
+      else votes_c := !votes_c + 1;
+
+    (* Recompute the fingerprint every iteration into the persistent
+       result ref. The last iteration of the loop writes the cumulative
+       value; scheduled continuations reading their own partial refs
+       will stomp the previous iteration's write but the very last one
+       is the correct final answer. *)
+    result := !votes_a * 1 + !votes_b * 1000 + !votes_c * 1000000
+  done;
+
+  cmd! "scoreboard players set $dbg_after_loop vars 1";
+  cmd! "scoreboard players set $dbg_fp_computed vars 1";
+  !result

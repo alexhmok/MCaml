@@ -1,0 +1,54 @@
+(* stress_nested_if.mcaml — regression test for the KIf cond liveness trap.
+
+   This program is specifically shaped to catch the M2 bug class where
+   the cond variable of an if-then-else is treated as dead inside its own
+   branches. Codegen wraps every instruction in each branch with
+   `execute if/unless score <cond> matches 1 run ...`, so cond must stay
+   live across the entire guarded sub-block. If liveness lets regalloc
+   reclaim cond's slot mid-branch, later computations in the branch
+   write to cond's old slot, and the runtime guards then check a slot
+   that holds something else — the branches execute incorrectly.
+
+   The stress pattern:
+   - Multiple nested if-then-else (3 levels) to exercise guard-chain
+     composition with 2+ live conds simultaneously.
+   - Enough locals in each leaf branch that regalloc MUST reuse at least
+     one slot, forcing the allocator to make a decision about the cond.
+   - A leaf expression that depends on arguments so the compiler can't
+     constant-fold the whole thing away.
+
+   Expected values are known-correct Python-equivalents. *)
+
+fun nested_stress(n: int, a: int, b: int): int =
+  if n > 0 then
+    if n > 10 then
+      (* Many locals forcing slot reuse under a 2-cond guard chain:
+         [(outer_cond, Pos); (middle_cond, Pos)]. *)
+      let x = a + b in
+      let y = x * n in
+      let z = y - a in
+      let w = z + b in
+      w + 1000
+    else
+      let p = a - b in
+      let q = p * n in
+      let r = q + a in
+      r + 100
+  else
+    if n < 0 - 10 then
+      let s = b - a in
+      let t = s * n in
+      let u = t + b in
+      u + 0 - 100
+    else
+      let v = a * b in
+      let w = v + n in
+      w + 0 - 10
+
+fun pure_nested(n: int): int =
+  if n > 0 then
+    if n > 5 then
+      if n > 50 then 4
+      else 3
+    else 2
+  else 1

@@ -1,0 +1,52 @@
+(* test_all.mcaml
+   End-to-end smoke test for the MCaml compiler.
+   Each function targets a specific stage of the pipeline. *)
+
+(* ---- 1. Arithmetic, let, variable shadowing (alpha conversion) ---- *)
+fun arith(a: int, b: int): int =
+  let x = a + b in
+  let y = a - b in
+  let z = x * y in
+  let x = z / 2 in   (* shadows outer x — forces alpha rename *)
+  x + y
+
+(* ---- 2. Comparisons + boolean short-circuit (&&, ||) ---- *)
+fun in_range(n: int): bool =
+  let lo = 0 in
+  let hi = 100 in
+  n >= lo && n <= hi && n != 42 || n = 999
+
+(* ---- 3. if/else, sequencing, raw commands, nested ifs ---- *)
+fun classify(n: int): int =
+  cmd! "say classifying";
+  (if n < 0 then
+     (cmd! "say negative"; 0 - 1)
+   else
+     (if n = 0 then
+        (cmd! "say zero"; 0)
+      else
+        (cmd! "say positive"; 1)))
+
+(* ---- 4. Non-tail recursion: two recursive calls in a BinOp ---- *)
+fun fib(n: int): int =
+  if n <= 1 then
+    n
+  else
+    fib(n - 1) + fib(n - 2)
+
+(* ---- 5. Tail-recursive accumulator — must lower to KLoop ---- *)
+fun sum_to(n: int, acc: int): int =
+  if n <= 0 then
+    acc
+  else
+    sum_to(n - 1, acc + n)
+
+(* ---- 6. Cross-function calls + pipe operator ---- *)
+fun driver(seed: int): unit =
+  let s = seed |> sum_to(0) in     (* pipe sugar: sum_to(seed, 0) *)
+  let f = fib(seed) in
+  let c = classify(seed) in
+  if s > 0 && f >= 0 && c >= 0 - 1 then
+    cmd! "say all checks passed"
+  else
+    cmd! "say checks failed"

@@ -1,0 +1,22 @@
+{
+  "name": "vscode-mcaml",
+  "displayName": "MCaml",
+  "description": "Syntax highlighting for MCaml, a small ML-like language that compiles to Minecraft .mcfunction files.",
+  "version": "0.1.0",
+  "publisher": "mcaml",
+  "engines": { "vscode": "^1.60.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [{
+      "id": "mcaml",
+      "aliases": ["MCaml", "mcaml"],
+      "extensions": [".mcaml"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "mcaml",
+      "scopeName": "source.mcaml",
+      "path": "./syntaxes/mcaml.tmLanguage.json"
+    }]
+  }
+}

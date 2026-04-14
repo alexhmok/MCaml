@@ -1,0 +1,22 @@
+(* Debugging Fibonacci *)
+fun fib_debug(n: int, a: int, b: int): int =
+  
+  (* Print current N to chat so we can trace execution *)
+  if n > 0 then cmd! "say Loop step..." else 0;
+  
+  if n = 0 then
+    a
+  else
+    if n = 1 then
+      b
+    else
+      fib_debug(n - 1, b, a + b)
+
+fun run_debug(n: int): int =
+  let res = fib_debug(n, 0, 1) in (
+    if res = 55 then
+      cmd! "say CORRECT: 55"
+    else
+      cmd! "say WRONG RESULT";
+    res
+  )

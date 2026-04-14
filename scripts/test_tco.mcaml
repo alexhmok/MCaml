@@ -1,0 +1,6 @@
+fun loop_test(n: int): int =
+  if n <= 0 then
+    let u = cmd! "say TCO Loop Finished!" in
+    0 (* Return 0 to match the "Int" return type of the recursion *)
+  else
+    loop_test(n - 1)

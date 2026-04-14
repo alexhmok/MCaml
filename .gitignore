@@ -1,0 +1,10 @@
+*.cmi
+*.cmo
+*.cmx
+*.o
+*.a
+mcaml
+mcaml_noalloc
+build/
+*.mcfunction
+.DS_Store

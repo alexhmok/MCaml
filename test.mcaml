@@ -1,0 +1,6 @@
+fun test(x: int): int =
+  let y = 5 in
+  if x > y then
+    cmd! "say Bigger"
+  else
+    cmd! "say Smaller"

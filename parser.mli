@@ -1,0 +1,69 @@
+
+(* The type of tokens. *)
+
+type token = 
+  | VAL
+  | T_UNIT
+  | T_SEL
+  | T_POS
+  | T_MAT
+  | T_INT
+  | T_BOOL
+  | T_ARR
+  | TRUE
+  | TO
+  | TIMES
+  | TILDE
+  | THEN
+  | STRING of (string)
+  | SEMICOLON
+  | SELECTOR of (string)
+  | RPAREN
+  | REF
+  | RBRACK
+  | RBRACE
+  | RBAR
+  | PLUS
+  | PIPE
+  | OR
+  | NEQ
+  | MINUS
+  | LT
+  | LPAREN
+  | LET
+  | LEQ
+  | LBRACK
+  | LBRACE
+  | LBAR
+  | INT of (int)
+  | IN
+  | IF
+  | ID of (string)
+  | GT
+  | GEQ
+  | FUN
+  | FOR
+  | FLOAT of (float)
+  | FALSE
+  | EQUAL
+  | EOF
+  | ELSE
+  | DONE
+  | DO
+  | DIV
+  | COMMA
+  | COLON
+  | COLEQ
+  | CMD
+  | CARET
+  | BELOW_SEMI
+  | BANG
+  | AND
+
+(* This exception is raised by the monolithic API functions. *)
+
+exception Error
+
+(* The monolithic API. *)
+
+val prog: (Lexing.lexbuf -> token) -> Lexing.lexbuf -> (Ast.program)

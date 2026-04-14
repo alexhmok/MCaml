@@ -1,0 +1,12 @@
+fun fib(n: int): int =
+  if n <= 1 then 
+    n
+  else 
+    fib(n - 1) + fib(n - 2)
+
+fun check_fib(n: int): unit =
+  let f = fib(n) in
+  if f > 5 && f < 100 then
+    cmd! "say Fib PASSED"
+  else
+    cmd! "say Fib FAILED"

@@ -1,0 +1,46 @@
+(* minecraft_demo.mcaml — in-game showcase for refs, for loops, and
+   first-class array arguments. After compiling, call /function mcaml:demo
+   in-game and watch chat. *)
+
+(* ---- feature 1: first-class array arguments (monomorphization) ---- *)
+fun dot4(a: arr[int, 4], b: arr[int, 4]): int =
+  let r = ref 0 in
+  for i = 0 to 4 do
+    r := !r + a[i] * b[i]
+  done;
+  !r
+
+(* ---- feature 2: for loops + ref accumulation ---- *)
+fun triangle(n: int): int =
+  let r = ref 0 in
+  for i = 1 to n + 1 do
+    r := !r + i
+  done;
+  !r
+
+(* ---- feature 3: refs alone (mutable cells across calls) ---- *)
+fun counter_demo(): int =
+  let c = ref 0 in
+  c := !c + 1;
+  c := !c + 1;
+  c := !c + 1;
+  !c
+
+(* Entry point. $ret holds each function's return immediately after the
+   call, so tellraw can read it directly. *)
+fun demo(): int =
+  cmd! "say === MCaml feature demo ===";
+
+  counter_demo();
+  cmd! "tellraw @a [\"counter_demo()    = \",{\"score\":{\"name\":\"$ret\",\"objective\":\"vars\"}},\"  (expect 3)\"]";
+
+  triangle(10);
+  cmd! "tellraw @a [\"triangle(10)      = \",{\"score\":{\"name\":\"$ret\",\"objective\":\"vars\"}},\"  (expect 55)\"]";
+
+  let u = [| 1; 2; 3; 4 |] in
+  let v = [| 5; 6; 7; 8 |] in
+  dot4(u, v);
+  cmd! "tellraw @a [\"dot4([1..4],[5..8]) = \",{\"score\":{\"name\":\"$ret\",\"objective\":\"vars\"}},\"  (expect 70)\"]";
+
+  cmd! "say === demo complete ===";
+  0

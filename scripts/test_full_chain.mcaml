@@ -1,0 +1,15 @@
+(* test_full_chain.mcaml — M4 climactic test. Length-4 dot product
+   written with first-class array params + for + ref. Pipeline:
+   monomorphize → for_lift → LICM → unroll → SROA → M3a const fold.
+   Expected: main_test = 1*5 + 2*6 + 3*7 + 4*8 = 70. *)
+fun dot(a: arr[int, 4], b: arr[int, 4]): int =
+  let r = ref 0 in
+  for i = 0 to 4 do
+    r := !r + a[i] * b[i]
+  done;
+  !r
+
+fun main_test(): int =
+  let v = [| 1; 2; 3; 4 |] in
+  let w = [| 5; 6; 7; 8 |] in
+  dot(v, w)

@@ -1,0 +1,6 @@
+fun type_fail(x: int): int =
+  let b = true in
+  x + b
+
+fun if_fail(x: int): int =
+  if x then 1 else 0

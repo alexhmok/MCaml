@@ -1,0 +1,66 @@
+(* test_tick_stress.mcaml — stress test for the per-iteration tick guard
+   (tick_guard.ml, plan §1.6).
+
+   Exercises the guard across multiple TCO'd functions, deep recursion,
+   nested non-tail calls, and a top-level driver that combines partial
+   results. With MCAML_LOOP_ITER_LIMIT=10 every loop fires its guard
+   several times, schedules itself for the next tick (modeled as
+   synchronous re-entry by sim.py), and the final answer must still
+   match the closed-form expected value.
+
+   Functions exercised:
+     sum_n(n, acc)         — TCO loop summing 1..n.
+     sum_triangles(k, i, acc) — TCO loop that calls sum_n non-tail per iter.
+                            Tests cross-function tick guards interacting
+                            via the shared $tick_iters slot, plus
+                            save/restore frame balance across schedule
+                            events that fire inside an outer call.
+     sum_evens(i, n, acc)  — TCO loop accumulating 2*i for i in 0..n-1.
+     mul_loop(a, b, acc)   — TCO loop computing a*b by repeated addition.
+     pow2(n, acc)          — TCO loop doubling acc n times to compute 2^n.
+
+   Closed-form expected values:
+     sum_triangles(20, 0, 0) = sum_{i=0..20} i*(i+1)/2 = 20*21*22/6 = 1540
+     sum_evens(0, 20, 0)     = 2 * sum_{i=0..19} i    = 2 * 190     =  380
+     mul_loop(13, 17, 0)     = 13 * 17                              =  221
+     pow2(10, 1)             = 2^10                                 = 1024
+   Total = 1540 + 380 + 221 + 1024 = 3165.
+*)
+
+fun sum_n(n: int, acc: int): int =
+  if n <= 0 then
+    acc
+  else
+    sum_n(n - 1, acc + n)
+
+fun sum_triangles(k: int, i: int, acc: int): int =
+  if i > k then
+    acc
+  else
+    let t = sum_n(i, 0) in
+    sum_triangles(k, i + 1, acc + t)
+
+fun sum_evens(i: int, n: int, acc: int): int =
+  if i >= n then
+    acc
+  else
+    sum_evens(i + 1, n, acc + 2*i)
+
+fun mul_loop(a: int, b: int, acc: int): int =
+  if b <= 0 then
+    acc
+  else
+    mul_loop(a, b - 1, acc + a)
+
+fun pow2(n: int, acc: int): int =
+  if n <= 0 then
+    acc
+  else
+    pow2(n - 1, acc + acc)
+
+fun main(): int =
+  let t = sum_triangles(20, 0, 0) in
+  let e = sum_evens(0, 20, 0) in
+  let m = mul_loop(13, 17, 0) in
+  let p = pow2(10, 1) in
+  t + e + m + p

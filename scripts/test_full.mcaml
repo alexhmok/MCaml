@@ -1,0 +1,107 @@
+(* test_full.mcaml — end-to-end functional test runnable from Minecraft.
+   Exercises every major compiler feature exposed to the user:
+     - arithmetic, let, shadowing (alpha rename)
+     - booleans, comparisons, && / || short-circuit
+     - nested if with cmd! side effects
+     - non-tail recursion (fact)
+     - tail recursion -> KLoop (sum_to)
+     - arrays (static + dynamic index)
+     - matrices (2D index)
+     - cross-function calls (leaf inlining via Inline.run)
+     - multi-site leaf reuse (expect_eq called from every test)
+   Run /function mcaml:main; then /scoreboard players get $ret vars
+   should read 9 (all 9 subtests pass). Each subtest also say's OK/FAIL. *)
+
+(* ---- leaves (inlined at every call site by M3c) ---- *)
+
+fun expect_eq(got: int, want: int): int =
+  if got = want then 1 else 0
+
+fun double(x: int): int = x * 2
+
+(* ---- non-tail recursion: two self-calls compose via BinOp ---- *)
+
+fun fact(n: int): int =
+  if n <= 1 then 1
+  else n * fact(n - 1)
+
+(* ---- tail recursion: lowers to KLoop via TCO ---- *)
+
+fun sum_to(n: int, acc: int): int =
+  if n <= 0 then acc
+  else sum_to(n - 1, acc + n)
+
+(* ---- array + TCO + leaf inlining in the hot loop body ---- *)
+
+fun dot4(i: int, acc: int): int =
+  let a = [| 1; 2; 3; 4 |] in
+  let b = [| 10; 20; 30; 40 |] in
+  if i >= 4 then acc
+  else dot4(i + 1, acc + a[i] * b[i])
+
+(* ---- 2x3 * 3x1 matrix-vector multiply, one cell at a time ---- *)
+
+fun mv_cell(i: int, k: int, acc: int): int =
+  let m = [| [| 1; 2; 3 |]; [| 4; 5; 6 |] |] in
+  let v = [| [| 7 |]; [| 8 |]; [| 9 |] |] in
+  if k >= 3 then acc
+  else mv_cell(i, k + 1, acc + m[i, k] * v[k, 0])
+
+(* ---- nested if + cmd! (side effects preserved through codegen) ---- *)
+
+fun classify(n: int): int =
+  cmd! "say classifying";
+  if n < 0 then
+    (cmd! "say negative"; 0 - 1)
+  else
+    if n = 0 then
+      (cmd! "say zero"; 0)
+    else
+      (cmd! "say positive"; 1)
+
+(* ---- 9 subtests, each compared against a hard-coded expected value ---- *)
+
+fun main(seed: int): int =
+  (* t1: leaf inlining + arith. double(21) = 42. *)
+  let t1 = expect_eq(double(21), 42) in
+  (if t1 = 1 then cmd! "say OK double" else cmd! "say FAIL double");
+
+  (* t2: non-tail recursion. fact(5) = 120. *)
+  let t2 = expect_eq(fact(5), 120) in
+  (if t2 = 1 then cmd! "say OK fact" else cmd! "say FAIL fact");
+
+  (* t3: tail recursion via TCO. sum_to(10, 0) = 55. *)
+  let t3 = expect_eq(sum_to(10, 0), 55) in
+  (if t3 = 1 then cmd! "say OK sum_to" else cmd! "say FAIL sum_to");
+
+  (* t4: array + TCO hot loop. 1*10+2*20+3*30+4*40 = 300. *)
+  let t4 = expect_eq(dot4(0, 0), 300) in
+  (if t4 = 1 then cmd! "say OK dot4" else cmd! "say FAIL dot4");
+
+  (* t5: matrix row 0 dot col 0 = 1*7+2*8+3*9 = 50. *)
+  let t5 = expect_eq(mv_cell(0, 0, 0), 50) in
+  (if t5 = 1 then cmd! "say OK mv0" else cmd! "say FAIL mv0");
+
+  (* t6: matrix row 1 dot col 0 = 4*7+5*8+6*9 = 122. *)
+  let t6 = expect_eq(mv_cell(1, 0, 0), 122) in
+  (if t6 = 1 then cmd! "say OK mv1" else cmd! "say FAIL mv1");
+
+  (* t7: nested if + cmd!, negative branch. *)
+  let t7 = expect_eq(classify(0 - 5), 0 - 1) in
+  (if t7 = 1 then cmd! "say OK classify_neg" else cmd! "say FAIL classify_neg");
+
+  (* t8: nested if, positive branch. classify(42) = 1. *)
+  let t8 = expect_eq(classify(42), 1) in
+  (if t8 = 1 then cmd! "say OK classify_pos" else cmd! "say FAIL classify_pos");
+
+  (* t9: boolean short-circuit && / ||, let shadowing.
+         seed in [0..100] excluding 42, OR seed = 999. Try seed=7. *)
+  let lo = 0 in
+  let hi = 100 in
+  let in_rng = seed >= lo && seed <= hi && seed != 42 || seed = 999 in
+  let lo = hi in  (* shadowing *)
+  let _ = lo in
+  let t9 = if in_rng then 1 else 0 in
+  (if t9 = 1 then cmd! "say OK bool" else cmd! "say FAIL bool");
+
+  t1 + t2 + t3 + t4 + t5 + t6 + t7 + t8 + t9

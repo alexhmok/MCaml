@@ -1,0 +1,15 @@
+(* test_tick_guard.mcaml — exercises the per-iteration tick budget guard
+   inserted by tick_guard.ml. With MCAML_LOOP_ITER_LIMIT=10 the inner
+   loop runs > limit iterations, so the guard fires several times,
+   schedules the next tick, and the simulator (which models schedule as
+   synchronous re-entry) should still produce the correct accumulated
+   sum. Expected: sum_to(50, 0) = 1+2+...+50 = 1275. *)
+
+fun sum_to(n: int, acc: int): int =
+  if n <= 0 then
+    acc
+  else
+    sum_to(n - 1, acc + n)
+
+fun main(): int =
+  sum_to(50, 0)

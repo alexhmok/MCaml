@@ -1,0 +1,23 @@
+fun test_core(input: int): int =
+  let x = 10 in
+  let x = x * 2 in
+  
+  (* Logic Check 1 *)
+  let u1 = (
+    if x > 15 then
+      cmd! "say Scope check PASSED"
+    else
+      cmd! "say Scope check FAILED"
+  ) in
+
+  let y = (x + 5) * 2 in
+  
+  (* Logic Check 2: CHANGED '==' TO '=' *)
+  let u2 = (
+    if y = 50 then
+      cmd! "say Math check PASSED"
+    else
+      cmd! "say Math check FAILED"
+  ) in
+
+  y

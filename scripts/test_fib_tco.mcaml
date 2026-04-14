@@ -1,0 +1,20 @@
+(* Tail-Recursive Fibonacci *)
+fun fib_tco(n: int, a: int, b: int): int =
+  if n = 0 then
+    a
+  else
+    if n = 1 then
+      b
+    else
+      fib_tco(n - 1, b, a + b)
+
+fun test_fib(n: int): int =
+  let result = fib_tco(n, 0, 1) in (
+    if result = 55 then
+      cmd! "say TCO Fib PASSED (Result is 55)"
+    else
+      cmd! "say TCO Fib FAILED";
+      
+    (* This 'result' is now safely inside the parenthesis block *)
+    result
+  )
