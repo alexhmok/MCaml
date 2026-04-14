@@ -22,6 +22,14 @@
 
 open Cfg
 
+(* Phase A: translate knormal's heap_pool tag into the cfg-side enum.
+   The two types are structurally identical; the duplication exists only
+   because build-order puts knormal.ml before cfg.ml. *)
+let pool_of_knormal (p : Knormal.heap_pool) : heap_pool =
+  match p with
+  | Knormal.PoolScratch  -> PoolScratch
+  | Knormal.PoolPermheap -> PoolPermheap
+
 (* ---- builder state ---- *)
 
 type builder = {
@@ -166,13 +174,17 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
       let _ = dest in
       add_instr b.cur (IArrSet (id, idx, v))
 
-  | Knormal.KDynAlloc _
-  | Knormal.KHeapGet  _
-  | Knormal.KHeapSet  _ ->
-      (* Phase A / A5: real lowering lands in the next commit. For now the
-         stubs keep the match exhaustive; knormal never emits these unless
-         a program uses Array.make / array_get / array_set. *)
-      failwith "cfg_build: dynamic-heap lowering (A5) not yet implemented"
+  | Knormal.KDynAlloc (d, p, n) ->
+      let _ = dest in
+      add_instr b.cur (IHeapAlloc (d, pool_of_knormal p, n))
+
+  | Knormal.KHeapGet (d, p, base, idx) ->
+      let _ = dest in
+      add_instr b.cur (IHeapGet (d, pool_of_knormal p, base, idx))
+
+  | Knormal.KHeapSet (p, base, idx, v) ->
+      let _ = dest in
+      add_instr b.cur (IHeapSet (pool_of_knormal p, base, idx, v))
 
 (* ---- finalization: reverse instrs, populate preds ---- *)
 

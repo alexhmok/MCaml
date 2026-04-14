@@ -44,7 +44,7 @@ work.
 - [x] A2. Runtime layout: `mcaml:scratch cells`, `mcaml:permheap cells`, bump counters
 - [x] A3. IR: `IHeapAlloc`/`IHeapGet`/`IHeapSet` in `cfg.ml`
 - [x] A4. knormal lowering for `Array.make` / dynamic access
-- [ ] A5. cfg_build emits new IR ops
+- [x] A5. cfg_build emits new IR ops
 - [ ] A6. codegen_helpers: shared `scratch_get`/`scratch_set`/`permheap_*` macro helpers
 - [ ] A7. codegen_cfg: lowering for the three new ops
 - [ ] A8. Allocator init lines in `init.mcfunction` (via `tools/pack_datapack.py`)
