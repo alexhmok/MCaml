@@ -82,6 +82,19 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
         let idx' = rw !m c idx in
         let v' = rw !m c v in
         if idx' = idx && v' = v then i else IArrSet (id, idx', v')
+    | IHeapAlloc (d, p, n) ->
+        let n' = rw !m c n in
+        if n' = n then i else IHeapAlloc (d, p, n')
+    | IHeapGet (d, p, b, idx) ->
+        let b' = rw !m c b in
+        let idx' = rw !m c idx in
+        if b' = b && idx' = idx then i else IHeapGet (d, p, b', idx')
+    | IHeapSet (p, b, idx, v) ->
+        let b' = rw !m c b in
+        let idx' = rw !m c idx in
+        let v' = rw !m c v in
+        if b' = b && idx' = idx && v' = v then i
+        else IHeapSet (p, b', idx', v')
   in
   (* Now update the map based on the def of the (rewritten) instruction. *)
   (match i' with
@@ -117,7 +130,12 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
        if not (is_reserved d) then m := kill_def !m d
    | IArrGet (d, _, _) ->
        if not (is_reserved d) then m := kill_def !m d
-   | IArrSetStatic _ | IArrSet _ -> ());
+   | IArrSetStatic _ | IArrSet _ -> ()
+   | IHeapAlloc (d, _, _) ->
+       if not (is_reserved d) then m := kill_def !m d
+   | IHeapGet (d, _, _, _) ->
+       if not (is_reserved d) then m := kill_def !m d
+   | IHeapSet _ -> ());
   (i', !c)
 
 (* Rewrite uses within a terminator. *)

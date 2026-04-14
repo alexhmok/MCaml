@@ -41,7 +41,11 @@ let is_side_effecting (i : instr) : bool =
   | ICommand _ | ICall _
   | IArrLitConst _ | IArrLitDyn _
   | IArrGetStatic _ | IArrGet _
-  | IArrSetStatic _ | IArrSet _ -> true
+  | IArrSetStatic _ | IArrSet _
+  (* Dynamic-heap ops are all side-effecting per §3.7: IHeapAlloc bumps
+     the pool counter, IHeapSet writes NBT, IHeapGet mirrors IArrGet's
+     hidden $arr_result write through its macro helper. None may be DCE'd. *)
+  | IHeapAlloc _ | IHeapGet _ | IHeapSet _ -> true
   | IConst _ | ICopy _ | IBinOp _ -> false
 
 let run (cfg : cfg_func) : bool =

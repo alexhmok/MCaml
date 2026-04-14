@@ -132,6 +132,11 @@ let specialize_cfg
     | IArrGet (d, id, idx) -> IArrGet (v d, rewrite_aid id, v idx)
     | IArrSetStatic (id, k, vr) -> IArrSetStatic (rewrite_aid id, k, v vr)
     | IArrSet (id, idx, vr) -> IArrSet (rewrite_aid id, v idx, v vr)
+    (* Dynamic-heap ops: rewrite operand vregs, pool enum is opaque.
+       Monomorphization only touches static-array aid sentinels. *)
+    | IHeapAlloc (d, p, n) -> IHeapAlloc (v d, p, v n)
+    | IHeapGet (d, p, b, idx) -> IHeapGet (v d, p, v b, v idx)
+    | IHeapSet (p, b, idx, vr) -> IHeapSet (p, v b, v idx, v vr)
   in
   let rewrite_term (t : terminator) : terminator =
     let v = rewrite_param_vreg in

@@ -122,6 +122,15 @@ let collect (cfg : cfg_func) : (aid, info) Hashtbl.t =
        | ICopy (_, s) -> note_use_vreg s
        | IBinOp (_, _, a, b') -> note_use_vreg a; note_use_vreg b'
        | ICall (_, _, args) -> List.iter note_use_vreg args
+       (* Dynamic-heap ops: operand vregs flow through the SROA
+          "pseudo-array handle" escape check. They never reference an aid,
+          so no info_for bookkeeping — only note_use_vreg to stop the
+          analyzer from mistaking a handle-valued vreg for an escaping
+          pseudo-aid carrier. *)
+       | IHeapAlloc (_, _, n) -> note_use_vreg n
+       | IHeapGet (_, _, b_vr, idx) -> note_use_vreg b_vr; note_use_vreg idx
+       | IHeapSet (_, b_vr, idx, v) ->
+           note_use_vreg b_vr; note_use_vreg idx; note_use_vreg v
        | IConst _ | ICommand _ -> ());
     ) b.instrs
   ) cfg.blocks;
@@ -190,6 +199,9 @@ let aids_touched_by (other_cfg : cfg_func) : (aid, unit) Hashtbl.t =
        | ICopy (_, s) -> note_pseudo s
        | IBinOp (_, _, a, b') -> note_pseudo a; note_pseudo b'
        | ICall (_, _, args) -> List.iter note_pseudo args
+       (* Dynamic-heap ops never carry a pseudo aid or an aid operand;
+          they're untracked by the escape analysis. *)
+       | IHeapAlloc _ | IHeapGet _ | IHeapSet _ -> ()
        | IConst _ | ICommand _ -> ())
     ) b.instrs
   ) other_cfg.blocks;

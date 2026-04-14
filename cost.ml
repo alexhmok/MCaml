@@ -51,6 +51,11 @@ let estimate (i : instr) : int =
   | IArrGet _                   -> 3
   | IArrSetStatic _             -> 1
   | IArrSet _                   -> 3
+  (* Dynamic-heap ops per §5.3–5.5. Sizes for constant-n alloc depend
+     on n (n append lines); this is the conservative per-iteration cost. *)
+  | IHeapAlloc _                -> 3
+  | IHeapGet _                  -> 5
+  | IHeapSet _                  -> 6
 
 (* Terminator cost. [TTail] lowers to [len(args)] param renames plus
    one [function mcaml:<f>] dispatch. The other terminators are

@@ -26,6 +26,13 @@ type aid   = string
 
 type polarity = Pos | Neg
 
+(* Phase A (dynamic memory): dynamic arrays live in one of two flat-int
+   storage pools distinct from the per-aid static array storage. The pool
+   tag is an opaque enum to every existing pass (copy_prop/inline/unroll/
+   regalloc/monomorphize only rewrite the vreg operands, not the pool).
+   PoolConspool is reserved for Phase B; do not use it yet. *)
+type heap_pool = PoolScratch | PoolPermheap
+
 type instr =
   | IConst        of vreg * int
   | ICopy         of vreg * vreg
@@ -38,6 +45,11 @@ type instr =
   | IArrGet       of vreg * aid * vreg
   | IArrSetStatic of aid * int * vreg      (* storage[aid][k] := val, side-effecting *)
   | IArrSet       of aid * vreg * vreg     (* storage[aid][idx] := val, side-effecting *)
+  (* Phase A dynamic heap ops. Side-effecting (bump counter / NBT write);
+     DCE and CSE must leave them alone. IHeapGet reads NBT, mirrors IArrGet. *)
+  | IHeapAlloc    of vreg * heap_pool * vreg           (* d = pool_next; pool_next += size *)
+  | IHeapGet      of vreg * heap_pool * vreg * vreg    (* d := pool[base + idx] *)
+  | IHeapSet      of heap_pool * vreg * vreg * vreg    (* pool[base + idx] := v, side-effecting *)
 
 type terminator =
   | TRet
@@ -131,6 +143,9 @@ let instr_def (i : instr) : vreg option =
   | IArrGet (d, _, _)       -> Some d
   | IArrSetStatic _         -> None
   | IArrSet _               -> None
+  | IHeapAlloc (d, _, _)    -> Some d
+  | IHeapGet (d, _, _, _)   -> Some d
+  | IHeapSet _              -> None
 
 (* Vregs read by an instruction. Does NOT include guard-chain pinning —
    that's applied by liveness as an augmentation, not an instruction
@@ -149,6 +164,9 @@ let instr_uses (i : instr) : vreg list =
   | IArrGet (_, _, idx)     -> [idx]
   | IArrSetStatic (_, _, v) -> [v]
   | IArrSet (_, idx, v)     -> [idx; v]
+  | IHeapAlloc (_, _, n)    -> [n]
+  | IHeapGet (_, _, b, i)   -> [b; i]
+  | IHeapSet (_, b, i, v)   -> [b; i; v]
 
 (* ---- debug dump ---- *)
 
@@ -179,6 +197,15 @@ let string_of_instr (i : instr) : string =
   | IArrGet (d, id, idx) -> Printf.sprintf "%s := %s[%s]" d id idx
   | IArrSetStatic (id, k, v) -> Printf.sprintf "%s[%d] := %s" id k v
   | IArrSet (id, idx, v) -> Printf.sprintf "%s[%s] := %s" id idx v
+  | IHeapAlloc (d, p, n) ->
+      Printf.sprintf "%s := halloc[%s](%s)" d
+        (match p with PoolScratch -> "scratch" | PoolPermheap -> "permheap") n
+  | IHeapGet (d, p, b, i) ->
+      Printf.sprintf "%s := hget[%s](%s + %s)" d
+        (match p with PoolScratch -> "scratch" | PoolPermheap -> "permheap") b i
+  | IHeapSet (p, b, i, v) ->
+      Printf.sprintf "hset[%s](%s + %s) := %s"
+        (match p with PoolScratch -> "scratch" | PoolPermheap -> "permheap") b i v
 
 let string_of_term (t : terminator) : string =
   match t with

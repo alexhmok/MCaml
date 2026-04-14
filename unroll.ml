@@ -150,6 +150,9 @@ let rename_instr (body_defs : (vreg, unit) Hashtbl.t) (prefix : string) (i : ins
   | IArrGet (d, id, idx) -> IArrGet (r d, id, r idx)
   | IArrSetStatic (id, k, v) -> IArrSetStatic (id, k, r v)
   | IArrSet (id, idx, v) -> IArrSet (id, r idx, r v)
+  | IHeapAlloc (d, p, n) -> IHeapAlloc (r d, p, r n)
+  | IHeapGet (d, p, b, idx) -> IHeapGet (r d, p, r b, r idx)
+  | IHeapSet (p, b, idx, v) -> IHeapSet (p, r b, r idx, r v)
 
 (* Detect a v1 unrollable shape. Returns
    [Some (header, body, exit, loop_var)] on success. The loop_var is the

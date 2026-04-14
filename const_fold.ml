@@ -163,6 +163,13 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
        | Some k -> (IArrSetStatic (id, k, v), m, true)
        | None -> (i, m, false))
 
+  (* Dynamic-heap ops: kill the dest in the const map (the value is read
+     from NBT at runtime, not knowable here). No static-variant rewrite
+     in A3 — the plan lists this as optional in §6. *)
+  | IHeapAlloc (d, _, _) -> (i, kill m d, false)
+  | IHeapGet (d, _, _, _) -> (i, kill m d, false)
+  | IHeapSet _ -> (i, m, false)
+
 let run (cfg : cfg_func) : bool =
   let changed = ref false in
   Array.iter (fun (b : block) ->
