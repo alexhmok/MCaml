@@ -195,7 +195,14 @@ let rec infer env e =
        | TList TInt -> TList TInt
        | _ -> raise (Error ":: tail must be a list of int"))
 
-  | Region e -> infer env e
+  | Region (tr, e) ->
+      (* Infer the body's type and write it into the shared ref so
+         knormal can read it at normalize time. §C2: v1 accepts every
+         representable return type and relies on C5's per-type deep-
+         copy walker to make it correct — no escape check here. *)
+      let ty = infer env e in
+      tr := ty;
+      ty
 
   | For (i, lo, hi, body) ->
       if infer env lo <> TInt then raise (Error "for: lo must be int");

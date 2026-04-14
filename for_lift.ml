@@ -86,7 +86,7 @@ let rec free_vars (bound : S.t) (e : expr) : S.t =
            (free_vars (S.add i bound) body))
   | Nil -> S.empty
   | Cons (h, t) -> S.union (free_vars bound h) (free_vars bound t)
-  | Region e -> free_vars bound e
+  | Region (_, e) -> free_vars bound e
 
 (* Walk an expression carrying a type env. Returns (new_expr, extra_defs). *)
 let rec walk (parent : string) (env : typ M.t) (e : expr)
@@ -202,9 +202,9 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
       let (h', d1) = walk parent env h in
       let (t', d2) = walk parent env t in
       (Cons (h', t'), d1 @ d2)
-  | Region e ->
+  | Region (tr, e) ->
       let (e', d) = walk parent env e in
-      (Region e', d)
+      (Region (tr, e'), d)  (* share tr *)
   | Int _ | Float _ | Bool _ | Str _ | Selector _ | Coord _
   | Command _ | Unit | Var _ -> (e, [])
 

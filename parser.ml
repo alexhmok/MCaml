@@ -1100,7 +1100,7 @@ let _menhir_action_51 =
   fun body ->
     (
 # 150 "parser.mly"
-                                                                 ( Region body )
+                                                                 ( Region (ref TUnit, body) )
 # 1105 "parser.ml"
      : 
 # 35 "parser.mly"

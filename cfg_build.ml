@@ -200,14 +200,22 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
       let _ = dest in
       add_instr b.cur (ITail (d, c))
 
-  | Knormal.KRegion body ->
+  | Knormal.KRegion (body, ret_typ, region_dest) ->
       let k = b.region_depth in
       if k > 3 then
         failwith
           "mcaml: region nesting exceeds v1 ceiling of 4 levels (§4.1)";
+      let _ = dest in
+      (* [region_dest] is the ambient let-binder the knormal pass
+         captured on KRegion — preferred over the cfg_build [~dest]
+         parameter because an enclosing KSeq (produced by a flattened
+         [Let (x, Region ..., e2)]) passes [~dest:None] here. The
+         body's internal writes still land in [region_dest] because
+         knormal normalized the body with that same dest, so ambient
+         [~dest] is only relevant for the exit instruction. *)
       add_instr b.cur (IRegionEnter k);
       b.region_depth <- k + 1;
-      lower b body ~dest;
+      lower b body ~dest:region_dest;
       b.region_depth <- k;
       (* Only emit the exit if control can reach here. A body that ends
          in a tail call (TTail) or an unconditional return seals b.cur
@@ -218,7 +226,7 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
          region body stay as plain KCall → ICall and the exit below
          still runs before the function returns naturally. *)
       if not (block_is_sealed b.cur) then
-        add_instr b.cur (IRegionExit (k, None, Ast.TUnit))
+        add_instr b.cur (IRegionExit (k, region_dest, ret_typ))
 
 (* ---- finalization: reverse instrs, populate preds ---- *)
 

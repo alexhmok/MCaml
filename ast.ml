@@ -37,7 +37,7 @@ type expr =
   | For of string * expr * expr * expr     (* For(i, lo, hi, body) *)
   | Nil                                    (* [] : TList t — empty list literal *)
   | Cons of expr * expr                    (* h :: t — cons cell *)
-  | Region of expr                         (* region (fun () -> body) — lexical arena bracket; thunk stripped at parse time *)
+  | Region of typ ref * expr               (* region (fun () -> body) — the [typ ref] is written by typing.ml and read by knormal.ml so the IR's IRegionExit can carry the return type the deep-copy walker dispatches on *)
 
 type def =
   | Val of string * expr

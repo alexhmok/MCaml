@@ -50,12 +50,17 @@ type kexpr =
   (* KTail(d, c_vreg) — d := tail(c) *)
   | KTail of string * string
   (* --- Phase C region primitives --- *)
-  (* KRegion(body) — lexical arena bracket. cfg_build wraps the lowered
-     body with IRegionEnter/IRegionExit. The return type (for the deep-
-     copy walker in C5) is re-derived at cfg_build time; for C3/C4 all
-     regions lower as primitive-return (TUnit placeholder in IRegionExit)
-     and heap-return support lands with C5. *)
-  | KRegion of kexpr
+  (* KRegion(body, ret_typ, dest) — lexical arena bracket. cfg_build
+     wraps [body] with IRegionEnter/IRegionExit, threading [ret_typ]
+     through to the exit op so codegen_cfg picks the right deep-copy
+     walker (none for TInt/TBool/TUnit, TList TInt's stash+rebuild
+     walker for cons lists). [dest] captures the ambient let-binder
+     the region's result flows into — it's needed by the heap-return
+     exit path because KSeq's lowering passes [~dest:None] for the
+     first argument, which would otherwise erase the destination the
+     walker needs to rewrite after truncation. [ret_typ] is filled
+     from the shared [typ ref] typing.ml wrote. *)
+  | KRegion of kexpr * typ * string option
 
 let counter = ref 0
 let new_temp () = incr counter; Printf.sprintf "$t%d" !counter
@@ -473,16 +478,19 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
   | App ("array_make", _) ->
       failwith "array_make must appear as the rhs of a let binding"
 
-  | Region body ->
-      (* Phase C / C3. Normalize the body with the same [dest] so the
-         body's final value still lands in [d]; cfg_build then brackets
-         the whole lowered body with IRegionEnter/IRegionExit around
-         the resulting kexpr. Passing dest through means that for a
-         primitive-returning region (the only shape C3/C4 support) the
-         last write inside the body goes into [d] which is a scoreboard
-         slot — scoreboard survives NBT truncation, so no further
-         plumbing is needed on the primitive path. *)
-      KRegion (normalize_to dest body)
+  | Region (tr, body) ->
+      (* Phase C / C3+C5. Normalize the body with the same [dest] so
+         the body's final value still lands in [d]. For primitive
+         returns the scoreboard write survives NBT truncation directly.
+         For TList TInt returns the deep-copy walker in codegen_cfg
+         reads [d] as the child-region root handle and overwrites it
+         with the new parent-region handle before truncation fires.
+         The return type is read from the [tr] ref that typing.ml
+         wrote into during its infer pass on this function's body.
+         [dest] is captured on the KRegion constructor so cfg_build's
+         lowering can emit IRegionExit with the right destination
+         even when an enclosing KSeq passes [~dest:None]. *)
+      KRegion (normalize_to dest body, !tr, dest)
 
   | Nil ->
       (* Empty list sentinel: -1, per §4.2. *)

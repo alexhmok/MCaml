@@ -147,7 +147,7 @@ expr:
   | e = expr LBRACK i = expr RBRACK { Index1(e, i) }
   | e = expr LBRACK i = expr COMMA j = expr RBRACK { Index2(e, i, j) }
 
-  | REGION LPAREN FUN LPAREN RPAREN ARROW body = seq_expr RPAREN { Region body }
+  | REGION LPAREN FUN LPAREN RPAREN ARROW body = seq_expr RPAREN { Region (ref TUnit, body) }
 
 expr_semi_list:
   | { [] }

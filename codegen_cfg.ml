@@ -82,6 +82,12 @@ type state = {
      [region_truncate_<k>_conspool.mcfunction] to [helpers]. Filename
      dedup in main.ml collapses the copies across functions. *)
   mutable region_exit_levels : int list;
+  (* Phase C / C5: flagged when any IRegionExit with a TList return
+     type fires in this function. Triggers emission of the shared
+     level-independent stash/rebuild walker files — the walkers call
+     cons_head / cons_tail internally, so emit_cons_head /
+     emit_cons_tail are also flagged when this is set. *)
+  mutable emit_region_walker_list : bool;
 }
 
 let fresh_helper_name (st : state) : string =
@@ -123,6 +129,8 @@ let is_reserved_slot (s : string) : bool =
   s = "$region_save_1_scratch" || s = "$region_save_1_conspool" ||
   s = "$region_save_2_scratch" || s = "$region_save_2_conspool" ||
   s = "$region_save_3_scratch" || s = "$region_save_3_conspool" ||
+  (* C5 deep-copy walker scratch slots (shared across levels). *)
+  s = "$wr_h" || s = "$wr_cache_h" || s = "$wr_prev" || s = "$wr_tmp_h" ||
   (String.length s >= 5 && String.sub s 0 5 = "$ref_") ||
   (String.length s > 6
    && String.sub s 0 6 = "param_"
@@ -228,16 +236,45 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
       push_cmds st prefix (cmd_cons_tail d c)
   | IRegionEnter k ->
       push_cmds st prefix (cmd_region_enter k)
-  | IRegionExit (k, _, _) ->
-      (* C4 handles the primitive-return path. C5 adds heap-return
-         copy-walker dispatch before the truncation calls; until then
-         every exit is treated as primitive, which is correct for
-         TInt/TBool/TUnit returns and wrong (leak + dangle) for TList/
-         TArrDyn returns. cfg_build currently only produces the
-         placeholder-TUnit form so the wrong path is unreachable. *)
+  | IRegionExit (k, ret, ret_typ) ->
       if not (List.mem k st.region_exit_levels) then
         st.region_exit_levels <- k :: st.region_exit_levels;
-      push_cmds st prefix (cmd_region_exit_primitive k)
+      (* Dispatch on the return type from cfg_build. Primitive returns
+         use the 2-command C4 path; TList TInt returns run the stash+
+         truncate+rebuild Strategy-B walker from C5; other heap types
+         are not supported in v1 and fail loudly. *)
+      (match ret_typ with
+       | Ast.TInt | Ast.TBool | Ast.TUnit ->
+           push_cmds st prefix (cmd_region_exit_primitive k)
+       | Ast.TList Ast.TInt ->
+           (match ret with
+            | None ->
+                failwith
+                  "codegen_cfg: TList region exit has no return vreg \
+                   (cfg_build invariant violated)"
+            | Some r ->
+                st.emit_region_walker_list <- true;
+                (* Walker body calls cons_head / cons_tail to read
+                   child cells, so those macro helpers must also be
+                   emitted in this function's helper set. *)
+                st.emit_cons_head <- true;
+                st.emit_cons_tail <- true;
+                push_cmds st prefix (cmd_region_exit_list_int k r))
+       | Ast.TArrDyn _ ->
+           failwith
+             "codegen_cfg: TArrDyn region returns are not supported in \
+              v1 — wrap the array-producing expression with an int-\
+              returning reducer or flag to extend the walker set"
+       | _ ->
+           failwith
+             (Printf.sprintf
+                "codegen_cfg: region return type %s has no v1 walker"
+                (match ret_typ with
+                 | Ast.TList _ -> "TList <nested>"
+                 | Ast.TArrStatic _ -> "TArrStatic"
+                 | Ast.TMat _ -> "TMat"
+                 | Ast.TRef _ -> "TRef"
+                 | _ -> "<unknown>")))
 
 (* Lower a terminator. Only [TTail] produces commands; the others are
    structural and get emitted as nothing.
@@ -316,6 +353,7 @@ let emit (cfg : cfg_func) : (string * string list) list =
     emit_cons_head = false;
     emit_cons_tail = false;
     region_exit_levels = [];
+    emit_region_walker_list = false;
   } in
   let order = reverse_postorder cfg in
   List.iter (fun l -> emit_block st cfg.blocks.(l)) order;
@@ -348,6 +386,17 @@ let emit (cfg : cfg_func) : (string * string list) list =
     st.helpers <- (sname, region_truncate_scratch_body k) :: st.helpers;
     st.helpers <- (cname, region_truncate_conspool_body k) :: st.helpers
   ) st.region_exit_levels;
+  (* Phase C / C5: TList-return walker helpers. Level-independent —
+     the stash walker walks the child chain and the rebuild walker
+     empties region_tmp conspool into the parent conspool, neither
+     referencing the per-level save slots. Single shared filename
+     per walker, deduped across all functions by main.ml. *)
+  if st.emit_region_walker_list then begin
+    st.helpers <-
+      ("region_walker_list_stash", region_walker_list_stash_body) :: st.helpers;
+    st.helpers <-
+      ("region_walker_list_rebuild", region_walker_list_rebuild_body) :: st.helpers
+  end;
   let body_cmds = List.rev st.main_cmds in
   if cfg.preheader_instrs = [] then
     (cfg.fname, body_cmds) :: List.rev st.helpers

@@ -42,7 +42,7 @@ let rec g env e =
   | RefSet (r, v) -> RefSet (g env r, g env v)
   | Nil -> Nil
   | Cons (h, t) -> Cons (g env h, g env t)
-  | Region e -> Region (g env e)
+  | Region (tr, e) -> Region (tr, g env e)   (* share tr so typing's write is visible downstream *)
   | For (i, lo, hi, body) ->
       let i' = new_name i in
       let env' = M.add i i' env in

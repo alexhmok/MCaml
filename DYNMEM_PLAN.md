@@ -237,7 +237,53 @@ work.
       a dangling pool state. Regions must stay under ~20k cells per
       pool per region to fit Minecraft's maxCommandChainLength. A
       proper async exit sequence is future work — see §12.)
-- [ ] C5. Per-return-type deep-copy helper generation
+- [x] C5. Per-return-type deep-copy helper generation
+      (Type annotation plumbing: `Region of typ ref * expr` in ast.ml;
+      parser creates `ref TUnit`; alpha/for_lift share the ref;
+      typing.ml's Region arm writes the inferred body type; knormal's
+      Region arm reads the ref and produces
+      `KRegion of kexpr * typ * string option` carrying both the
+      return type and the ambient let-dest (which survives the
+      KSeq-flattening of `Let(x, Region, body)` since KSeq otherwise
+      lowers its first arg with `~dest:None`). cfg_build threads both
+      into `IRegionExit (k, ret, ret_typ)`.
+      codegen_cfg dispatches on `ret_typ`: `TInt/TBool/TUnit` use the
+      C4 primitive path; `TList TInt` uses the new Strategy-B walker
+      path (stash → truncate → rebuild), with `emit_cons_head` /
+      `emit_cons_tail` also flagged since the stash walker reads
+      cell fields through the existing cons_head / cons_tail macro
+      helpers. TArrDyn and other types fail loudly at codegen.
+      **Minor refinement to decision #4**: walker files turned out
+      level-independent — the stash walker reads from mcaml:conspool,
+      writes to mcaml:region_tmp conspool, and terminates on the nil
+      sentinel (no save-slot reference); the rebuild walker drains
+      region_tmp from the tail and appends to conspool with
+      `t := $wr_prev` (no save-slot reference either). Single shared
+      `region_walker_list_stash.mcfunction` and
+      `region_walker_list_rebuild.mcfunction`, deduped by filename in
+      main.ml. Flagged as a simplification against the per-level
+      naming originally in #4 since it removed plumbing without
+      losing correctness.
+      Four new reserved scoreboard slots: `$wr_h` (current child
+      handle), `$wr_cache_h` (stashed h-field value), `$wr_prev`
+      (previous iteration's new handle; seeds nil), `$wr_tmp_h`
+      (rebuild's h-field read), all added to
+      `codegen_cfg.is_reserved_slot`.
+      Two new storage paths in `tools/pack_datapack.py`:
+      `mcaml:region_tmp conspool` (active in v1) and
+      `mcaml:region_tmp scratch` (reserved for TArrDyn walker,
+      unused). §4.5 documents these.
+      Probe:
+      `let l = region (fun () -> 1::2::3::[]) in sum_list(l, 0)`
+      returns `$ret = 6` under sim.py, with the expected stash →
+      truncate → rebuild sequence: build at child positions
+      [0..2], stash into region_tmp in walk order (1,2,3), truncate
+      conspool back to 0, rebuild by popping region_tmp from the
+      tail (3,2,1) and re-appending with `t := $wr_prev` (which
+      reverses twice so the final chain is in the original order
+      1→2→3→nil at parent positions [0..2]). All five canaries
+      byte-identical vs. pre-Phase-C; both Python exit suites still
+      green.)
 - [ ] C6. Test: long-running `region`-wrapped computation with small return
 
 ## 3. Load-bearing design decisions
@@ -369,6 +415,44 @@ scoreboard players set $conspool_next vars 0
 ```
 
 `permheap` is **not** reset — it persists across invocations by design.
+
+**Public-entry primitive-return contract.** The reset block zeros the
+scratch and conspool pools unconditionally. Any `TList` / `TArrDyn`
+handle returned from a public-entry function is therefore dangling
+immediately after the caller's `/function mcaml:<name>` dispatch
+completes: the handle integer is still sitting in the `vars`
+scoreboard, but the NBT cells it pointed to have been wiped. This is
+the same constraint CLAUDE.md notes for `$ret` across tick boundaries
+("bind it to a ref"). Regions inherit this — Phase C's copy-on-escape
+correctly moves a list out of the child region into the parent's
+arena, but at the public-entry boundary both arenas get flattened.
+C6 test programs must return primitives (int, bool, unit) from any
+entry point called directly from Minecraft; if the test wants to
+verify a list, sum/fold it inside the entry before returning.
+
+### 4.5 Region_tmp NBT paths (Phase C / C5)
+
+Strategy-B deep-copy walkers (§5.6) stash the return value in a
+scratch NBT path before truncation, then re-append from the stash
+after truncation. Two new paths, added to `init.mcfunction` via
+`tools/pack_datapack.py` alongside the pool paths in §4.3:
+
+```
+data modify storage mcaml:region_tmp conspool set value []
+data modify storage mcaml:region_tmp scratch set value []
+```
+
+These are **storage paths**, not scoreboard slots — §12's escalation
+trigger on "new reserved scoreboard slot not listed in §4.1" does not
+apply. Permheap has no region_tmp counterpart because permheap is
+never truncated.
+
+The conspool region_tmp path is consumed by
+`region_walker_list_stash.mcfunction` (appends) and
+`region_walker_list_rebuild.mcfunction` (drains from the tail). The
+scratch region_tmp path is reserved for the TArrDyn walker (not
+implemented in v1; TArrDyn region returns fail loudly at codegen time
+until a future session extends the walker set).
 
 The "public entry-point" determination in v1 is every top-level `fun`
 that isn't called by any other function in the same compilation unit. If
