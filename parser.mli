@@ -7,6 +7,7 @@ type token =
   | T_SEL
   | T_POS
   | T_MAT
+  | T_LIST
   | T_INT
   | T_BOOL
   | T_ARR

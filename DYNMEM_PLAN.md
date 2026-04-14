@@ -127,7 +127,24 @@ work.
       one IBinOp Eq → 1 cmd via cmd_score_binop). Functionally
       equivalent; the 1-cmd form is a future peephole, not a B7
       command-budget violation.)
-- [ ] B8. Test program (e.g., tail-recursive Fibonacci list)
+- [x] B8. Test program (e.g., tail-recursive Fibonacci list)
+      (`scripts/test_cons.mcaml` has 6 entry points: head/tail
+      traversal, is_nil on empty/non-empty, tail-recursive `sum_list`
+      driven from a 5-element list, and a cross-function
+      `build3 → sum_list` round-trip exercising list-as-handle param
+      AND return. Validated through `/tmp/mcaml_out/test_cons.py`
+      against sim.py with one extension — the `data modify ...
+      append value {h:0,t:0}` parser now handles compound literals so
+      cons cells materialize as real dicts that the subsequent
+      `pairs[-1].h`/`.t` store-result lines populate. ICons=5 cmds
+      verified by command count on `test_basic` (3 cells × 5 cmds).
+      **Pivot during B8**: added `list` as a parser type keyword
+      (lexer T_LIST + parser arm desugaring to `TList TInt`) and
+      typing arms for `head`/`tail` returning `TInt`/`TList TInt`,
+      because the let-binding pattern `let l = 1::[] in sum_list(l)`
+      gives `l : TList TInt` and the App arg-type check rejected
+      passing it where the param declared `int`. The `list` keyword
+      lets helpers declare `(l: list) : list` and types unify.)
 
 ### Phase C — Regions and copy-on-escape
 - [ ] C1. Surface syntax: `region (fun () -> body)` in parser + AST

@@ -45,6 +45,7 @@ rule read = parse
   | "pos"    { T_POS }
   | "arr"    { T_ARR }
   | "mat"    { T_MAT }
+  | "list"   { T_LIST }
   | selector { SELECTOR (Lexing.lexeme lexbuf) }
   | "~"      { TILDE }
   | "^"      { CARET }

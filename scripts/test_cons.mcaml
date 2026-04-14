@@ -1,0 +1,50 @@
+(* Phase B exit tests for cons lists (TList via :: / [] / head / tail / is_nil).
+   Each fun is a parameterless entry point invoked from the sim harness in
+   /tmp/mcaml_out/test_cons.py.
+
+   v1 is monomorphic int lists — the parser accepts `list` as a type
+   keyword desugaring to `TList TInt`. At runtime a list value is a
+   single int handle (the conspool index of the head cell, or -1 for
+   nil), so it flows through param_N / $ret like any other int.
+
+   Expected $ret values:
+     test_basic               ->   1
+     test_traverse            ->  30
+     test_is_nil_empty        ->  99
+     test_is_nil_nonempty     ->  42
+     test_sum_helper          ->  15
+     test_helper_returns_list ->  24 *)
+
+(* Tail-recursive sum-of-list. l is the list handle; acc accumulates.
+   tco.ml rewrites the self-call into a KLoop, so this becomes an in-
+   function loop with no save/restore frames. *)
+fun sum_list (l: list, acc: int) : int =
+  if is_nil(l) then acc
+  else sum_list(tail(l), acc + head(l))
+
+(* Helper that returns a fresh list, exercising the "list-as-int-handle"
+   return convention across a function boundary. *)
+fun build3 (a: int, b: int, c: int) : list =
+  a :: b :: c :: []
+
+fun test_basic () : int =
+  let l = 1 :: 2 :: 3 :: [] in
+  head(l)
+
+fun test_traverse () : int =
+  let l = 10 :: 20 :: 30 :: [] in
+  head(tail(tail(l)))
+
+fun test_is_nil_empty () : int =
+  if is_nil([]) then 99 else 0
+
+fun test_is_nil_nonempty () : int =
+  if is_nil(1 :: []) then 1 else 42
+
+fun test_sum_helper () : int =
+  let l = 1 :: 2 :: 3 :: 4 :: 5 :: [] in
+  sum_list(l, 0)
+
+fun test_helper_returns_list () : int =
+  let l = build3(7, 8, 9) in
+  sum_list(l, 0)

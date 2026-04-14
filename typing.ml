@@ -56,13 +56,21 @@ let rec infer env e =
       let _ = infer env e1 in
       infer env e2
 
-  (* Phase B builtin: is_nil returns TBool so it can be used as an `if`
-     condition. head/tail still ride the App-fallback-returns-TInt trick
-     because their results flow through int-handle vregs and consumers
-     don't care about the static type. *)
+  (* Phase B builtins: is_nil returns TBool so it can be used directly
+     as an `if` condition; head returns TInt (the element); tail returns
+     TList TInt (the rest of the list). All three accept any arg type
+     since v1 is monomorphic int lists and the runtime only sees int
+     handles — validating the arg type would just block the let-binding
+     pattern `let l = 1 :: [] in head(l)` where l infers as TList TInt. *)
   | App ("is_nil", [arg]) ->
       let _ = infer env arg in
       TBool
+  | App ("head", [arg]) ->
+      let _ = infer env arg in
+      TInt
+  | App ("tail", [arg]) ->
+      let _ = infer env arg in
+      TList TInt
 
   | App (f, args) ->
       (match Hashtbl.find_opt fun_sigs f with
