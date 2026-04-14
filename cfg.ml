@@ -28,10 +28,11 @@ type polarity = Pos | Neg
 
 (* Phase A (dynamic memory): dynamic arrays live in one of two flat-int
    storage pools distinct from the per-aid static array storage. The pool
-   tag is an opaque enum to every existing pass (copy_prop/inline/unroll/
-   regalloc/monomorphize only rewrite the vreg operands, not the pool).
-   PoolConspool is reserved for Phase B; do not use it yet. *)
-type heap_pool = PoolScratch | PoolPermheap
+   tag is [Ast.heap_pool] — defined in ast.ml so codegen_helpers (which
+   precedes cfg in the build order) can reference it too. Opaque to every
+   existing pass; copy_prop/inline/unroll/regalloc/monomorphize only
+   rewrite the vreg operands. *)
+type heap_pool = Ast.heap_pool = PoolScratch | PoolPermheap
 
 type instr =
   | IConst        of vreg * int
@@ -46,10 +47,15 @@ type instr =
   | IArrSetStatic of aid * int * vreg      (* storage[aid][k] := val, side-effecting *)
   | IArrSet       of aid * vreg * vreg     (* storage[aid][idx] := val, side-effecting *)
   (* Phase A dynamic heap ops. Side-effecting (bump counter / NBT write);
-     DCE and CSE must leave them alone. IHeapGet reads NBT, mirrors IArrGet. *)
-  | IHeapAlloc    of vreg * heap_pool * vreg           (* d = pool_next; pool_next += size *)
-  | IHeapGet      of vreg * heap_pool * vreg * vreg    (* d := pool[base + idx] *)
-  | IHeapSet      of heap_pool * vreg * vreg * vreg    (* pool[base + idx] := v, side-effecting *)
+     DCE and CSE must leave them alone. IHeapGet reads NBT, mirrors IArrGet.
+     [IHeapAllocConst] is the compile-time-known-size sibling of [IHeapAlloc];
+     codegen straight-lines the append sequence. The vreg-form [IHeapAlloc]
+     is still reached for runtime-n allocations but codegen_cfg fails on it
+     until a TCO'd allocator helper lands. *)
+  | IHeapAllocConst of vreg * heap_pool * int          (* d = pool_next; pool_next += n (const) *)
+  | IHeapAlloc      of vreg * heap_pool * vreg         (* d = pool_next; pool_next += <n_vreg> *)
+  | IHeapGet        of vreg * heap_pool * vreg * vreg  (* d := pool[base + idx] *)
+  | IHeapSet        of heap_pool * vreg * vreg * vreg  (* pool[base + idx] := v, side-effecting *)
 
 type terminator =
   | TRet
@@ -143,6 +149,7 @@ let instr_def (i : instr) : vreg option =
   | IArrGet (d, _, _)       -> Some d
   | IArrSetStatic _         -> None
   | IArrSet _               -> None
+  | IHeapAllocConst (d, _, _) -> Some d
   | IHeapAlloc (d, _, _)    -> Some d
   | IHeapGet (d, _, _, _)   -> Some d
   | IHeapSet _              -> None
@@ -164,6 +171,7 @@ let instr_uses (i : instr) : vreg list =
   | IArrGet (_, _, idx)     -> [idx]
   | IArrSetStatic (_, _, v) -> [v]
   | IArrSet (_, idx, v)     -> [idx; v]
+  | IHeapAllocConst _       -> []
   | IHeapAlloc (_, _, n)    -> [n]
   | IHeapGet (_, _, b, i)   -> [b; i]
   | IHeapSet (_, b, i, v)   -> [b; i; v]
@@ -197,6 +205,9 @@ let string_of_instr (i : instr) : string =
   | IArrGet (d, id, idx) -> Printf.sprintf "%s := %s[%s]" d id idx
   | IArrSetStatic (id, k, v) -> Printf.sprintf "%s[%d] := %s" id k v
   | IArrSet (id, idx, v) -> Printf.sprintf "%s[%s] := %s" id idx v
+  | IHeapAllocConst (d, p, n) ->
+      Printf.sprintf "%s := halloc[%s](%d)" d
+        (match p with PoolScratch -> "scratch" | PoolPermheap -> "permheap") n
   | IHeapAlloc (d, p, n) ->
       Printf.sprintf "%s := halloc[%s](%s)" d
         (match p with PoolScratch -> "scratch" | PoolPermheap -> "permheap") n

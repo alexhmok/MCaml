@@ -127,6 +127,7 @@ let collect (cfg : cfg_func) : (aid, info) Hashtbl.t =
           so no info_for bookkeeping — only note_use_vreg to stop the
           analyzer from mistaking a handle-valued vreg for an escaping
           pseudo-aid carrier. *)
+       | IHeapAllocConst _ -> ()
        | IHeapAlloc (_, _, n) -> note_use_vreg n
        | IHeapGet (_, _, b_vr, idx) -> note_use_vreg b_vr; note_use_vreg idx
        | IHeapSet (_, b_vr, idx, v) ->
@@ -201,7 +202,7 @@ let aids_touched_by (other_cfg : cfg_func) : (aid, unit) Hashtbl.t =
        | ICall (_, _, args) -> List.iter note_pseudo args
        (* Dynamic-heap ops never carry a pseudo aid or an aid operand;
           they're untracked by the escape analysis. *)
-       | IHeapAlloc _ | IHeapGet _ | IHeapSet _ -> ()
+       | IHeapAllocConst _ | IHeapAlloc _ | IHeapGet _ | IHeapSet _ -> ()
        | IConst _ | ICommand _ -> ())
     ) b.instrs
   ) other_cfg.blocks;

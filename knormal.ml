@@ -1,10 +1,10 @@
 (* knormal.ml *)
 open Ast
 
-(* Phase A dynamic-heap pool tag. Mirrors Cfg.heap_pool; cfg_build translates
-   between the two. Defined here (not imported from Cfg) because the build
-   order puts knormal.ml before cfg.ml. *)
-type heap_pool = PoolScratch | PoolPermheap
+(* Phase A dynamic-heap pool tag. Shared with [Cfg.heap_pool] via
+   [Ast.heap_pool] (defined in ast.ml so the pre-cfg codegen_helpers can
+   reference it too). *)
+type heap_pool = Ast.heap_pool = PoolScratch | PoolPermheap
 
 type kexpr =
   | KUnit
@@ -33,7 +33,10 @@ type kexpr =
   (* KArrSet(id, idx_temp, val_temp) — storage[id][idx] := val, idx runtime *)
   | KArrSet of string * string * string
   (* --- Phase A dynamic-heap primitives --- *)
-  (* KDynAlloc(base_dest, pool, n_vreg) — base_dest := alloc pool(n_vreg) *)
+  (* KDynAllocConst(base_dest, pool, n) — compile-time known-size sibling
+     of KDynAlloc; codegen straight-lines the append sequence. *)
+  | KDynAllocConst of string * heap_pool * int
+  (* KDynAlloc(base_dest, pool, n_vreg) — runtime-sized variant. *)
   | KDynAlloc of string * heap_pool * string
   (* KHeapGet(dest, pool, base_vreg, idx_vreg) — dest := pool[base+idx] *)
   | KHeapGet of string * heap_pool * string * string
@@ -132,25 +135,28 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
   | Let (x, App ("Array.make", [n_expr; v_expr]), e2) ->
       (* Phase A dynamic-heap allocation.
          v1 scope: requires v_expr = Int 0 (non-zero init needs a runtime
-         fill loop, deferred to A7). n_expr may be any int expression. *)
+         fill loop, deferred to a later session). *)
       (match v_expr with
        | Int 0 -> ()
        | _ -> failwith "Array.make: v1 only supports initializer 0");
-      let t_n = new_temp () in
-      let k_n = normalize_to (Some t_n) n_expr in
       let len_slot = "$dyn_len_" ^ x in
       Hashtbl.replace dyn_env x len_slot;
-      (* Emit:
-           <k_n>;                 (* t_n := n *)
-           len_slot := t_n;       (* record length *)
-           x := alloc(t_n)        (* base handle *)
-           <k_body>                                                       *)
-      let alloc = KDynAlloc(x, PoolScratch, t_n) in
       let k_body = normalize_to dest e2 in
-      KLet(t_n, KUnit,
-        KSeq(k_n,
-          KLet(len_slot, KVar t_n,
-            KSeq(alloc, k_body))))
+      (match n_expr with
+       | Int k ->
+           (* Const-n path: straight-line append in codegen. The length slot
+              is still materialized as a vreg so downstream users (none in
+              A4/A5, but future cross-function helpers) can read it. *)
+           let alloc = KDynAllocConst(x, PoolScratch, k) in
+           KLet(len_slot, KInt k, KSeq(alloc, k_body))
+       | _ ->
+           let t_n = new_temp () in
+           let k_n = normalize_to (Some t_n) n_expr in
+           let alloc = KDynAlloc(x, PoolScratch, t_n) in
+           KLet(t_n, KUnit,
+             KSeq(k_n,
+               KLet(len_slot, KVar t_n,
+                 KSeq(alloc, k_body)))))
 
   | Let (x, Ref e1, e2) ->
       (* Allocate a stable ref slot for x. The slot name uses the alpha-

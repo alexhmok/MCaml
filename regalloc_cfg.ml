@@ -226,6 +226,7 @@ let alloc (cfg : Cfg.cfg_func) : unit =
     | IArrGet (d, id, idx) -> IArrGet (rw d, id, rw idx)
     | IArrSetStatic (id, k, v) -> IArrSetStatic (id, k, rw v)
     | IArrSet (id, idx, v) -> IArrSet (id, rw idx, rw v)
+    | IHeapAllocConst (d, p, n) -> IHeapAllocConst (rw d, p, n)
     | IHeapAlloc (d, p, n) -> IHeapAlloc (rw d, p, rw n)
     | IHeapGet (d, p, b, idx) -> IHeapGet (rw d, p, rw b, rw idx)
     | IHeapSet (p, b, idx, v) -> IHeapSet (p, rw b, rw idx, rw v)

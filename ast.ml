@@ -6,6 +6,10 @@ type typ = TInt | TBool | TUnit | TSelector | TPos
          | TRef of typ                (* ref cell holding T *)
 type binop = Add | Sub | Mult | Div | Eq | Neq | Lt | Leq | Gt | Geq | And | Or
 
+(* Phase A: dynamic-heap pool tag. Lives in ast.ml (not cfg.ml) so that
+   codegen_helpers — which is built before cfg.ml — can reference it. *)
+type heap_pool = PoolScratch | PoolPermheap
+
 type expr =
   | Int of int
   | Float of float

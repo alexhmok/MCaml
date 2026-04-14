@@ -166,6 +166,7 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
   (* Dynamic-heap ops: kill the dest in the const map (the value is read
      from NBT at runtime, not knowable here). No static-variant rewrite
      in A3 — the plan lists this as optional in §6. *)
+  | IHeapAllocConst (d, _, _) -> (i, kill m d, false)
   | IHeapAlloc (d, _, _) -> (i, kill m d, false)
   | IHeapGet (d, _, _, _) -> (i, kill m d, false)
   | IHeapSet _ -> (i, m, false)

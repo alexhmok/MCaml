@@ -53,6 +53,7 @@ let estimate (i : instr) : int =
   | IArrSet _                   -> 3
   (* Dynamic-heap ops per §5.3–5.5. Sizes for constant-n alloc depend
      on n (n append lines); this is the conservative per-iteration cost. *)
+  | IHeapAllocConst (_, _, n)   -> 2 + n
   | IHeapAlloc _                -> 3
   | IHeapGet _                  -> 5
   | IHeapSet _                  -> 6

@@ -82,6 +82,7 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
         let idx' = rw !m c idx in
         let v' = rw !m c v in
         if idx' = idx && v' = v then i else IArrSet (id, idx', v')
+    | IHeapAllocConst _ -> i
     | IHeapAlloc (d, p, n) ->
         let n' = rw !m c n in
         if n' = n then i else IHeapAlloc (d, p, n')
@@ -131,6 +132,8 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
    | IArrGet (d, _, _) ->
        if not (is_reserved d) then m := kill_def !m d
    | IArrSetStatic _ | IArrSet _ -> ()
+   | IHeapAllocConst (d, _, _) ->
+       if not (is_reserved d) then m := kill_def !m d
    | IHeapAlloc (d, _, _) ->
        if not (is_reserved d) then m := kill_def !m d
    | IHeapGet (d, _, _, _) ->

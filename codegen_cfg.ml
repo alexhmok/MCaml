@@ -179,7 +179,7 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
       push_cmds st prefix (cmd_arr_set id idx v)
   (* Dynamic-heap ops: lowering lives in A7. No producer in A3–A4 so
      reaching this arm means a pipeline bug; fail loud rather than silent. *)
-  | IHeapAlloc _ | IHeapGet _ | IHeapSet _ ->
+  | IHeapAllocConst _ | IHeapAlloc _ | IHeapGet _ | IHeapSet _ ->
       failwith "codegen_cfg: IHeap* lowering not implemented until Phase A / A7"
 
 (* Lower a terminator. Only [TTail] produces commands; the others are

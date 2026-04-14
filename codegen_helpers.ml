@@ -135,6 +135,91 @@ let macro_setter_body (id : string) : string =
     "$execute store result storage mcaml:heap %s[$(idx)] int 1 run scoreboard players get $arr_set_val vars"
     id
 
+(* ---- dynamic heap ops (Phase A) ---- *)
+
+(* String tag for a [Ast.heap_pool]. Used to assemble pool-specific storage
+   paths, bump-counter slot names, and macro-helper filenames. *)
+let pool_name (p : Ast.heap_pool) : string =
+  match p with
+  | Ast.PoolScratch  -> "scratch"
+  | Ast.PoolPermheap -> "permheap"
+
+let pool_next_slot (p : Ast.heap_pool) : string =
+  Printf.sprintf "$%s_next" (pool_name p)
+
+let pool_storage_path (p : Ast.heap_pool) : string =
+  Printf.sprintf "mcaml:%s cells" (pool_name p)
+
+(* Body of the pool's shared dynamic-index getter file. Single macro line.
+   Mirrors [macro_helper_body] but over [mcaml:<pool> cells] instead of
+   per-aid [mcaml:heap <id>]. Emitted once per program (not per function)
+   through a filename-level dedupe in main.ml. *)
+let pool_get_body (p : Ast.heap_pool) : string =
+  Printf.sprintf
+    "$execute store result score $arr_result %s run data get storage mcaml:%s cells[$(idx)] 1"
+    obj_name (pool_name p)
+
+let pool_set_body (p : Ast.heap_pool) : string =
+  Printf.sprintf
+    "$execute store result storage mcaml:%s cells[$(idx)] int 1 run scoreboard players get $arr_set_val %s"
+    (pool_name p) obj_name
+
+(* Compile-time known-size allocation. Matches DYNMEM_PLAN.md §5.5:
+     <base> := $pool_next
+     data modify storage mcaml:<pool> cells append value 0   × n
+     scoreboard players add $pool_next n
+   Total: 2 + n commands. *)
+let cmd_heap_alloc_const
+    (base : string) (p : Ast.heap_pool) (n : int) : string list =
+  let next = pool_next_slot p in
+  let path = pool_storage_path p in
+  let init =
+    Printf.sprintf "scoreboard players operation %s %s = %s %s"
+      base obj_name next obj_name
+  in
+  let append =
+    Printf.sprintf "data modify storage %s append value 0" path
+  in
+  let appends = List.init n (fun _ -> append) in
+  let bump =
+    Printf.sprintf "scoreboard players add %s %s %d" next obj_name n
+  in
+  init :: appends @ [bump]
+
+(* Dynamic heap read. §5.3, 5 commands. Uses [$arr_idx] as the composed
+   base+idx carrier and the per-pool shared macro helper. *)
+let cmd_heap_get
+    (d : string) (p : Ast.heap_pool) (base : string) (idx : string)
+    : string list =
+  [ Printf.sprintf "scoreboard players operation $arr_idx %s = %s %s"
+      obj_name base obj_name;
+    Printf.sprintf "scoreboard players operation $arr_idx %s += %s %s"
+      obj_name idx obj_name;
+    Printf.sprintf
+      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get $arr_idx %s"
+      obj_name;
+    Printf.sprintf "function mcaml:%s_get with storage mcaml:tmp args"
+      (pool_name p);
+    Printf.sprintf "scoreboard players operation %s %s = $arr_result %s"
+      d obj_name obj_name ]
+
+(* Dynamic heap write. §5.4, 5 commands. Re-uses [$arr_set_val] as the
+   value-staging slot (same convention as IArrSet). *)
+let cmd_heap_set
+    (p : Ast.heap_pool) (base : string) (idx : string) (v : string)
+    : string list =
+  [ Printf.sprintf "scoreboard players operation $arr_idx %s = %s %s"
+      obj_name base obj_name;
+    Printf.sprintf "scoreboard players operation $arr_idx %s += %s %s"
+      obj_name idx obj_name;
+    Printf.sprintf "scoreboard players operation $arr_set_val %s = %s %s"
+      obj_name v obj_name;
+    Printf.sprintf
+      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get $arr_idx %s"
+      obj_name;
+    Printf.sprintf "function mcaml:%s_set with storage mcaml:tmp args"
+      (pool_name p) ]
+
 (* ---- function calls ---- *)
 
 (* Tail jump (no save/restore): param_i := arg_i for each arg, then
