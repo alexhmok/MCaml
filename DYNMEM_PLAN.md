@@ -68,7 +68,15 @@ work.
       (v1 monomorphic int lists: `Nil → TList TInt`, `Cons` rejects
       non-int head and non-`TList TInt` tail. `head`/`tail`/`is_nil` go
       through App fallback — no fun_sigs entries needed for v1.)
-- [ ] B3. Runtime: `mcaml:conspool pairs` pool, `$conspool_next`
+- [x] B3. Runtime: `mcaml:conspool pairs` pool, `$conspool_next`
+      (No-code-change task — the three pieces all pre-landed:
+      reserved slot `$conspool_next` in `codegen_cfg.ml` (A2), init
+      line + counter zero in `tools/pack_datapack.py` INIT_MCFUNCTION
+      (A2/A8), reset at public entry-point exits in `main.ml`
+      `reset_cmds` (A9). **Deferred to B4/B5**: the reset is gated on
+      `any_dyn_heap_use` which currently only scans `IHeap*` — once
+      `ICons`/`IHead`/`ITail` exist, that predicate must also count
+      those so a cons-only program still gets the conspool reset.)
 - [ ] B4. IR: `ICons`/`IHead`/`ITail`
 - [ ] B5. knormal/cfg_build lowering
 - [ ] B6. codegen: `cons_head.mcfunction`, `cons_tail.mcfunction`, 5-command `cons` inline
