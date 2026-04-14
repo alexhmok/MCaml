@@ -157,6 +157,9 @@ let rename_instr (body_defs : (vreg, unit) Hashtbl.t) (prefix : string) (i : ins
   | ICons (d, h, t) -> ICons (r d, r h, r t)
   | IHead (d, c) -> IHead (r d, r c)
   | ITail (d, c) -> ITail (r d, r c)
+  | IRegionEnter _ -> i
+  | IRegionExit (_, None, _) -> i
+  | IRegionExit (k, Some r0, ty) -> IRegionExit (k, Some (r r0), ty)
 
 (* Detect a v1 unrollable shape. Returns
    [Some (header, body, exit, loop_var)] on success. The loop_var is the

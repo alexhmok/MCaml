@@ -49,7 +49,11 @@ let is_side_effecting (i : instr) : bool =
   (* Phase B cons ops: ICons bumps $conspool_next and writes NBT;
      IHead/ITail read NBT through per-field macro helpers with the
      same hidden $arr_result write as IArrGet. All three kept. *)
-  | ICons _ | IHead _ | ITail _ -> true
+  | ICons _ | IHead _ | ITail _
+  (* Phase C region brackets: IRegionEnter snapshots global scoreboard
+     slots, IRegionExit truncates NBT pools and restores counters. Both
+     are the entire region mechanism — DCE may not touch either. *)
+  | IRegionEnter _ | IRegionExit _ -> true
   | IConst _ | ICopy _ | IBinOp _ -> false
 
 let run (cfg : cfg_func) : bool =

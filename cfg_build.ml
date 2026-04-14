@@ -25,9 +25,15 @@ open Cfg
 (* ---- builder state ---- *)
 
 type builder = {
-  mutable cur      : block;
-  blocks           : (label, block) Hashtbl.t;
-  next_label       : int ref;
+  mutable cur          : block;
+  blocks               : (label, block) Hashtbl.t;
+  next_label           : int ref;
+  (* Phase C. Lexical region-nesting depth threaded through [lower].
+     Each [KRegion] bump + recurse + decrement, using the pre-bump value
+     as the level [k] on the emitted IRegionEnter/IRegionExit pair. v1
+     caps at 4 levels (k ∈ [0,3]); exceeding the cap is a hard error
+     because save slots are a fixed global scoreboard set. *)
+  mutable region_depth : int;
 }
 
 let fresh_label (b : builder) : label =
@@ -194,6 +200,26 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
       let _ = dest in
       add_instr b.cur (ITail (d, c))
 
+  | Knormal.KRegion body ->
+      let k = b.region_depth in
+      if k > 3 then
+        failwith
+          "mcaml: region nesting exceeds v1 ceiling of 4 levels (§4.1)";
+      add_instr b.cur (IRegionEnter k);
+      b.region_depth <- k + 1;
+      lower b body ~dest;
+      b.region_depth <- k;
+      (* Only emit the exit if control can reach here. A body that ends
+         in a tail call (TTail) or an unconditional return seals b.cur
+         and the exit would be dead — not just wasted commands, but a
+         leak: the tail jump skips the exit entirely. This is the
+         concrete failure mode decision #5 addresses for TCO: we don't
+         recurse into KRegion in tco.ml, so self-tail calls inside a
+         region body stay as plain KCall → ICall and the exit below
+         still runs before the function returns naturally. *)
+      if not (block_is_sealed b.cur) then
+        add_instr b.cur (IRegionExit (k, None, Ast.TUnit))
+
 (* ---- finalization: reverse instrs, populate preds ---- *)
 
 let finalize_all (blocks : block array) : unit =
@@ -234,7 +260,12 @@ let of_kexpr (fname : string) (params : (string * Ast.typ) list)
   in
   let entry_blk = make_block entry_label in
   Hashtbl.add blocks_tbl entry_label entry_blk;
-  let b = { cur = entry_blk; blocks = blocks_tbl; next_label } in
+  let b = {
+    cur = entry_blk;
+    blocks = blocks_tbl;
+    next_label;
+    region_depth = 0;
+  } in
 
   (* Parameter prelude: ICopy(p_name, "param_i") for each scalar parameter.
      Array/matrix parameters are not runtime values — knormal resolves

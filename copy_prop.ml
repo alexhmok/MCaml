@@ -106,6 +106,11 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
     | ITail (d, c0) ->
         let c0' = rw !m c c0 in
         if c0' = c0 then i else ITail (d, c0')
+    | IRegionEnter _ -> i
+    | IRegionExit (_, None, _) -> i
+    | IRegionExit (k, Some r, ty) ->
+        let r' = rw !m c r in
+        if r' = r then i else IRegionExit (k, Some r', ty)
   in
   (* Now update the map based on the def of the (rewritten) instruction. *)
   (match i' with
@@ -154,7 +159,9 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
    | IHead (d, _) ->
        if not (is_reserved d) then m := kill_def !m d
    | ITail (d, _) ->
-       if not (is_reserved d) then m := kill_def !m d);
+       if not (is_reserved d) then m := kill_def !m d
+   | IRegionEnter _ -> ()
+   | IRegionExit _ -> ());
   (i', !c)
 
 (* Rewrite uses within a terminator. *)

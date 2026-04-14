@@ -137,6 +137,11 @@ let collect (cfg : cfg_func) : (aid, info) Hashtbl.t =
        | ICons (_, h, t) -> note_use_vreg h; note_use_vreg t
        | IHead (_, c) -> note_use_vreg c
        | ITail (_, c) -> note_use_vreg c
+       (* Phase C region brackets: no aid ops. IRegionExit's return
+          vreg (if Some) is a list/arr handle, never an aid. *)
+       | IRegionEnter _ -> ()
+       | IRegionExit (_, None, _) -> ()
+       | IRegionExit (_, Some r, _) -> note_use_vreg r
        | IConst _ | ICommand _ -> ());
     ) b.instrs
   ) cfg.blocks;
@@ -209,6 +214,7 @@ let aids_touched_by (other_cfg : cfg_func) : (aid, unit) Hashtbl.t =
           they're untracked by the escape analysis. *)
        | IHeapAllocConst _ | IHeapAlloc _ | IHeapGet _ | IHeapSet _ -> ()
        | ICons _ | IHead _ | ITail _ -> ()
+       | IRegionEnter _ | IRegionExit _ -> ()
        | IConst _ | ICommand _ -> ())
     ) b.instrs
   ) other_cfg.blocks;

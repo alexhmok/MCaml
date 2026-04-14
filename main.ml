@@ -183,6 +183,34 @@ let () =
           not (Hashtbl.mem called_by_other name)
       | _ -> false
     in
+    (* Phase C decision #5. Region save slots [$region_save_<k>_*] are
+       global scoreboard, indexed by lexical depth. Two region-containing
+       functions on the same call chain would both bump their own k=0,
+       clobbering each other's saved bump-counter values — the enclosing
+       function's region exit would then truncate back to the callee's
+       save mark instead of its own, leaking memory. v1 sidesteps this
+       by requiring that any function containing a region block is a
+       public entry point: public entries are by definition not reachable
+       from another function's body, so save-slot collisions can't arise.
+       Lift path: save/restore region save slots across non-leaf calls
+       via mcaml:stk frames; not worth it for v1. *)
+    Hashtbl.iter (fun name (cfg : Cfg.cfg_func) ->
+      if not cfg.Cfg.is_template then begin
+        let contains_region =
+          Array.exists (fun (b : Cfg.block) ->
+            List.exists (fun i ->
+              match i with
+              | Cfg.IRegionEnter _ | Cfg.IRegionExit _ -> true
+              | _ -> false) b.Cfg.instrs) cfg.Cfg.blocks
+        in
+        if contains_region && Hashtbl.mem called_by_other name then
+          failwith
+            (Printf.sprintf
+               "mcaml: function %s contains a region block but is called \
+                by another function; regions are only permitted in \
+                public-entry-point functions in v1 (DYNMEM_PLAN §C5)"
+               name)
+      end) fn_table;
     (* Reset block from DYNMEM_PLAN.md §4.4. permheap is intentionally
        excluded — it persists across invocations by design. *)
     let reset_cmds = [

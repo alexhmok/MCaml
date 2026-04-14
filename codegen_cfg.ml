@@ -110,6 +110,13 @@ let is_reserved_slot (s : string) : bool =
   s = "$ret" || s = "$arr_result" || s = "$tick_iters" ||
   s = "$scratch_next" || s = "$permheap_next" || s = "$conspool_next" ||
   s = "$arr_idx" ||
+  (* Phase C §4.1: region save slots, one pair per nesting level
+     (permheap intentionally not snapshotted per §4.4). v1 caps at
+     4 levels (k ∈ [0,3]); cfg_build fails loudly above that. *)
+  s = "$region_save_0_scratch" || s = "$region_save_0_conspool" ||
+  s = "$region_save_1_scratch" || s = "$region_save_1_conspool" ||
+  s = "$region_save_2_scratch" || s = "$region_save_2_conspool" ||
+  s = "$region_save_3_scratch" || s = "$region_save_3_conspool" ||
   (String.length s >= 5 && String.sub s 0 5 = "$ref_") ||
   (String.length s > 6
    && String.sub s 0 6 = "param_"
@@ -213,6 +220,13 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
   | ITail (d, c) ->
       st.emit_cons_tail <- true;
       push_cmds st prefix (cmd_cons_tail d c)
+  | IRegionEnter _ | IRegionExit _ ->
+      (* Phase C / C4 lands the enter/exit command sequences and the
+         region_truncate_<k> helper, then C5 adds the per-return-type
+         walker. Until then, any program that reaches codegen with a
+         region block fails loudly rather than silently skipping the
+         snapshot/restore machinery. *)
+      failwith "codegen_cfg: IRegionEnter/IRegionExit lowering lands in C4"
 
 (* Lower a terminator. Only [TTail] produces commands; the others are
    structural and get emitted as nothing.

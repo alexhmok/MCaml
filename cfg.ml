@@ -63,6 +63,20 @@ type instr =
   | ICons           of vreg * vreg * vreg              (* d := cons(h, t), side-effecting *)
   | IHead           of vreg * vreg                     (* d := head(c) *)
   | ITail           of vreg * vreg                     (* d := tail(c) *)
+  (* Phase C region brackets. [IRegionEnter k] snapshots $scratch_next/
+     $conspool_next into $region_save_<k>_* ; [IRegionExit (k, ret, typ)]
+     copies the return value into the parent arena (via a per-[typ]
+     deep-copy walker, if the type carries heap handles), truncates the
+     two pools back to their saved marks, and restores the bump counters.
+     Both are side-effecting. [IRegionExit] reads [ret] (if [Some]) but
+     the slot is also written in place — after the walker runs and the
+     truncation renumbers surviving cells, the exit rewrites [ret] to
+     the shifted handle. Level [k] is capped at 3 (4-level ceiling per
+     §4.1). Every existing pass treats these as opaque side-effecting
+     instructions with at most one read operand — same treatment as
+     IArrSet/ICons. *)
+  | IRegionEnter    of int                                       (* level k *)
+  | IRegionExit     of int * vreg option * Ast.typ               (* k, return vreg, return type *)
 
 type terminator =
   | TRet
@@ -163,6 +177,8 @@ let instr_def (i : instr) : vreg option =
   | ICons (d, _, _)         -> Some d
   | IHead (d, _)            -> Some d
   | ITail (d, _)            -> Some d
+  | IRegionEnter _          -> None
+  | IRegionExit _           -> None
 
 (* Vregs read by an instruction. Does NOT include guard-chain pinning —
    that's applied by liveness as an augmentation, not an instruction
@@ -188,6 +204,9 @@ let instr_uses (i : instr) : vreg list =
   | ICons (_, h, t)         -> [h; t]
   | IHead (_, c)            -> [c]
   | ITail (_, c)            -> [c]
+  | IRegionEnter _          -> []
+  | IRegionExit (_, None, _)   -> []
+  | IRegionExit (_, Some r, _) -> [r]
 
 (* ---- debug dump ---- *)
 
@@ -233,6 +252,9 @@ let string_of_instr (i : instr) : string =
   | ICons (d, h, t) -> Printf.sprintf "%s := cons(%s, %s)" d h t
   | IHead (d, c)    -> Printf.sprintf "%s := head(%s)" d c
   | ITail (d, c)    -> Printf.sprintf "%s := tail(%s)" d c
+  | IRegionEnter k  -> Printf.sprintf "region_enter[%d]" k
+  | IRegionExit (k, None, _) -> Printf.sprintf "region_exit[%d] ()" k
+  | IRegionExit (k, Some r, _) -> Printf.sprintf "region_exit[%d] %s" k r
 
 let string_of_term (t : terminator) : string =
   match t with

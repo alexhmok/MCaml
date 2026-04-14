@@ -167,7 +167,53 @@ work.
       per-type deep-copy walker for correctness. Landed together with
       C1 because it's a one-liner and the two form a frontend-only
       unit that emits no new IR.)
-- [ ] C3. IR: `IRegionEnter`/`IRegionExit`
+- [x] C3. IR: `IRegionEnter`/`IRegionExit`
+      (Two new ops in `cfg.ml`: `IRegionEnter of int` and
+      `IRegionExit of int * vreg option * Ast.typ`. Both side-effecting,
+      never DCE'd (`dce.ml`), never CSE'd (side-effect flag falls
+      through via `instr_def`). `IRegionEnter` has no uses/defs;
+      `IRegionExit`'s return vreg is threaded through liveness,
+      copy_prop, inline, monomorphize, unroll, sroa, regalloc_cfg —
+      identity-passthrough arms only. Cost model: 2 cmds enter, 3 cmds
+      exit (primitive-return placeholder; heap-return walker cost
+      lands with C5).
+      kexpr gains `KRegion of kexpr`. `knormal.ml` lowers
+      `Region body → KRegion (normalize_to dest body)` so the body's
+      final write still lands in the caller's dest slot (scoreboards
+      survive NBT truncation, so no extra plumbing needed on the
+      primitive path). `tco.ml` does NOT recurse into `KRegion` —
+      tail calls inside a region body stay as plain `KCall → ICall`
+      so the region exit still runs before the function returns.
+      `cfg_build.ml` threads a `region_depth` counter through `lower`;
+      `KRegion` emits `IRegionEnter k`, recurses with `k+1`, emits
+      `IRegionExit (k, None, TUnit)` (placeholder type until C5
+      plumbs the per-type walker dispatch), with a `block_is_sealed`
+      guard so an exit is never appended to an already-terminated
+      block. Cap is 4 lexical levels per §4.1; `k > 3` fails loudly
+      at lowering time.
+      `codegen_cfg.ml:is_reserved_slot` grows 8 entries
+      (`$region_save_<k>_{scratch,conspool}` for `k ∈ [0,3]`).
+      Codegen lowering is a failwith stub until C4.
+      `inline.ml:is_leaf` rejects any function containing an
+      IRegionEnter/IRegionExit — belt-and-braces, since the
+      public-entry restriction below already prevents region-bearing
+      functions from being inlined.
+      `main.ml` adds a post-Phase-1 check: any non-template function
+      that contains a region block AND is called by another non-
+      template function fails with a clear message. Rationale: region
+      save slots are global scoreboard slots indexed by lexical depth,
+      and two region-bearing functions on the same call chain would
+      clobber each other's level-0 save values, leading to the
+      enclosing function's exit truncating back to the callee's save
+      mark instead of its own. Lift path (future session): save/
+      restore region save slots across non-leaf calls via
+      `mcaml:stk frames`; not worth it for v1.
+      Probes: `region (fun () -> 42)` reaches the C4 codegen stub
+      (proving knormal + cfg_build accept the syntax end-to-end);
+      5-level nesting fails at cfg_build; region inside a helper
+      function fails at main.ml's public-entry check. All five
+      canaries byte-identical vs. pre-Phase-C; `test_dyn_array.py`
+      and `test_cons.py` still 8/8 green.)
 - [ ] C4. codegen: snapshot/restore bump pointers, `data remove` truncation loop
 - [ ] C5. Per-return-type deep-copy helper generation
 - [ ] C6. Test: long-running `region`-wrapped computation with small return

@@ -141,6 +141,9 @@ let specialize_cfg
     | ICons (d, h, t) -> ICons (v d, v h, v t)
     | IHead (d, c) -> IHead (v d, v c)
     | ITail (d, c) -> ITail (v d, v c)
+    | IRegionEnter _ as x -> x
+    | IRegionExit (k, None, ty) -> IRegionExit (k, None, ty)
+    | IRegionExit (k, Some r, ty) -> IRegionExit (k, Some (v r), ty)
   in
   let rewrite_term (t : terminator) : terminator =
     let v = rewrite_param_vreg in

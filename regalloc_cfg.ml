@@ -233,6 +233,9 @@ let alloc (cfg : Cfg.cfg_func) : unit =
     | ICons (d, h, t) -> ICons (rw d, rw h, rw t)
     | IHead (d, c) -> IHead (rw d, rw c)
     | ITail (d, c) -> ITail (rw d, rw c)
+    | IRegionEnter _ as x -> x
+    | IRegionExit (k, None, ty) -> IRegionExit (k, None, ty)
+    | IRegionExit (k, Some r, ty) -> IRegionExit (k, Some (rw r), ty)
   in
   let rewrite_term (t : Cfg.terminator) : Cfg.terminator =
     match t with

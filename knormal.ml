@@ -49,6 +49,13 @@ type kexpr =
   | KHead of string * string
   (* KTail(d, c_vreg) — d := tail(c) *)
   | KTail of string * string
+  (* --- Phase C region primitives --- *)
+  (* KRegion(body) — lexical arena bracket. cfg_build wraps the lowered
+     body with IRegionEnter/IRegionExit. The return type (for the deep-
+     copy walker in C5) is re-derived at cfg_build time; for C3/C4 all
+     regions lower as primitive-return (TUnit placeholder in IRegionExit)
+     and heap-return support lands with C5. *)
+  | KRegion of kexpr
 
 let counter = ref 0
 let new_temp () = incr counter; Printf.sprintf "$t%d" !counter
@@ -466,11 +473,16 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
   | App ("array_make", _) ->
       failwith "array_make must appear as the rhs of a let binding"
 
-  | Region _ ->
-      (* Phase C / C3 will lower this to IRegionEnter/IRegionExit brackets
-         around the body. Until then, a loud failure is better than silent
-         inlining of the body without the snapshot/restore pair. *)
-      failwith "Region: lowering lands in C3"
+  | Region body ->
+      (* Phase C / C3. Normalize the body with the same [dest] so the
+         body's final value still lands in [d]; cfg_build then brackets
+         the whole lowered body with IRegionEnter/IRegionExit around
+         the resulting kexpr. Passing dest through means that for a
+         primitive-returning region (the only shape C3/C4 support) the
+         last write inside the body goes into [d] which is a scoreboard
+         slot — scoreboard survives NBT truncation, so no further
+         plumbing is needed on the primitive path. *)
+      KRegion (normalize_to dest body)
 
   | Nil ->
       (* Empty list sentinel: -1, per §4.2. *)

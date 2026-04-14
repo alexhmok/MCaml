@@ -63,6 +63,13 @@ let estimate (i : instr) : int =
   | ICons _                     -> 5
   | IHead _                     -> 3
   | ITail _                     -> 3
+  (* Phase C region brackets. Enter is two score ops (save scratch +
+     conspool). Exit for primitive return is: call region_truncate_<k>
+     helper (1 cmd) + restore two bump counters (2 cmds). Heap returns
+     add the walker cost but that lands with C5 — primitive-return
+     placeholder estimate here is 3 for the exit. *)
+  | IRegionEnter _              -> 2
+  | IRegionExit _               -> 3
 
 (* Terminator cost. [TTail] lowers to [len(args)] param renames plus
    one [function mcaml:<f>] dispatch. The other terminators are

@@ -46,9 +46,19 @@ let fresh_event () = let e = !event_counter in incr event_counter; e
 (* ---- classification ---- *)
 
 let is_leaf (f : cfg_func) : bool =
+  (* Phase C: region-containing functions are never leaves from the
+     inliner's perspective. Inlining two region-bearing bodies into the
+     same caller would let their level-0 save slots collide — the same
+     hazard that keeps nested `region` across call boundaries out of
+     v1. Also, region-containing functions can only be public entry
+     points (enforced in main.ml), and public entries are never
+     inlinable targets anyway, so this is belt-and-braces. *)
   Array.for_all (fun (b : block) ->
     List.for_all (fun i ->
-      match i with ICall _ -> false | _ -> true) b.instrs
+      match i with
+      | ICall _ -> false
+      | IRegionEnter _ | IRegionExit _ -> false
+      | _ -> true) b.instrs
     && (match b.term with TTail _ -> false | _ -> true)
   ) f.blocks
 
@@ -98,6 +108,9 @@ let rewrite_instr (rw : vreg -> vreg) (i : instr) : instr =
   | ICons (d, h, t)         -> ICons (rw d, rw h, rw t)
   | IHead (d, c)            -> IHead (rw d, rw c)
   | ITail (d, c)            -> ITail (rw d, rw c)
+  | IRegionEnter _ as x     -> x
+  | IRegionExit (k, None, ty) -> IRegionExit (k, None, ty)
+  | IRegionExit (k, Some r, ty) -> IRegionExit (k, Some (rw r), ty)
 
 let rewrite_guards (rw : vreg -> vreg) (gs : (vreg * polarity) list) =
   List.map (fun (v, p) -> (rw v, p)) gs
