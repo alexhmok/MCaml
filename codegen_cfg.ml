@@ -70,6 +70,12 @@ type state = {
      filename before writing. *)
   mutable heap_get_pools : Ast.heap_pool list;
   mutable heap_set_pools : Ast.heap_pool list;
+  (* Phase B: per-field cons macro helper usage. Set the first time a
+     function emits an IHead / ITail. After the block walk, [emit]
+     appends [cons_head.mcfunction] / [cons_tail.mcfunction] once per
+     flagged field. Dedupe is by filename in main.ml. *)
+  mutable emit_cons_head : bool;
+  mutable emit_cons_tail : bool;
 }
 
 let fresh_helper_name (st : state) : string =
@@ -199,8 +205,14 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
       failwith
         "codegen_cfg: runtime-n Array.make (IHeapAlloc vreg-form) not \
          yet implemented — use Array.make(<int-literal>, 0)"
-  | ICons _ | IHead _ | ITail _ ->
-      failwith "codegen_cfg: cons ops not yet lowered (Phase B / B6)"
+  | ICons (d, h, t) ->
+      push_cmds st prefix (cmd_cons d h t)
+  | IHead (d, c) ->
+      st.emit_cons_head <- true;
+      push_cmds st prefix (cmd_cons_head d c)
+  | ITail (d, c) ->
+      st.emit_cons_tail <- true;
+      push_cmds st prefix (cmd_cons_tail d c)
 
 (* Lower a terminator. Only [TTail] produces commands; the others are
    structural and get emitted as nothing.
@@ -276,6 +288,8 @@ let emit (cfg : cfg_func) : (string * string list) list =
     emitted_setters = Hashtbl.create 8;
     heap_get_pools = [];
     heap_set_pools = [];
+    emit_cons_head = false;
+    emit_cons_tail = false;
   } in
   let order = reverse_postorder cfg in
   List.iter (fun l -> emit_block st cfg.blocks.(l)) order;
@@ -291,6 +305,13 @@ let emit (cfg : cfg_func) : (string * string list) list =
     let name = Printf.sprintf "%s_set" (pool_name p) in
     st.helpers <- (name, [pool_set_body p]) :: st.helpers
   ) st.heap_set_pools;
+  (* Phase B: per-field cons macro helpers. Filename is global ([cons_head]
+     / [cons_tail]), so main.ml's filename dedupe collapses the multiple
+     copies produced across functions. *)
+  if st.emit_cons_head then
+    st.helpers <- ("cons_head", [cons_head_body]) :: st.helpers;
+  if st.emit_cons_tail then
+    st.helpers <- ("cons_tail", [cons_tail_body]) :: st.helpers;
   let body_cmds = List.rev st.main_cmds in
   if cfg.preheader_instrs = [] then
     (cfg.fname, body_cmds) :: List.rev st.helpers

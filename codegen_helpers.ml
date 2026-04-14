@@ -220,6 +220,56 @@ let cmd_heap_set
     Printf.sprintf "function mcaml:%s_set with storage mcaml:tmp args"
       (pool_name p) ]
 
+(* ---- Phase B cons ops ---- *)
+
+(* §5.1 ICons — 5 commands inline, no macro helper. The pairs[-1] trick:
+   we append a fresh {h:0,t:0} compound, then store-result into the
+   [-1].h / [-1].t fields. [-1] is a literal NBT path index, not a
+   runtime value, so no macro expansion is needed on the write side. *)
+let cmd_cons (d : string) (h : string) (t : string) : string list =
+  [ "data modify storage mcaml:conspool pairs append value {h:0,t:0}";
+    Printf.sprintf
+      "execute store result storage mcaml:conspool pairs[-1].h int 1 run scoreboard players get %s %s"
+      h obj_name;
+    Printf.sprintf
+      "execute store result storage mcaml:conspool pairs[-1].t int 1 run scoreboard players get %s %s"
+      t obj_name;
+    Printf.sprintf "scoreboard players operation %s %s = $conspool_next %s"
+      d obj_name obj_name;
+    Printf.sprintf "scoreboard players add $conspool_next %s 1" obj_name ]
+
+(* §5.2 IHead / ITail — 3 commands each via a per-field macro helper.
+   Symmetric, parameterized by field name ("h" or "t"). *)
+let cmd_cons_field
+    (d : string) (c : string) (field : string) : string list =
+  [ Printf.sprintf
+      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get %s %s"
+      c obj_name;
+    Printf.sprintf "function mcaml:cons_%s with storage mcaml:tmp args"
+      (match field with "h" -> "head" | "t" -> "tail" | _ -> assert false);
+    Printf.sprintf "scoreboard players operation %s %s = $arr_result %s"
+      d obj_name obj_name ]
+
+let cmd_cons_head (d : string) (c : string) : string list =
+  cmd_cons_field d c "h"
+
+let cmd_cons_tail (d : string) (c : string) : string list =
+  cmd_cons_field d c "t"
+
+(* Body of [cons_head.mcfunction] / [cons_tail.mcfunction]. Each is a
+   single macro-expanded line reading the field out of conspool[idx]
+   into [$arr_result]. Emitted once per program via main.ml's filename
+   dedupe (same mechanism as [scratch_get.mcfunction]). *)
+let cons_head_body : string =
+  Printf.sprintf
+    "$execute store result score $arr_result %s run data get storage mcaml:conspool pairs[$(idx)].h 1"
+    obj_name
+
+let cons_tail_body : string =
+  Printf.sprintf
+    "$execute store result score $arr_result %s run data get storage mcaml:conspool pairs[$(idx)].t 1"
+    obj_name
+
 (* ---- function calls ---- *)
 
 (* Tail jump (no save/restore): param_i := arg_i for each arg, then

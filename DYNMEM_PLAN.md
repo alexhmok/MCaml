@@ -99,7 +99,20 @@ work.
       `fun main()=is_nil([])` codegens cleanly and returns 1; a
       `cons/head/tail` program reaches codegen and fires the B6
       failwith stub as expected.)
-- [ ] B6. codegen: `cons_head.mcfunction`, `cons_tail.mcfunction`, 5-command `cons` inline
+- [x] B6. codegen: `cons_head.mcfunction`, `cons_tail.mcfunction`, 5-command `cons` inline
+      (codegen_helpers gains `cmd_cons` (5 inline cmds, no macro
+      dispatch — `pairs[-1]` is a literal NBT path so the store-result
+      lines need no helper), `cmd_cons_head`/`cmd_cons_tail` (3 cmds
+      each, parameterized field), and `cons_head_body`/`cons_tail_body`
+      single-line macro emitters. codegen_cfg state grows
+      `emit_cons_head`/`emit_cons_tail` flags; per-instruction lowering
+      pushes the right command sequence and flags helper emission;
+      after the block walk, helpers are appended (deduped across
+      functions by main.ml's filename-level pass). Probe
+      `1::2::3::[] |> tail |> head` dumps with exactly 5/3/3 commands
+      per op as expected, plus the conspool reset firing because of
+      the B4 gate extension. End-to-end sim run is gated on B8's
+      sim extension for `mcaml:conspool`.)
 - [ ] B7. Nil sentinel handling (`-1`), `is_nil` builtin
 - [ ] B8. Test program (e.g., tail-recursive Fibonacci list)
 
