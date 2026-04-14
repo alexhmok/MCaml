@@ -56,6 +56,14 @@ let rec infer env e =
       let _ = infer env e1 in
       infer env e2
 
+  (* Phase B builtin: is_nil returns TBool so it can be used as an `if`
+     condition. head/tail still ride the App-fallback-returns-TInt trick
+     because their results flow through int-handle vregs and consumers
+     don't care about the static type. *)
+  | App ("is_nil", [arg]) ->
+      let _ = infer env arg in
+      TBool
+
   | App (f, args) ->
       (match Hashtbl.find_opt fun_sigs f with
        | Some (param_types, ret_type) ->

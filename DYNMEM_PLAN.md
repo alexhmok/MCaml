@@ -113,7 +113,20 @@ work.
       per op as expected, plus the conspool reset firing because of
       the B4 gate extension. End-to-end sim run is gated on B8's
       sim extension for `mcaml:conspool`.)
-- [ ] B7. Nil sentinel handling (`-1`), `is_nil` builtin
+- [x] B7. Nil sentinel handling (`-1`), `is_nil` builtin
+      (Most pieces landed in B5: `Nil → KInt -1` (§4.2 sentinel) and
+      `App("is_nil", [arg])` desugars to `KBinOp(Eq, t_l, -1)`.
+      B7 closes the gap by adding a typing arm `App("is_nil", _) →
+      TBool` so the result can sit directly in an `if` condition
+      (the App-fallback would otherwise return TInt, which `if`
+      rejects). head/tail still ride the App-fallback-returns-TInt
+      trick because their results are int-handle vregs and consumers
+      don't care about the static type. The §4.2 reference
+      lowering is "execute if score … matches -1" (1 cmd); the
+      current Eq-against-temp lowering produces 2 cmds (one IConst,
+      one IBinOp Eq → 1 cmd via cmd_score_binop). Functionally
+      equivalent; the 1-cmd form is a future peephole, not a B7
+      command-budget violation.)
 - [ ] B8. Test program (e.g., tail-recursive Fibonacci list)
 
 ### Phase C — Regions and copy-on-escape
