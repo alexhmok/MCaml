@@ -46,7 +46,7 @@ work.
 - [x] A4. knormal lowering for `Array.make` / dynamic access
 - [x] A5. cfg_build emits new IR ops
 - [x] A6. codegen_helpers: shared `scratch_get`/`scratch_set`/`permheap_*` macro helpers
-- [ ] A7. codegen_cfg: lowering for the three new ops
+- [x] A7. codegen_cfg: lowering for the three new ops
 - [ ] A8. Allocator init lines in `init.mcfunction` (via `tools/pack_datapack.py`)
 - [ ] A9. Per-invocation arena reset at public entry-point exits
 - [ ] A10. Test program + simulator coverage

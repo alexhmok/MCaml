@@ -62,6 +62,14 @@ type state = {
   mutable helper_ctr  : int;
   emitted_macros   : (aid, unit) Hashtbl.t;
   emitted_setters  : (aid, unit) Hashtbl.t;
+  (* Phase A: per-pool shared-macro-helper usage. Set the first time a
+     function emits an IHeapGet / IHeapSet for that pool. After the
+     block walk finishes, [emit] appends one [<pool>_get.mcfunction] /
+     [<pool>_set.mcfunction] pair per flagged pool. Multiple functions
+     will each emit their own copy; [main.ml] dedupes [all_files] by
+     filename before writing. *)
+  mutable heap_get_pools : Ast.heap_pool list;
+  mutable heap_set_pools : Ast.heap_pool list;
 }
 
 let fresh_helper_name (st : state) : string =
@@ -177,10 +185,20 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
   | IArrSet (id, idx, v) ->
       ensure_macro_setter st id;
       push_cmds st prefix (cmd_arr_set id idx v)
-  (* Dynamic-heap ops: lowering lives in A7. No producer in A3–A4 so
-     reaching this arm means a pipeline bug; fail loud rather than silent. *)
-  | IHeapAllocConst _ | IHeapAlloc _ | IHeapGet _ | IHeapSet _ ->
-      failwith "codegen_cfg: IHeap* lowering not implemented until Phase A / A7"
+  | IHeapAllocConst (d, p, n) ->
+      push_cmds st prefix (cmd_heap_alloc_const d p n)
+  | IHeapGet (d, p, base, idx) ->
+      if not (List.mem p st.heap_get_pools) then
+        st.heap_get_pools <- p :: st.heap_get_pools;
+      push_cmds st prefix (cmd_heap_get d p base idx)
+  | IHeapSet (p, base, idx, v) ->
+      if not (List.mem p st.heap_set_pools) then
+        st.heap_set_pools <- p :: st.heap_set_pools;
+      push_cmds st prefix (cmd_heap_set p base idx v)
+  | IHeapAlloc _ ->
+      failwith
+        "codegen_cfg: runtime-n Array.make (IHeapAlloc vreg-form) not \
+         yet implemented — use Array.make(<int-literal>, 0)"
 
 (* Lower a terminator. Only [TTail] produces commands; the others are
    structural and get emitted as nothing.
@@ -254,9 +272,23 @@ let emit (cfg : cfg_func) : (string * string list) list =
     helper_ctr  = 0;
     emitted_macros = Hashtbl.create 8;
     emitted_setters = Hashtbl.create 8;
+    heap_get_pools = [];
+    heap_set_pools = [];
   } in
   let order = reverse_postorder cfg in
   List.iter (fun l -> emit_block st cfg.blocks.(l)) order;
+  (* Phase A: append per-pool shared macro helpers whose usage this
+     function flagged. Filename is [<pool>_get] / [<pool>_set] — identical
+     across functions, so main.ml dedupes all_files by filename before
+     writing. *)
+  List.iter (fun p ->
+    let name = Printf.sprintf "%s_get" (pool_name p) in
+    st.helpers <- (name, [pool_get_body p]) :: st.helpers
+  ) st.heap_get_pools;
+  List.iter (fun p ->
+    let name = Printf.sprintf "%s_set" (pool_name p) in
+    st.helpers <- (name, [pool_set_body p]) :: st.helpers
+  ) st.heap_set_pools;
   let body_cmds = List.rev st.main_cmds in
   if cfg.preheader_instrs = [] then
     (cfg.fname, body_cmds) :: List.rev st.helpers

@@ -240,6 +240,19 @@ let () =
       Tick_guard.run ~guarded:(List.rev !guarded_funs) split_files
     in
 
+    (* Phase A: dedupe by filename (keep first occurrence). Shared dyn-heap
+       macro helpers (scratch_get, scratch_set, …) are appended by every
+       codegen_cfg.emit call that uses them, so a program with N functions
+       touching the dyn heap would otherwise produce N byte-identical
+       copies. Existing helper files (_call<N>, <aid>_get) already have
+       function-unique names so this is a no-op on the static path. *)
+    let final_files =
+      let seen : (string, unit) Hashtbl.t = Hashtbl.create 32 in
+      List.filter (fun (fname, _) ->
+        if Hashtbl.mem seen fname then false
+        else (Hashtbl.add seen fname (); true)
+      ) final_files
+    in
     List.iter (fun (fname, cmds) ->
       let filename = Filename.concat out_dir (fname ^ ".mcfunction") in
       let oc = open_out filename in

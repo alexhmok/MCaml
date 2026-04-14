@@ -132,13 +132,13 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
   | Unit ->
       (match dest with Some d -> KLet(d, KInt 0, KUnit) | None -> KUnit)
 
-  | Let (x, App ("Array.make", [n_expr; v_expr]), e2) ->
+  | Let (x, App ("array_make", [n_expr; v_expr]), e2) ->
       (* Phase A dynamic-heap allocation.
          v1 scope: requires v_expr = Int 0 (non-zero init needs a runtime
          fill loop, deferred to a later session). *)
       (match v_expr with
        | Int 0 -> ()
-       | _ -> failwith "Array.make: v1 only supports initializer 0");
+       | _ -> failwith "array_make: v1 only supports initializer 0");
       let len_slot = "$dyn_len_" ^ x in
       Hashtbl.replace dyn_env x len_slot;
       let k_body = normalize_to dest e2 in
@@ -456,8 +456,8 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
        | None -> assign
        | Some d -> KSeq(assign, KLet(d, KInt 0, KUnit)))
 
-  | App ("Array.make", _) ->
-      failwith "Array.make must appear as the rhs of a let binding"
+  | App ("array_make", _) ->
+      failwith "array_make must appear as the rhs of a let binding"
 
   | App (f, args) ->
       let rec bind_args args acc = match args with

@@ -1,0 +1,10 @@
+(* Phase A smoke test: const-size dynamic array via array_make.
+   Allocates 4 cells in the scratch pool, writes four distinct values,
+   reads one back. Expected $ret = 30. *)
+fun main () : int =
+  let a = array_make(4, 0) in
+  array_set(a, 0, 10);
+  array_set(a, 1, 20);
+  array_set(a, 2, 30);
+  array_set(a, 3, 40);
+  array_get(a, 2)
