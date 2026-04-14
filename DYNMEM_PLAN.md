@@ -55,10 +55,16 @@ work.
       (`scripts/test_dyn_array.mcaml` has four straight-line sub-tests — basic,
       read-modify-write, multi-alloc, mixed static+dyn — validated through
       `/tmp/mcaml_out/test_dyn_array.py` against sim.py with zero simulator
-      changes. **Deferred**: cross-function TArrDyn passing and for-loops over
-      dyn arrays both need normalize_fun + cfg_build to seed dyn_env for
-      TArrDyn params; pick up alongside Phase B plumbing or as a standalone
-      follow-up.)
+      changes. **Follow-up landed**: cross-function TArrDyn passing and
+      for-loops over dyn arrays now work via (a) strict typing arms for
+      `array_make`/`array_get`/`array_set` surfacing `TArrDyn TInt`,
+      (b) `normalize_fun` seeding `dyn_env` for TArrDyn params (cfg_build's
+      scalar `_` arm already emits the handle `ICopy`, no edit needed),
+      and (c) a `darr` surface keyword (`T_DARR` → `TArrDyn TInt`) so
+      helpers can declare dyn-array params. Validated by
+      `scripts/test_dyn_array_params.mcaml` against `sim.py`: cross-func
+      read (60), cross-func fill (45), and in-function for-loop over a
+      dyn array (30).)
 
 ### Phase B — Lists and cons
 - [x] B1. Parser: `::`, `[]`, list literal desugaring in `parser.mly`/`lexer.mll`
@@ -284,7 +290,37 @@ work.
       1→2→3→nil at parent positions [0..2]). All five canaries
       byte-identical vs. pre-Phase-C; both Python exit suites still
       green.)
-- [ ] C6. Test: long-running `region`-wrapped computation with small return
+- [x] C6. Test: long-running `region`-wrapped computation with small return
+      (`scripts/test_regions.mcaml` has 5 entry points, all returning
+      `int` per §4.4's public-entry primitive-return contract:
+      `test_region_int` (primitive exit path, 5-element list sum inside
+      a region), `test_region_list_return` (walker round-trip — region
+      returns `TList TInt`, outer scope sums the copied list),
+      `test_region_nested` (depth-2 region nesting verifies that both
+      `$region_save_0_*` and `$region_save_1_*` are saved and restored
+      in the right order), `test_region_two_sequential` (two regions
+      back-to-back in the same function verifies the second region's
+      saved-conspool mark tracks the first region's post-exit value,
+      not its own pre-enter value), `test_region_loop` (for-loop
+      inside a region allocates 30 cons cells over 10 iterations,
+      accumulating into a ref; the region exit truncates all 30 back
+      to 0 on the way out).
+      Test harness `/tmp/mcaml_out/test_regions.py` (not committed —
+      same convention as the dyn-array and cons harnesses):
+      compile, seed the new `mcaml:region_tmp {conspool,scratch}`
+      storage paths in each fresh World (mirrors §4.5's init), call
+      each entry point in a fresh World, and assert on BOTH the
+      `$ret` value AND three post-conditions — `$conspool_next == 0`,
+      `$scratch_next == 0`, and `mcaml:region_tmp conspool == []`
+      after the function returns. The post-conditions verify that
+      every exit path truly cleaned up and not just that the
+      reductions happen to yield the right int.
+      Note: MCaml's `for i = lo to hi` is exclusive on `hi` (a
+      `for i = 0 to 4` over a 4-element array iterates indices 0..3).
+      `test_region_loop` uses `1 to 11` to iterate 10 times;
+      documented inline in the test for future readers.
+      All five canaries byte-identical vs. pre-Phase-C; all 14
+      Python-harness tests green (4 dyn-array + 5 cons + 5 region).)
 
 ## 3. Load-bearing design decisions
 

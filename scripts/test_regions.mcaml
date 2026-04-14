@@ -1,0 +1,73 @@
+(* Phase C exit tests for region blocks.
+
+   All entry points return TInt. Per DYNMEM_PLAN §4.4's "public-entry
+   primitive-return contract", any TList / TArrDyn handle returned
+   directly from a public-entry function is dangling after the A9
+   reset wipes the pools. These tests build lists inside regions,
+   optionally let the region return a TList (the walker deep-copies
+   it into the parent region), then reduce to an int before the
+   function returns. The int lives in the scoreboard and survives
+   both the region exit AND the A9 reset. *)
+
+fun sum_list(l: list, acc: int) : int =
+  if is_nil(l) then acc
+  else sum_list(l |> tail, acc + (l |> head))
+
+(* T1: region returns an int directly. Primitive exit path: no
+   walker, just the two truncation helpers. Conspool fills with
+   5 cells inside the region, then drains back to 0 on exit. *)
+fun test_region_int () : int =
+  region (fun () ->
+    let l = 1 :: 2 :: 3 :: 4 :: 5 :: [] in
+    sum_list(l, 0))
+
+(* T2: region returns a TList. Exercises the Strategy-B walker:
+   stash the chain into region_tmp, truncate conspool back to the
+   saved mark, rebuild the chain at parent-region handles. Outer
+   scope then sums the copied list into an int for the final
+   primitive return. *)
+fun test_region_list_return () : int =
+  let copied = region (fun () -> 10 :: 20 :: 30 :: []) in
+  sum_list(copied, 0)
+
+(* T3: nested regions. The inner region returns an int, which the
+   outer region also returns. Verifies that both $region_save_0_*
+   and $region_save_1_* are allocated and restored in the right
+   order (inner restores first, then outer). *)
+fun test_region_nested () : int =
+  region (fun () ->
+    let outer_base = 100 in
+    outer_base + region (fun () ->
+      let l = 7 :: 8 :: 9 :: [] in
+      sum_list(l, 0)))
+
+(* T4: two regions back-to-back in the same function. After the
+   first region's exit the conspool is truncated back to 0; the
+   second region's allocations must not see stale handles from the
+   first. *)
+fun test_region_two_sequential () : int =
+  let a = region (fun () ->
+    let l = 1 :: 2 :: 3 :: [] in
+    sum_list(l, 0)) in
+  let b = region (fun () ->
+    let l = 4 :: 5 :: 6 :: [] in
+    sum_list(l, 0)) in
+  a + b
+
+(* T5: long-running loop inside a region. Each iteration allocates
+   3 cons cells and discards them into the region's arena. Without
+   region truncation the conspool would grow to 30 cells and stay
+   there across invocations; with the region exit it drains back
+   to 0. The for-loop lifts into a synthetic helper that's called
+   from inside the region body — the public-entry-only region
+   restriction passes because the helper is not itself called from
+   any other function's region body. Note: MCaml's [for i = lo to
+   hi] is exclusive on hi, so [1 to 11] iterates i ∈ {1..10}. *)
+fun test_region_loop () : int =
+  region (fun () ->
+    let acc = ref 0 in
+    for i = 1 to 11 do
+      let l = i :: (i + 1) :: (i + 2) :: [] in
+      acc := !acc + sum_list(l, 0)
+    done;
+    !acc)
