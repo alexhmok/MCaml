@@ -91,7 +91,7 @@ typ:
   | T_UNIT { TUnit }
   | T_SEL { TSelector }
   | T_POS { TPos }
-  | T_ARR LBRACK T_INT COMMA n = INT RBRACK { TArr(TInt, n) }
+  | T_ARR LBRACK T_INT COMMA n = INT RBRACK { TArrStatic(TInt, n) }
   | T_MAT LBRACK T_INT COMMA m = INT COMMA n = INT RBRACK { TMat(TInt, m, n) }
   | REF T_INT { TRef TInt }
   | REF T_BOOL { TRef TBool }

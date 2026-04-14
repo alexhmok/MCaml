@@ -214,7 +214,7 @@ let of_kexpr (fname : string) (params : (string * Ast.typ) list)
      prelude copy for them. *)
   List.iteri (fun i (p_name, ty) ->
     match ty with
-    | Ast.TArr _ | Ast.TMat _ -> ()
+    | Ast.TArrStatic _ | Ast.TMat _ -> ()
     | _ ->
         let param_slot = Printf.sprintf "param_%d" i in
         add_instr entry_blk (ICopy (p_name, param_slot))
@@ -237,7 +237,7 @@ let of_kexpr (fname : string) (params : (string * Ast.typ) list)
 
   let is_template =
     List.exists (fun (_, t) ->
-      match t with Ast.TArr _ | Ast.TMat _ -> true | _ -> false) params
+      match t with Ast.TArrStatic _ | Ast.TMat _ -> true | _ -> false) params
   in
   {
     fname;

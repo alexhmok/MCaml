@@ -176,7 +176,7 @@ let extract_maps
   let paired = List.combine (List.mapi (fun i p -> (i, p)) callee_params) call_args in
   List.fold_left (fun (amap, scalars) ((idx, (_, ty)), arg) ->
     match ty with
-    | Ast.TArr _ | Ast.TMat _ ->
+    | Ast.TArrStatic _ | Ast.TMat _ ->
         if not (is_pseudo_arr arg) then
           failwith (Printf.sprintf
             "monomorphize: callee expects array at param %d, got %s" idx arg);
@@ -210,7 +210,7 @@ let ensure_clone
     let counter = ref 0 in
     List.iteri (fun i (pname, ty) ->
       match ty with
-      | Ast.TArr _ | Ast.TMat _ -> ()
+      | Ast.TArrStatic _ | Ast.TMat _ -> ()
       | _ ->
           remap.(i) <- Some !counter;
           incr counter;

@@ -40,7 +40,7 @@ Update this section as tasks complete. Format: one bullet per task, marked
 work.
 
 ### Phase A — Dynamic arrays
-- [ ] A1. Type system: add `TArrStatic`/`TArrDyn` split in `ast.ml`, `typing.ml`
+- [x] A1. Type system: add `TArrStatic`/`TArrDyn` split in `ast.ml`, `typing.ml`
 - [ ] A2. Runtime layout: `mcaml:scratch cells`, `mcaml:permheap cells`, bump counters
 - [ ] A3. IR: `IHeapAlloc`/`IHeapGet`/`IHeapSet` in `cfg.ml`
 - [ ] A4. knormal lowering for `Array.make` / dynamic access

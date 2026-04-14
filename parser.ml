@@ -1291,7 +1291,7 @@ let _menhir_action_69 =
   fun n ->
     (
 # 94 "parser.mly"
-                                            ( TArr(TInt, n) )
+                                            ( TArrStatic(TInt, n) )
 # 1296 "parser.ml"
      : 
 # 36 "parser.mly"

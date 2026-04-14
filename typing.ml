@@ -77,19 +77,19 @@ let rec infer env e =
 
   | Array elems ->
       (match elems with
-       | [] -> TArr (TInt, 0)
+       | [] -> TArrStatic (TInt, 0)
        | _ ->
            let ts = List.map (infer env) elems in
            if List.for_all (fun t -> t = TInt) ts then
-             TArr (TInt, List.length elems)
+             TArrStatic (TInt, List.length elems)
            else
              let get_inner_len t =
                match t with
-               | TArr (TInt, k) -> k
+               | TArrStatic (TInt, k) -> k
                | _ -> raise (Error "Array elements must all be int or all be arrays of int with matching length")
              in
              let k = get_inner_len (List.hd ts) in
-             if List.for_all (fun t -> t = TArr (TInt, k)) ts then
+             if List.for_all (fun t -> t = TArrStatic (TInt, k)) ts then
                TMat (TInt, List.length elems, k)
              else
                raise (Error "Array elements must all be int or all be arrays of int with matching length"))
@@ -98,7 +98,7 @@ let rec infer env e =
       let te = infer env e in
       let t =
         match te with
-        | TArr (t, _) -> t
+        | TArrStatic (t, _) -> t
         | _ -> raise (Error "a[i] requires an array")
       in
       let ti = infer env i in
@@ -122,7 +122,7 @@ let rec infer env e =
       let tb = infer env base in
       let t =
         match tb with
-        | TArr (t, _) -> t
+        | TArrStatic (t, _) -> t
         | _ -> raise (Error "a[i] := v requires an array")
       in
       let ti = infer env idx in

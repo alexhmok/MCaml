@@ -416,7 +416,7 @@ let normalize_fun (params : (string * Ast.typ) list) (body : expr) : kexpr =
   Hashtbl.clear arr_dims;
   List.iteri (fun i (name, ty) ->
     match ty with
-    | TArr (_, n) ->
+    | TArrStatic (_, n) ->
         let sentinel = Printf.sprintf "#param%d" i in
         Hashtbl.replace arr_env name sentinel;
         Hashtbl.replace arr_dims name (n, None)
