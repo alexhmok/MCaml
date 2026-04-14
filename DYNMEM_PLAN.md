@@ -214,7 +214,29 @@ work.
       function fails at main.ml's public-entry check. All five
       canaries byte-identical vs. pre-Phase-C; `test_dyn_array.py`
       and `test_cons.py` still 8/8 green.)
-- [ ] C4. codegen: snapshot/restore bump pointers, `data remove` truncation loop
+- [x] C4. codegen: snapshot/restore bump pointers, `data remove` truncation loop
+      (`codegen_helpers.ml` gains `cmd_region_enter` (2 score ops),
+      `cmd_region_exit_primitive` (2 helper dispatches),
+      `region_truncate_scratch_body` / `region_truncate_conspool_body`
+      (3 self-guarded commands each: pop tail cell, decrement counter,
+      self-recurse while counter > saved). `codegen_cfg.ml` state grows
+      `region_exit_levels`; IRegionExit lowering pushes the exit cmds
+      and flags the level; after the block walk, per-level
+      `region_truncate_<k>_{scratch,conspool}.mcfunction` helpers are
+      appended to the function's file list and deduped by filename in
+      main.ml. C4 implements the primitive-return path only; heap-
+      return walker dispatch lands with C5. Probe
+      `region (fun () -> 1::2::3::[] |> head)` emits the expected
+      2/5/5/5/3/2 command sequence (enter/cons×3/head/exit), the
+      truncation helpers correctly pop back to the saved mark under
+      sim, and `$ret = 1` matches the head-of-list semantics.
+      **v1 limitation (plan §5.6 correction)**: the truncation helper
+      does NOT use tick_guard-style slicing. Yielding mid-helper via
+      `schedule ... 1t ; return 0` would return partial work to the
+      synchronous caller, which then continues past IRegionExit with
+      a dangling pool state. Regions must stay under ~20k cells per
+      pool per region to fit Minecraft's maxCommandChainLength. A
+      proper async exit sequence is future work — see §12.)
 - [ ] C5. Per-return-type deep-copy helper generation
 - [ ] C6. Test: long-running `region`-wrapped computation with small return
 
@@ -701,6 +723,21 @@ the user if a task tempts you toward them.
   MineTorch and vocab tables. For now strings are out of scope.
 - MineTorch itself (the ONNX-importing ML DSL). Entirely separate project,
   interfaces with MCaml through a small set of NBT-storage builtins.
+- `region` blocks in non-public-entry functions. v1 requires that any
+  function containing a `region` block is a public entry point (see §C3
+  commit message for the concrete failure mode). The lift path is
+  saving/restoring `$region_save_<k>_*` scoreboard slots across non-
+  leaf calls via `mcaml:stk frames`; not worth the per-call overhead
+  for v1.
+- Tick-guard-style slicing inside `region_truncate_<k>_*.mcfunction`
+  helpers. §5.6 originally specified this but the synchronous-caller
+  contract makes it incorrect: yielding mid-helper via `schedule ...
+  1t ; return 0` returns partial work to the caller, which then
+  continues past `IRegionExit` with a dangling pool. v1's helpers run
+  synchronously to completion, capping region size at ~20k cells per
+  pool (Minecraft's `maxCommandChainLength`). A proper async exit
+  requires the caller to also yield and resume via a continuation
+  mechanism — future work.
 
 ## 12. Escalation triggers
 

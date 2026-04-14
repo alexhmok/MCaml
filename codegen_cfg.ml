@@ -76,6 +76,12 @@ type state = {
      flagged field. Dedupe is by filename in main.ml. *)
   mutable emit_cons_head : bool;
   mutable emit_cons_tail : bool;
+  (* Phase C: levels (k) for which IRegionExit fired in this function.
+     After the block walk, [emit] appends the per-level truncation
+     helpers [region_truncate_<k>_scratch.mcfunction] and
+     [region_truncate_<k>_conspool.mcfunction] to [helpers]. Filename
+     dedup in main.ml collapses the copies across functions. *)
+  mutable region_exit_levels : int list;
 }
 
 let fresh_helper_name (st : state) : string =
@@ -220,13 +226,18 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
   | ITail (d, c) ->
       st.emit_cons_tail <- true;
       push_cmds st prefix (cmd_cons_tail d c)
-  | IRegionEnter _ | IRegionExit _ ->
-      (* Phase C / C4 lands the enter/exit command sequences and the
-         region_truncate_<k> helper, then C5 adds the per-return-type
-         walker. Until then, any program that reaches codegen with a
-         region block fails loudly rather than silently skipping the
-         snapshot/restore machinery. *)
-      failwith "codegen_cfg: IRegionEnter/IRegionExit lowering lands in C4"
+  | IRegionEnter k ->
+      push_cmds st prefix (cmd_region_enter k)
+  | IRegionExit (k, _, _) ->
+      (* C4 handles the primitive-return path. C5 adds heap-return
+         copy-walker dispatch before the truncation calls; until then
+         every exit is treated as primitive, which is correct for
+         TInt/TBool/TUnit returns and wrong (leak + dangle) for TList/
+         TArrDyn returns. cfg_build currently only produces the
+         placeholder-TUnit form so the wrong path is unreachable. *)
+      if not (List.mem k st.region_exit_levels) then
+        st.region_exit_levels <- k :: st.region_exit_levels;
+      push_cmds st prefix (cmd_region_exit_primitive k)
 
 (* Lower a terminator. Only [TTail] produces commands; the others are
    structural and get emitted as nothing.
@@ -304,6 +315,7 @@ let emit (cfg : cfg_func) : (string * string list) list =
     heap_set_pools = [];
     emit_cons_head = false;
     emit_cons_tail = false;
+    region_exit_levels = [];
   } in
   let order = reverse_postorder cfg in
   List.iter (fun l -> emit_block st cfg.blocks.(l)) order;
@@ -326,6 +338,16 @@ let emit (cfg : cfg_func) : (string * string list) list =
     st.helpers <- ("cons_head", [cons_head_body]) :: st.helpers;
   if st.emit_cons_tail then
     st.helpers <- ("cons_tail", [cons_tail_body]) :: st.helpers;
+  (* Phase C: per-level truncation helpers, one scratch and one
+     conspool helper per level observed in this function. Filenames
+     are global so main.ml's filename dedupe collapses copies from
+     multiple functions sharing the same levels. *)
+  List.iter (fun k ->
+    let sname = Printf.sprintf "region_truncate_%d_scratch" k in
+    let cname = Printf.sprintf "region_truncate_%d_conspool" k in
+    st.helpers <- (sname, region_truncate_scratch_body k) :: st.helpers;
+    st.helpers <- (cname, region_truncate_conspool_body k) :: st.helpers
+  ) st.region_exit_levels;
   let body_cmds = List.rev st.main_cmds in
   if cfg.preheader_instrs = [] then
     (cfg.fname, body_cmds) :: List.rev st.helpers

@@ -335,3 +335,65 @@ let cmd_call_helper_body_narrow
   in
   let pop = "data remove storage mcaml:stk frames[-1]" in
   [init; push] @ saves @ param_sets @ [call] @ restores @ [pop]
+
+(* ---- Phase C region enter / exit + truncation helpers ---- *)
+
+(* §5.6 enter: two score ops, one per snapshotted pool. Permheap is
+   intentionally NOT snapshotted per §4.4 (permheap persists across
+   invocations). *)
+let cmd_region_enter (k : int) : string list =
+  [
+    Printf.sprintf
+      "scoreboard players operation $region_save_%d_scratch %s = $scratch_next %s"
+      k obj_name obj_name;
+    Printf.sprintf
+      "scoreboard players operation $region_save_%d_conspool %s = $conspool_next %s"
+      k obj_name obj_name;
+  ]
+
+(* §5.6 exit, primitive-return path. C5 adds the heap-return variant
+   that runs a deep-copy walker before these calls. The helpers
+   themselves pop one cell per self-recursive iteration and terminate
+   when the pool counter equals the saved mark — counter restore
+   happens inline with the loop so the caller needs no explicit
+   scoreboard op after the helper returns. *)
+let cmd_region_exit_primitive (k : int) : string list =
+  [
+    Printf.sprintf "function mcaml:region_truncate_%d_scratch" k;
+    Printf.sprintf "function mcaml:region_truncate_%d_conspool" k;
+  ]
+
+(* Body of region_truncate_<k>_scratch.mcfunction. Three guarded
+   commands per iteration: pop the tail cell, decrement the bump
+   counter, self-recurse while counter > saved. v1 limitation: no
+   tick_guard-style slicing because the helper is called synchronously
+   from the region-containing function and the caller depends on
+   completion — yielding mid-helper would return partial work and the
+   caller would continue past the region exit with a dangling pool
+   state. Documented in §12 as a future-work item; v1's regions must
+   stay under ~20k cells per pool to fit maxCommandChainLength. *)
+let region_truncate_scratch_body (k : int) : string list =
+  let guard =
+    Printf.sprintf
+      "execute if score $scratch_next %s > $region_save_%d_scratch %s run"
+      obj_name k obj_name
+  in
+  [
+    Printf.sprintf "%s data remove storage mcaml:scratch cells[-1]" guard;
+    Printf.sprintf "%s scoreboard players remove $scratch_next %s 1"
+      guard obj_name;
+    Printf.sprintf "%s function mcaml:region_truncate_%d_scratch" guard k;
+  ]
+
+let region_truncate_conspool_body (k : int) : string list =
+  let guard =
+    Printf.sprintf
+      "execute if score $conspool_next %s > $region_save_%d_conspool %s run"
+      obj_name k obj_name
+  in
+  [
+    Printf.sprintf "%s data remove storage mcaml:conspool pairs[-1]" guard;
+    Printf.sprintf "%s scoreboard players remove $conspool_next %s 1"
+      guard obj_name;
+    Printf.sprintf "%s function mcaml:region_truncate_%d_conspool" guard k;
+  ]
