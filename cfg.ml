@@ -56,6 +56,13 @@ type instr =
   | IHeapAlloc      of vreg * heap_pool * vreg         (* d = pool_next; pool_next += <n_vreg> *)
   | IHeapGet        of vreg * heap_pool * vreg * vreg  (* d := pool[base + idx] *)
   | IHeapSet        of heap_pool * vreg * vreg * vreg  (* pool[base + idx] := v, side-effecting *)
+  (* Phase B cons-list ops. Conspool is its own pool (compound cells
+     {h, t}), separate from scratch/permheap. ICons bumps $conspool_next
+     and writes NBT (side-effecting). IHead/ITail read via per-field
+     macro helpers (mirror IArrGet's hidden $arr_result write). *)
+  | ICons           of vreg * vreg * vreg              (* d := cons(h, t), side-effecting *)
+  | IHead           of vreg * vreg                     (* d := head(c) *)
+  | ITail           of vreg * vreg                     (* d := tail(c) *)
 
 type terminator =
   | TRet
@@ -153,6 +160,9 @@ let instr_def (i : instr) : vreg option =
   | IHeapAlloc (d, _, _)    -> Some d
   | IHeapGet (d, _, _, _)   -> Some d
   | IHeapSet _              -> None
+  | ICons (d, _, _)         -> Some d
+  | IHead (d, _)            -> Some d
+  | ITail (d, _)            -> Some d
 
 (* Vregs read by an instruction. Does NOT include guard-chain pinning —
    that's applied by liveness as an augmentation, not an instruction
@@ -175,6 +185,9 @@ let instr_uses (i : instr) : vreg list =
   | IHeapAlloc (_, _, n)    -> [n]
   | IHeapGet (_, _, b, i)   -> [b; i]
   | IHeapSet (_, b, i, v)   -> [b; i; v]
+  | ICons (_, h, t)         -> [h; t]
+  | IHead (_, c)            -> [c]
+  | ITail (_, c)            -> [c]
 
 (* ---- debug dump ---- *)
 
@@ -217,6 +230,9 @@ let string_of_instr (i : instr) : string =
   | IHeapSet (p, b, i, v) ->
       Printf.sprintf "hset[%s](%s + %s) := %s"
         (match p with PoolScratch -> "scratch" | PoolPermheap -> "permheap") b i v
+  | ICons (d, h, t) -> Printf.sprintf "%s := cons(%s, %s)" d h t
+  | IHead (d, c)    -> Printf.sprintf "%s := head(%s)" d c
+  | ITail (d, c)    -> Printf.sprintf "%s := tail(%s)" d c
 
 let string_of_term (t : terminator) : string =
   match t with

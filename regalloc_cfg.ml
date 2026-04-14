@@ -230,6 +230,9 @@ let alloc (cfg : Cfg.cfg_func) : unit =
     | IHeapAlloc (d, p, n) -> IHeapAlloc (rw d, p, rw n)
     | IHeapGet (d, p, b, idx) -> IHeapGet (rw d, p, rw b, rw idx)
     | IHeapSet (p, b, idx, v) -> IHeapSet (p, rw b, rw idx, rw v)
+    | ICons (d, h, t) -> ICons (rw d, rw h, rw t)
+    | IHead (d, c) -> IHead (rw d, rw c)
+    | ITail (d, c) -> ITail (rw d, rw c)
   in
   let rewrite_term (t : Cfg.terminator) : Cfg.terminator =
     match t with

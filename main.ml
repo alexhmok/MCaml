@@ -167,7 +167,12 @@ let () =
             (match instr with
              | Cfg.ICall (_, f, _) -> Hashtbl.replace called_by_other f ()
              | Cfg.IHeapAllocConst _ | Cfg.IHeapAlloc _
-             | Cfg.IHeapGet _ | Cfg.IHeapSet _ -> any_dyn_heap_use := true
+             | Cfg.IHeapGet _ | Cfg.IHeapSet _
+             (* Phase B: cons ops also consume dynamic memory (the
+                conspool), so a cons-only program still needs the
+                end-of-invocation arena reset. *)
+             | Cfg.ICons _ | Cfg.IHead _ | Cfg.ITail _ ->
+                 any_dyn_heap_use := true
              | _ -> ())
           ) b.Cfg.instrs
         ) cfg.Cfg.blocks

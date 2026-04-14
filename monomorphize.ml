@@ -138,6 +138,9 @@ let specialize_cfg
     | IHeapAlloc (d, p, n) -> IHeapAlloc (v d, p, v n)
     | IHeapGet (d, p, b, idx) -> IHeapGet (v d, p, v b, v idx)
     | IHeapSet (p, b, idx, vr) -> IHeapSet (p, v b, v idx, v vr)
+    | ICons (d, h, t) -> ICons (v d, v h, v t)
+    | IHead (d, c) -> IHead (v d, v c)
+    | ITail (d, c) -> ITail (v d, v c)
   in
   let rewrite_term (t : terminator) : terminator =
     let v = rewrite_param_vreg in

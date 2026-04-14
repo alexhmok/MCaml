@@ -170,6 +170,11 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
   | IHeapAlloc (d, _, _) -> (i, kill m d, false)
   | IHeapGet (d, _, _, _) -> (i, kill m d, false)
   | IHeapSet _ -> (i, m, false)
+  (* Phase B cons ops: result is a runtime pool index / NBT read, so the
+     dest never holds a statically-knowable int. Kill the dest. *)
+  | ICons (d, _, _) -> (i, kill m d, false)
+  | IHead (d, _) -> (i, kill m d, false)
+  | ITail (d, _) -> (i, kill m d, false)
 
 let run (cfg : cfg_func) : bool =
   let changed = ref false in

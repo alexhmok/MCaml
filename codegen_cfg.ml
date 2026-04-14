@@ -199,6 +199,8 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
       failwith
         "codegen_cfg: runtime-n Array.make (IHeapAlloc vreg-form) not \
          yet implemented — use Array.make(<int-literal>, 0)"
+  | ICons _ | IHead _ | ITail _ ->
+      failwith "codegen_cfg: cons ops not yet lowered (Phase B / B6)"
 
 (* Lower a terminator. Only [TTail] produces commands; the others are
    structural and get emitted as nothing.

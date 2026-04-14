@@ -77,7 +77,18 @@ work.
       `any_dyn_heap_use` which currently only scans `IHeap*` — once
       `ICons`/`IHead`/`ITail` exist, that predicate must also count
       those so a cons-only program still gets the conspool reset.)
-- [ ] B4. IR: `ICons`/`IHead`/`ITail`
+- [x] B4. IR: `ICons`/`IHead`/`ITail`
+      (Added to `cfg.ml` with instr_def/instr_uses/string_of_instr.
+      All three are side-effecting in `dce.ml` (ICons bumps counter +
+      writes NBT; IHead/ITail read NBT via macro helpers with the
+      same hidden `$arr_result` write as IArrGet). Identity-passthrough
+      arms added to copy_prop, inline, monomorphize, unroll,
+      regalloc_cfg, const_fold (kill dest), cost (5/3/3 per §5.1–5.2),
+      and sroa (note_use for handle operands). local_cse reaches them
+      via the Cfg.instr_def fallback. codegen_cfg has a failwith stub
+      pending B6. `main.ml`'s `any_dyn_heap_use` gate now counts cons
+      ops so cons-only programs trip the arena reset (resolves the
+      B3 deferral).)
 - [ ] B5. knormal/cfg_build lowering
 - [ ] B6. codegen: `cons_head.mcfunction`, `cons_tail.mcfunction`, 5-command `cons` inline
 - [ ] B7. Nil sentinel handling (`-1`), `is_nil` builtin

@@ -96,6 +96,16 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
         let v' = rw !m c v in
         if b' = b && idx' = idx && v' = v then i
         else IHeapSet (p, b', idx', v')
+    | ICons (d, h, t) ->
+        let h' = rw !m c h in
+        let t' = rw !m c t in
+        if h' = h && t' = t then i else ICons (d, h', t')
+    | IHead (d, c0) ->
+        let c0' = rw !m c c0 in
+        if c0' = c0 then i else IHead (d, c0')
+    | ITail (d, c0) ->
+        let c0' = rw !m c c0 in
+        if c0' = c0 then i else ITail (d, c0')
   in
   (* Now update the map based on the def of the (rewritten) instruction. *)
   (match i' with
@@ -138,7 +148,13 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
        if not (is_reserved d) then m := kill_def !m d
    | IHeapGet (d, _, _, _) ->
        if not (is_reserved d) then m := kill_def !m d
-   | IHeapSet _ -> ());
+   | IHeapSet _ -> ()
+   | ICons (d, _, _) ->
+       if not (is_reserved d) then m := kill_def !m d
+   | IHead (d, _) ->
+       if not (is_reserved d) then m := kill_def !m d
+   | ITail (d, _) ->
+       if not (is_reserved d) then m := kill_def !m d);
   (i', !c)
 
 (* Rewrite uses within a terminator. *)

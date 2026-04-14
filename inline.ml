@@ -95,6 +95,9 @@ let rewrite_instr (rw : vreg -> vreg) (i : instr) : instr =
   | IHeapAlloc (d, p, n)    -> IHeapAlloc (rw d, p, rw n)
   | IHeapGet (d, p, b, idx) -> IHeapGet (rw d, p, rw b, rw idx)
   | IHeapSet (p, b, idx, v) -> IHeapSet (p, rw b, rw idx, rw v)
+  | ICons (d, h, t)         -> ICons (rw d, rw h, rw t)
+  | IHead (d, c)            -> IHead (rw d, rw c)
+  | ITail (d, c)            -> ITail (rw d, rw c)
 
 let rewrite_guards (rw : vreg -> vreg) (gs : (vreg * polarity) list) =
   List.map (fun (v, p) -> (rw v, p)) gs

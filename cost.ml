@@ -57,6 +57,12 @@ let estimate (i : instr) : int =
   | IHeapAlloc _                -> 3
   | IHeapGet _                  -> 5
   | IHeapSet _                  -> 6
+  (* Phase B cons ops per §5.1–5.2: ICons is the 5-command inline
+     sequence; IHead/ITail each lower to 3 commands via a per-field
+     macro helper. *)
+  | ICons _                     -> 5
+  | IHead _                     -> 3
+  | ITail _                     -> 3
 
 (* Terminator cost. [TTail] lowers to [len(args)] param renames plus
    one [function mcaml:<f>] dispatch. The other terminators are

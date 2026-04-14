@@ -45,7 +45,11 @@ let is_side_effecting (i : instr) : bool =
   (* Dynamic-heap ops are all side-effecting per §3.7: IHeapAlloc bumps
      the pool counter, IHeapSet writes NBT, IHeapGet mirrors IArrGet's
      hidden $arr_result write through its macro helper. None may be DCE'd. *)
-  | IHeapAllocConst _ | IHeapAlloc _ | IHeapGet _ | IHeapSet _ -> true
+  | IHeapAllocConst _ | IHeapAlloc _ | IHeapGet _ | IHeapSet _
+  (* Phase B cons ops: ICons bumps $conspool_next and writes NBT;
+     IHead/ITail read NBT through per-field macro helpers with the
+     same hidden $arr_result write as IArrGet. All three kept. *)
+  | ICons _ | IHead _ | ITail _ -> true
   | IConst _ | ICopy _ | IBinOp _ -> false
 
 let run (cfg : cfg_func) : bool =

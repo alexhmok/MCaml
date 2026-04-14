@@ -132,6 +132,11 @@ let collect (cfg : cfg_func) : (aid, info) Hashtbl.t =
        | IHeapGet (_, _, b_vr, idx) -> note_use_vreg b_vr; note_use_vreg idx
        | IHeapSet (_, b_vr, idx, v) ->
            note_use_vreg b_vr; note_use_vreg idx; note_use_vreg v
+       (* Phase B cons ops: operand vregs are list handles (ints), never
+          aid sentinels. Same treatment as IHeap* — just note_use. *)
+       | ICons (_, h, t) -> note_use_vreg h; note_use_vreg t
+       | IHead (_, c) -> note_use_vreg c
+       | ITail (_, c) -> note_use_vreg c
        | IConst _ | ICommand _ -> ());
     ) b.instrs
   ) cfg.blocks;
@@ -203,6 +208,7 @@ let aids_touched_by (other_cfg : cfg_func) : (aid, unit) Hashtbl.t =
        (* Dynamic-heap ops never carry a pseudo aid or an aid operand;
           they're untracked by the escape analysis. *)
        | IHeapAllocConst _ | IHeapAlloc _ | IHeapGet _ | IHeapSet _ -> ()
+       | ICons _ | IHead _ | ITail _ -> ()
        | IConst _ | ICommand _ -> ())
     ) b.instrs
   ) other_cfg.blocks;
