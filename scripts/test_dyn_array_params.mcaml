@@ -1,0 +1,50 @@
+(* Phase A deferred follow-up: cross-function TArrDyn passing and
+   for-loops over dyn arrays. Exercises the paths that required
+   [normalize_fun] to seed [dyn_env] for TArrDyn params:
+
+     - [sum_darr] takes `a: darr` and `n: int`, reads via array_get
+     - [fill_darr] takes `a: darr` and `n: int`, writes via array_set
+     - every entry point's for-loop body is lifted by for_lift into a
+       synthetic helper whose [a] free variable must type as TArrDyn
+       TInt so normalize_fun seeds dyn_env for it.
+
+   Expected $ret values:
+     test_cross_func_sum   ->  60   (10+20+30)
+     test_cross_func_fill  ->  45   (0+1+...+9)
+     test_for_loop_rw      ->  30   (0+2+4+6+8+10) *)
+
+fun sum_darr (a: darr, n: int) : int =
+  let acc = ref 0 in
+  for j = 0 to n do
+    acc := !acc + array_get(a, j)
+  done;
+  !acc
+
+fun fill_darr (a: darr, n: int) : int =
+  for i = 0 to n do
+    array_set(a, i, i)
+  done;
+  0
+
+fun test_cross_func_sum () : int =
+  let a = array_make(3, 0) in
+  array_set(a, 0, 10);
+  array_set(a, 1, 20);
+  array_set(a, 2, 30);
+  sum_darr(a, 3)
+
+fun test_cross_func_fill () : int =
+  let a = array_make(10, 0) in
+  let _ = fill_darr(a, 10) in
+  sum_darr(a, 10)
+
+fun test_for_loop_rw () : int =
+  let a = array_make(6, 0) in
+  for i = 0 to 6 do
+    array_set(a, i, i + i)
+  done;
+  let acc = ref 0 in
+  for j = 0 to 6 do
+    acc := !acc + array_get(a, j)
+  done;
+  !acc

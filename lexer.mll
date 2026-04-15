@@ -46,6 +46,7 @@ rule read = parse
   | "arr"    { T_ARR }
   | "mat"    { T_MAT }
   | "list"   { T_LIST }
+  | "darr"   { T_DARR }
   | "region" { REGION }
   | "->"     { ARROW }
   | selector { SELECTOR (Lexing.lexeme lexbuf) }

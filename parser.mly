@@ -26,7 +26,7 @@
 
 /* Types */
 %token T_INT T_BOOL T_UNIT T_SEL T_POS
-%token T_ARR T_MAT T_LIST
+%token T_ARR T_MAT T_LIST T_DARR
 
 /* Return Types */
 %type <Ast.program> prog
@@ -97,6 +97,7 @@ typ:
   | T_ARR LBRACK T_INT COMMA n = INT RBRACK { TArrStatic(TInt, n) }
   | T_MAT LBRACK T_INT COMMA m = INT COMMA n = INT RBRACK { TMat(TInt, m, n) }
   | T_LIST { TList TInt }
+  | T_DARR { TArrDyn TInt }
   | REF T_INT { TRef TInt }
   | REF T_BOOL { TRef TBool }
 

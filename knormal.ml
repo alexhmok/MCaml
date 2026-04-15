@@ -600,6 +600,19 @@ let normalize_fun (params : (string * Ast.typ) list) (body : expr) : kexpr =
         let sentinel = Printf.sprintf "#param%d" i in
         Hashtbl.replace arr_env name sentinel;
         Hashtbl.replace arr_dims name (rows, Some cols)
+    | TArrDyn _ ->
+        (* Phase A deferred follow-up: the handle itself is a scalar
+           int that cfg_build lowers with a normal `ICopy(name,
+           param_i)` prelude (the `_` arm in [of_kexpr]); the only
+           extra state knormal needs is a [dyn_env] entry so
+           [array_get]/[array_set] inside this body route to
+           KHeapGet/KHeapSet instead of failing the fallthrough. The
+           length slot is unused for per-op lowering in v1 — no
+           length() primitive yet — but we still mint a stable name
+           so any future consumer (bounds check, for-loop upper
+           bound) has something to look up. *)
+        let _ = i in
+        Hashtbl.replace dyn_env name ("$dyn_len_param_" ^ name)
     | _ -> ()
   ) params;
   normalize_to (Some "$ret") body

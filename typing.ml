@@ -65,6 +65,41 @@ let rec infer env e =
   | App ("is_nil", [arg]) ->
       let _ = infer env arg in
       TBool
+
+  (* Phase A dyn-array builtins. [array_make] materializes a fresh
+     TArrDyn TInt; [array_get]/[array_set] unify against an
+     already-known TArrDyn arg. The element type is carried on the
+     TArrDyn constructor so future non-int widths come for free. *)
+  | App ("array_make", [n; v]) ->
+      if infer env n <> TInt then
+        raise (Error "array_make: length must be int");
+      let tv = infer env v in
+      if tv <> TInt then
+        raise (Error "array_make: init value must be int");
+      TArrDyn tv
+  | App ("array_get", [a; i]) ->
+      let ta = infer env a in
+      let elt =
+        match ta with
+        | TArrDyn t -> t
+        | _ -> raise (Error "array_get: first arg must be a dynamic array")
+      in
+      if infer env i <> TInt then
+        raise (Error "array_get: index must be int");
+      elt
+  | App ("array_set", [a; i; v]) ->
+      let ta = infer env a in
+      let elt =
+        match ta with
+        | TArrDyn t -> t
+        | _ -> raise (Error "array_set: first arg must be a dynamic array")
+      in
+      if infer env i <> TInt then
+        raise (Error "array_set: index must be int");
+      let tv = infer env v in
+      if tv <> elt then
+        raise (Error "array_set: value type does not match element type");
+      TUnit
   | App ("head", [arg]) ->
       let _ = infer env arg in
       TInt
