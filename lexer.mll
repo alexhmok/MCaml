@@ -39,6 +39,7 @@ rule read = parse
   | "do"     { DO }
   | "done"   { DONE }
   | "int"    { T_INT }
+  | "float"  { T_FLOAT }
   | "bool"   { T_BOOL }
   | "unit"   { T_UNIT }
   | "sel"    { T_SEL }

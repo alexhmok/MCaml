@@ -385,8 +385,14 @@ here are load-bearing design decisions; §13 has the full rationale.
       uniform int representation so no codegen changes are needed
       for the runtime path. All five canaries byte-identical; all
       15 Python-harness tests still green.)
-- [ ] N2. `lexer.mll`: `float` keyword → `T_FLOAT`
-- [ ] N3. `parser.mly`: `typ` arm for `T_FLOAT { TFloat }`, float literal already tokenized
+- [x] N2. `lexer.mll`: `float` keyword → `T_FLOAT`
+- [x] N3. `parser.mly`: `typ` arm for `T_FLOAT { TFloat }`, float literal already tokenized
+      (N2+N3 bundled since each is a one-liner with no individually-
+      testable behavior. Lexer adds `"float" → T_FLOAT` between
+      `"int"` and `"bool"`. Parser declares the token, adds
+      `T_FLOAT { TFloat }` to the `typ` nonterminal between `T_INT`
+      and `T_BOOL`. No menhir conflicts. `(x: float)` now parses as
+      TFloat; float literals still fail at knormal until N4.)
 - [ ] N4. `knormal.ml`: float literal `x` compiles to `KInt (round (x *. 65536.0))`
 - [ ] N5. `typing.ml`: float arithmetic arms (Add/Sub/Mult/Div/neg/compare on TFloat)
 - [ ] N6. `codegen_helpers.ml`: `fixed_mul.mcfunction` helper (~3 cmds with pre-shift, ~8 cmds with split-half variant; pick one, document tradeoff inline)

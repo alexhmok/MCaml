@@ -25,7 +25,7 @@
 %token BELOW_SEMI
 
 /* Types */
-%token T_INT T_BOOL T_UNIT T_SEL T_POS
+%token T_INT T_FLOAT T_BOOL T_UNIT T_SEL T_POS
 %token T_ARR T_MAT T_LIST T_DARR
 
 /* Return Types */
@@ -90,6 +90,7 @@ param:
 
 typ:
   | T_INT { TInt }
+  | T_FLOAT { TFloat }
   | T_BOOL { TBool }
   | T_UNIT { TUnit }
   | T_SEL { TSelector }

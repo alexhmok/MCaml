@@ -9,6 +9,7 @@ type token =
   | T_MAT
   | T_LIST
   | T_INT
+  | T_FLOAT
   | T_DARR
   | T_BOOL
   | T_ARR
