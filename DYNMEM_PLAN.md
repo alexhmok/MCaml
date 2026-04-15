@@ -442,11 +442,73 @@ here are load-bearing design decisions; §13 has the full rationale.
       `1.5 * 2.0` fails at typing with a clear pointer to fmul;
       `fmul(1.5, 2.0)` reaches codegen and hits the N5 failwith
       stub as expected. All 15 Python-harness tests still green.)
-- [ ] N6. `codegen_helpers.ml`: `fixed_mul.mcfunction` helper (~3 cmds with pre-shift, ~8 cmds with split-half variant; pick one, document tradeoff inline)
+- [x] N6. `codegen_helpers.ml`: `fixed_mul.mcfunction` helper (~3 cmds with pre-shift, ~8 cmds with split-half variant; pick one, document tradeoff inline)
+      (Went with **inline pre-shift**, NOT a helper file. Rationale:
+      helper-file dispatch costs a `function mcaml:__fmul` call (1 cmd)
+      plus parameter copies (2 cmds in + 1 cmd out = 3 cmds at the
+      caller) on top of the helper's own ops, totaling 9 cmds per
+      FMult. Inline pre-shift is 5 cmds per call (4 when regalloc has
+      aliased `d = v1`), strictly better for hot-path matmul. The
+      split-half variant would preserve all 16 fractional bits but
+      costs ~8 cmds — worth it only if a workload actually hits the
+      precision floor of pre-shift (bottom 8 bits of each operand
+      discarded). NN activations around |x| ~ 1 with 5 significant
+      digits are unaffected; values near 1/256 lose meaningful
+      precision. Documented inline in cmd_score_binop's FMult branch.
+      Sequence emitted per FMult:
+          $fmul_t = v2
+          $fmul_t /= $c256
+          d       = v1          # elided if d = v1
+          d       /= $c256
+          d       *= $fmul_t
+      Two new reserved scoreboard slots added to
+      `codegen_cfg.is_reserved_slot`: `$c256` (literal 256 — scoreboard
+      operation has no immediate-int form) and `$fmul_t` (destructible
+      scratch copy of v2 so v2 stays live for any consumer after the
+      FMult). `tools/pack_datapack.py` INIT_MCFUNCTION gains
+      `scoreboard players set $c256 vars 256`; `/tmp/mcaml_out/sim.py`
+      World constructor seeds `$c256 = 256` to mirror that init for
+      test harnesses that construct a fresh World without running
+      init.mcfunction.
+      Intermediate overflow safety: `(v1>>8) * (v2>>8)` fits in int32
+      exactly when the true product is within Q16.16 range
+      (|x*y| < 32768), so overflow coincides with saturation — no new
+      failure modes introduced. Cost (5 cmds) under §12.2's 8-cmd mul
+      budget.
+      Probes: `fmul(0.5, 0.5) = 0.25` exact; `fmul(4, 8) = 32` exact;
+      `fmul(100, 50) = 5000` exact; `fmul(0.1, 0.1)` gives 0.00954 vs
+      true 0.01 (4.6% relative error, as documented for the pre-shift
+      variant). N7 adds FDiv following the same pattern; N9 adds the
+      const-fold arm with Q16.16 semantics.
+      All five canaries byte-identical; all 15 Python-harness tests
+      still green.)
 - [ ] N7. `codegen_helpers.ml`: `fixed_div.mcfunction` helper
-- [ ] N8. `cfg.ml`: decide between `IFixedMul`/`IFixedDiv` as new IR ops vs reusing `IBinOp` with typed operand metadata — go with the latter if feasible, to reuse the existing optimization stack
+- [x] N8. `cfg.ml`: decide between `IFixedMul`/`IFixedDiv` as new IR ops vs reusing `IBinOp` with typed operand metadata — go with the latter if feasible, to reuse the existing optimization stack
+      (Decided in N5: **reuse IBinOp** with new `FMult` / `FDiv`
+      variants on the `binop` constructor. Rationale: every existing
+      optimization pass (copy_prop, dce, inline, monomorphize, unroll,
+      regalloc_cfg, liveness, cost, sroa) rides through IBinOp
+      op-agnostically, so adding new binop variants required zero
+      changes to any of them. Only the three op-aware passes —
+      local_cse (commutativity map), const_fold (both-known fold
+      arm), codegen_helpers (lowering) — needed explicit arms. The
+      alternative (`IFixedMul`/`IFixedDiv` as separate instrs) would
+      have forced identity-passthrough arms in all 10+ optimization
+      files, which is the B4/C3 pattern for instruction-level concerns
+      (side-effecting ops, guard-chain pinning, etc.) — but FMult/FDiv
+      have neither side effects nor special dataflow, so the binop-
+      variant approach is strictly lower-surface.
+      Non-goal: typed operand metadata on IBinOp. That would require
+      every existing IBinOp construction and match site to learn the
+      new field, which is a much larger diff than adding two variants.
+      This task was documentation-only; the decision was implemented
+      as part of N5's commit `753fc6b`.)
 - [ ] N9. `const_fold.ml`: fold `IFixedMul(IConst a, IConst b)` to `IConst ((a * b) lsr 16)` with overflow trap
-- [ ] N10. `main.ml` / `tools/pack_datapack.py`: extend init to reserve any new scoreboard slots
+- [~] N10. `main.ml` / `tools/pack_datapack.py`: extend init to reserve any new scoreboard slots
+      (Partial — landed with N6: `tools/pack_datapack.py`
+      INIT_MCFUNCTION now initializes `$c256 = 256`, and
+      `codegen_cfg.is_reserved_slot` knows about `$c256` / `$fmul_t`.
+      Remaining piece lands with N7: any FDiv-specific scratch slots.)
 - [ ] N11. Tests: `scripts/test_fixed_point.mcaml` covering add/sub/mul/div, round-trip, overflow saturation, int↔float conversion
 
 ### Phase Math — Transcendental library (rides on N, pure MCaml source)

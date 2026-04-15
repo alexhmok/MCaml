@@ -39,12 +39,39 @@ let cmd_score_copy (d : string) (s : string) : string =
    same physical slot, or the second command would read a clobbered value.
    Comparison binops lower to a single `execute store success …` command. *)
 let cmd_score_binop (d : string) (op : binop) (v1 : string) (v2 : string) : string list =
-  (* Phase N / N5: FMult/FDiv lowering lands in N6/N7. For now, any
-     IBinOp with these ops reaching codegen is a bug — fail loudly. *)
-  (match op with
-   | FMult | FDiv ->
-       failwith "Phase N: FMult/FDiv lowering lands in N6/N7"
-   | _ -> ());
+  (* Phase N / N6: Q16.16 fixed-point multiply via pre-shift.
+     Sequence (5 cmds, or 4 when regalloc already aliased d = v1):
+       $fmul_t = v2
+       $fmul_t /= $c256          ; v2 >> 8
+       d       = v1              ; elided if d = v1
+       d       /= $c256          ; v1 >> 8
+       d       *= $fmul_t        ; d = (v1>>8) * (v2>>8) = (v1*v2)/65536
+     Precision: the bottom 8 bits of each operand are discarded before
+     multiplying — fine for NN activations (O(1) values with ~5 digits
+     of precision) but unsuitable for values near 1/256. Intermediate
+     (v1>>8)*(v2>>8) fits in int32 whenever the true product is within
+     Q16.16 range (|x*y| < 32768), so overflow coincides with
+     saturation. Alternative split-half variant (~8 cmds) would
+     preserve all 16 fractional bits; switch if a workload demands it.
+     Phase N / N7 will add FDiv following the same pattern. *)
+  if op = FMult then begin
+    let copy_v1 =
+      if d = v1 then []
+      else [Printf.sprintf "scoreboard players operation %s %s = %s %s"
+              d obj_name v1 obj_name]
+    in
+    [Printf.sprintf "scoreboard players operation $fmul_t %s = %s %s"
+       obj_name v2 obj_name;
+     Printf.sprintf "scoreboard players operation $fmul_t %s /= $c256 %s"
+       obj_name obj_name]
+    @ copy_v1 @
+    [Printf.sprintf "scoreboard players operation %s %s /= $c256 %s"
+       d obj_name obj_name;
+     Printf.sprintf "scoreboard players operation %s %s *= $fmul_t %s"
+       d obj_name obj_name]
+  end else if op = FDiv then
+    failwith "Phase N: FDiv lowering lands in N7"
+  else
   if is_comparison op then
     match op with
     | Neq ->

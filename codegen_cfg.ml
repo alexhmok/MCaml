@@ -131,6 +131,12 @@ let is_reserved_slot (s : string) : bool =
   s = "$region_save_3_scratch" || s = "$region_save_3_conspool" ||
   (* C5 deep-copy walker scratch slots (shared across levels). *)
   s = "$wr_h" || s = "$wr_cache_h" || s = "$wr_prev" || s = "$wr_tmp_h" ||
+  (* Phase N / N6: Q16.16 fmul scratch. $c256 holds the literal 256 so
+     the pre-shift lowering can use `/=` against a scoreboard operand
+     (scoreboard-operation has no immediate-int form). $fmul_t is the
+     destructible scratch copy of the second operand so v2 stays live
+     for any consumer after the FMult instruction. *)
+  s = "$c256" || s = "$fmul_t" ||
   (String.length s >= 5 && String.sub s 0 5 = "$ref_") ||
   (String.length s > 6
    && String.sub s 0 6 = "param_"
