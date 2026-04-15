@@ -1,5 +1,5 @@
 type coord_part = Abs of float | Rel of float option | Local of float option
-type typ = TInt | TBool | TUnit | TSelector | TPos
+type typ = TInt | TFloat | TBool | TUnit | TSelector | TPos
          | TArrStatic of typ * int    (* static array: element type, compile-time length *)
          | TArrDyn of typ             (* dynamic array: element type; length is runtime *)
          | TMat of typ * int * int    (* element type, rows, cols *)

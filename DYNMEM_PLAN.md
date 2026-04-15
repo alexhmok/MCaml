@@ -373,7 +373,18 @@ here are load-bearing design decisions; §13 has the full rationale.
       exit-suite tests still green.
 
 ### Phase N — Fixed-point Q16.16 numerics
-- [ ] N1. `ast.ml` / `typing.ml`: retype `Float` literal from `TInt` alias to real `TFloat`; add `TFloat` type
+- [x] N1. `ast.ml` / `typing.ml`: retype `Float` literal from `TInt` alias to real `TFloat`; add `TFloat` type
+      (Two-file change. `ast.ml`: `TFloat` added to the `typ` variant
+      slotted after `TInt`. `typing.ml`: `Float _ → TFloat` (was
+      `TInt`). No downstream breakage: knormal's Float arm was
+      already a `failwith` (float literals never compiled pre-N), so
+      there was no existing path to regress. codegen_cfg's
+      region-exit primitive-path match uses a `| _ -> failwith`
+      catchall — adding TFloat to the grouped arm lands with N5 when
+      the first float-returning function appears. §12.1 guarantees
+      uniform int representation so no codegen changes are needed
+      for the runtime path. All five canaries byte-identical; all
+      15 Python-harness tests still green.)
 - [ ] N2. `lexer.mll`: `float` keyword → `T_FLOAT`
 - [ ] N3. `parser.mly`: `typ` arm for `T_FLOAT { TFloat }`, float literal already tokenized
 - [ ] N4. `knormal.ml`: float literal `x` compiles to `KInt (round (x *. 65536.0))`

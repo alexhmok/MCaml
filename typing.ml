@@ -22,7 +22,11 @@ let build_sigs (prog : program) : unit =
 let rec infer env e =
   match e with
   | Int _ -> TInt
-  | Float _ -> TInt (* MC uses fixed point, treating as Int for now *)
+  | Float _ -> TFloat
+    (* Phase N / N1: Float literals now have a real type. The Q16.16
+       encoding (x *. 65536 → int) lands in N4; arithmetic arms land
+       in N5. Under §12.1 both TInt and TFloat are 32-bit signed
+       scoreboard ints at runtime, so codegen is type-erased. *)
   | Bool _ -> TBool
   | Str _ -> TUnit (* Strings are special, treated as Unit for logic *)
   | Var x -> 
