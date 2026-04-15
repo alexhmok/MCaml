@@ -94,6 +94,63 @@ let () =
     (* Build the global function-signature table for typing's App rule. *)
     Typing.build_sigs program;
 
+    (* Phase G: collect top-level `val` definitions as globals. v1 scope:
+       each val's RHS must be an `Array [...]` literal with int-constant
+       elements (no runtime computation). The val's stable aid is
+       `__g_<name>`; typing and knormal are seeded with the binding
+       before Phase 1 runs so every function body that references the
+       name resolves through the global env. The concatenated init
+       commands are emitted as a synthetic `__globals_init.mcfunction`
+       that real Minecraft runs at datapack load (wired by
+       tools/pack_datapack.py), and that sim test harnesses must run
+       explicitly before the function under test. *)
+    let globals : (string * int list) list =
+      List.filter_map (fun d ->
+        match d with
+        | Val (name, Array elems) ->
+            let ints = List.map (fun e ->
+              match e with
+              | Int i -> i
+              | Float f ->
+                  (* Apply the same Q16.16 encoding knormal uses for
+                     float literals so a `val lut = [| 1.5; 2.5 |]`
+                     produces the expected encoded ints in storage. *)
+                  let scaled = Float.round (f *. 65536.0) in
+                  if scaled < -2147483648.0 || scaled > 2147483647.0 then
+                    failwith
+                      (Printf.sprintf
+                         "mcaml: global val %s: float literal %g out of \
+                          Q16.16 range" name f);
+                  int_of_float scaled
+              | _ ->
+                  failwith
+                    (Printf.sprintf
+                       "mcaml: global val %s: element is not an int/float \
+                        literal (v1 supports constant literals only)" name)
+            ) elems in
+            Some (name, ints)
+        | Val (name, _) ->
+            failwith
+              (Printf.sprintf
+                 "mcaml: global val %s: RHS must be an array literal \
+                  `[| ... |]` in v1" name)
+        | Fun _ -> None
+      ) program
+    in
+    List.iter (fun (name, ints) ->
+      let aid = "__g_" ^ name in
+      let length = List.length ints in
+      (* Typing: expose the val to every function as TArrStatic TInt n
+         — the surface does not distinguish int-encoded and float-
+         encoded arrays at this layer (both are 32-bit scoreboard ints
+         per §12.1), so TArrStatic TInt is the honest type. *)
+      Typing.register_global_val name (TArrStatic (TInt, length));
+      (* knormal: register the stable aid so Index1/Index2 on the val
+         lower through the existing static-array machinery with the
+         global aid. *)
+      Knormal.register_global_array name aid length
+    ) globals;
+
     (* Phase 1: lower every Fun to a cfg_func. *)
     let fn_table : (string, Cfg.cfg_func) Hashtbl.t = Hashtbl.create 16 in
     let fn_order : string list ref = ref [] in
@@ -309,6 +366,19 @@ let () =
       end;
       all_files := !all_files @ files
     ) fn_order;
+
+    (* Phase G: synthesize __globals_init.mcfunction with one
+       `data modify storage mcaml:heap __g_<name> set value [...]` line
+       per global val. Only emitted when the program has at least one
+       val, so canary byte-diffs on programs without globals are
+       unaffected. *)
+    (if globals <> [] then
+       let cmds =
+         List.map (fun (name, ints) ->
+           Codegen_helpers.cmd_arr_lit_const ("__g_" ^ name) ints
+         ) globals
+       in
+       all_files := !all_files @ [("__globals_init", cmds)]);
 
     (* Phase 4: tick-split straight-line overflows into __cont<N> chains
        (plan §1.4). Helper files (_call<N>, _get) are preserved

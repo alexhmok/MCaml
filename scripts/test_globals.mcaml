@@ -1,0 +1,43 @@
+(* Phase G: global static arrays via top-level `val`.
+
+   Exercises:
+     - dynamic-index read from a global int LUT inside a helper
+     - dynamic-index read inside a for-loop (accumulator pattern)
+     - cross-function pass (helper reads from global, caller sums)
+     - Q16.16 float LUT (same storage, different element semantics)
+     - static-index read via the compile-time index path
+
+   Harness seeds the LUTs by running `__globals_init` before each
+   test function, mirroring how tools/pack_datapack.py wires the
+   load tag for real Minecraft.
+
+   Expected $ret values:
+     test_read        ->  30    (lut[2] on [10,20,30,40,50])
+     test_sum         -> 150    (Σ lut = 10+20+30+40+50)
+     test_helper      ->  90    (helper reads lut[3] + lut[4] = 40+50)
+     test_float_lut   -> 196608 (flut[1] + flut[2] = 1.0 + 2.0 = 3.0 Q16.16)
+     test_static_idx  ->  40    (lut[3], index is a constant literal) *)
+
+val lut = [| 10; 20; 30; 40; 50 |]
+
+val flut = [| 0.5; 1.0; 2.0; 4.0 |]
+
+fun test_read () : int = lut[2]
+
+fun test_sum () : int =
+  let acc = ref 0 in
+  for i = 0 to 5 do
+    acc := !acc + lut[i]
+  done;
+  !acc
+
+fun helper (j: int) : int = lut[j] + lut[j + 1]
+
+fun test_helper () : int = helper(3)
+
+fun test_float_lut () : int =
+  let a = flut[1] in
+  let b = flut[2] in
+  a + b
+
+fun test_static_idx () : int = lut[3]

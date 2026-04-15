@@ -10,6 +10,16 @@ exception Error of string
    (preserves behavior for synthesized helpers and any untyped callees). *)
 let fun_sigs : (string, typ list * typ) Hashtbl.t = Hashtbl.create 16
 
+(* Phase G: type environment for top-level `val` definitions. Populated
+   by [register_global_val] from main.ml before Phase 1 runs. The Var
+   typing arm falls back to this table when a name is not in the local
+   env, so per-function typing sees global vals as if they were
+   free-variable bindings of the declared type. *)
+let global_vals : (string, typ) Hashtbl.t = Hashtbl.create 4
+
+let register_global_val (name : string) (ty : typ) : unit =
+  Hashtbl.replace global_vals name ty
+
 let build_sigs (prog : program) : unit =
   Hashtbl.clear fun_sigs;
   List.iter (fun d ->
@@ -29,9 +39,13 @@ let rec infer env e =
        scoreboard ints at runtime, so codegen is type-erased. *)
   | Bool _ -> TBool
   | Str _ -> TUnit (* Strings are special, treated as Unit for logic *)
-  | Var x -> 
-      (try List.assoc x env 
-       with Not_found -> raise (Error ("Undefined variable: " ^ x)))
+  | Var x ->
+      (try List.assoc x env
+       with Not_found ->
+         (* Phase G: fall back to global val env before erroring. *)
+         (match Hashtbl.find_opt global_vals x with
+          | Some ty -> ty
+          | None -> raise (Error ("Undefined variable: " ^ x))))
   | Selector _ -> TSelector
   | Coord _ -> TPos
   | Command _ -> TUnit

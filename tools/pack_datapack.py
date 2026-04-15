@@ -47,6 +47,12 @@ scoreboard players set $c256 vars 256
 
 LOAD_JSON = {"values": ["mcaml:init"]}
 
+# Phase G: when a compiled build contains __globals_init.mcfunction,
+# the load tag must fire it after `init` so top-level val arrays are
+# populated in storage before any user function can read them. Absent
+# the file, the load tag is unchanged (canary-safe).
+LOAD_JSON_WITH_GLOBALS = {"values": ["mcaml:init", "mcaml:__globals_init"]}
+
 DETERMINISTIC_DATE = (2000, 1, 1, 0, 0, 0)
 
 
@@ -77,8 +83,10 @@ def build_tree(staging: Path, name: str, sources: list[Path]) -> None:
         json.dumps(PACK_MCMETA, indent=2) + "\n"
     )
     (fn_dir / "init.mcfunction").write_text(INIT_MCFUNCTION)
+    has_globals = any(src.name == "__globals_init.mcfunction" for src in sources)
+    load_json = LOAD_JSON_WITH_GLOBALS if has_globals else LOAD_JSON
     (tag_dir / "load.json").write_text(
-        json.dumps(LOAD_JSON, indent=2) + "\n"
+        json.dumps(load_json, indent=2) + "\n"
     )
     for src in sources:
         shutil.copyfile(src, fn_dir / src.name)

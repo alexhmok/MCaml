@@ -596,6 +596,55 @@ here are load-bearing design decisions; §13 has the full rationale.
       Phase Math (transcendental library). All five canaries still
       byte-identical; all 3 pre-existing exit suites still green.)
 
+### Phase G — Global static arrays (prereq for Phase Math LUTs)
+- [x] G1. `ast.ml` / parser: `Val of string * expr` already present,
+      parser already accepts top-level `val name = [| ... |]`. No edit
+      needed.
+- [x] G2. `knormal.ml`: `global_arr_env` / `global_arr_dims` tables
+      persisted across `normalize` / `normalize_fun` via `reseed_globals`,
+      so per-function arr_env still starts fresh but resolves global
+      names to their stable aids. `register_global_array name aid length`
+      exposed for main.ml.
+- [x] G3. `typing.ml`: `global_vals : (string, typ) Hashtbl.t` + the Var
+      arm falls back to it after the local env lookup, so function
+      bodies see globals as if they were free-variable bindings of the
+      declared type. `register_global_val` exposed for main.ml.
+- [x] G4. `main.ml`: collects `Val` defs from the program, requires
+      RHS = array literal, restricts elements to `Int`/`Float` literals
+      (float literals get the same Q16.16 encoding knormal applies),
+      assigns the stable aid `__g_<name>`, registers with both
+      Typing and Knormal BEFORE Phase 1 runs. Then after Phase 3 and
+      before tick-split, synthesizes `__globals_init.mcfunction` with
+      one `data modify storage mcaml:heap __g_<name> set value [...]`
+      line per global. Emission is conditional on non-empty globals
+      list so canary programs without `val` defs stay byte-identical.
+- [x] G5. `tools/pack_datapack.py`: adds `LOAD_JSON_WITH_GLOBALS` with
+      `["mcaml:init", "mcaml:__globals_init"]` and picks that variant
+      when `__globals_init.mcfunction` is present in the compiled
+      source set; falls back to the original `["mcaml:init"]` otherwise.
+      Canary-safe.
+- [x] G6. Tests: `scripts/test_globals.mcaml` has five entry points —
+      dynamic-index read, for-loop accumulation over a global,
+      cross-function helper (helper reads globals, caller dispatches),
+      float-encoded LUT (same storage, Q16.16 elements), and
+      compile-time static-index read. Harness
+      `/tmp/mcaml_out/test_globals.py` runs `__globals_init` before
+      each test to mirror the datapack load sequence. All 5 green on
+      first run.
+      **Limitations (v1):** val RHS must be a literal array (no
+      computed globals); elements must be Int or Float literals
+      (no references to other vals or consts); no runtime mutation
+      (globals are read-only by convention — there's no compiler
+      check, but writing through `[i] :=` would corrupt subsequent
+      calls since the store persists until the next datapack load).
+      **Cost:** dynamic-index read is 4 cmds at the caller + 1 in
+      the macro helper (same path as regular static-array dynamic
+      reads). Static-index reads fold to 1 cmd via IArrGetStatic.
+      No per-call LUT init cost — populated once at datapack load.
+      All five canaries byte-identical vs. pre-Phase-G HEAD; all 4
+      pre-existing Python exit suites still green (31 tests). New
+      test_globals.py harness passes 5/5.
+
 ### Phase Math — Transcendental library (rides on N, pure MCaml source)
 - [ ] Math1. `lib/math.mcaml`: `exp_fixed`, `log_fixed` via range reduction + 256-entry LUT (see §13 for the Q16.16-specific decomposition)
 - [ ] Math2. `lib/math.mcaml`: `sigmoid`, `tanh`, `gelu` as LUT-only (no reduction needed since domain is bounded)

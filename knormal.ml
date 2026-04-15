@@ -93,6 +93,28 @@ let arr_env : (string, string) Hashtbl.t = Hashtbl.create 16
    The column count is needed by Index2 to compute the flat index. *)
 let arr_dims : (string, int * int option) Hashtbl.t = Hashtbl.create 16
 
+(* Phase G: globals (top-level `val name = [| ... |]` array literals).
+   Distinct from [arr_env] because globals persist across functions:
+   they're populated once by the synthesized __globals_init.mcfunction
+   at datapack load time, and every function that references a global
+   val name reads from the same stable aid `__g_<name>`. [normalize]
+   and [normalize_fun] CLEAR arr_env/arr_dims per function but re-seed
+   from these tables so the lookup in the App / Index1 / Index2 arms
+   finds globals alongside per-function locals. *)
+let global_arr_env : (string, string) Hashtbl.t = Hashtbl.create 4
+let global_arr_dims : (string, int * int option) Hashtbl.t = Hashtbl.create 4
+
+(* Called by main.ml before Phase 1 starts, once per top-level val
+   holding an array literal. Idempotent for the same (name, aid, len)
+   triple. Rows-only for v1 (1D arrays). *)
+let register_global_array (name : string) (aid : string) (length : int) : unit =
+  Hashtbl.replace global_arr_env name aid;
+  Hashtbl.replace global_arr_dims name (length, None)
+
+let reseed_globals () : unit =
+  Hashtbl.iter (fun n a -> Hashtbl.replace arr_env n a) global_arr_env;
+  Hashtbl.iter (fun n d -> Hashtbl.replace arr_dims n d) global_arr_dims
+
 (* Compile-time environment mapping user-level ref binder names to stable
    reserved slot names like "$ref_<alpha_name>". Persisted across top-level
    normalize calls so that a for-loop helper synthesized by for_lift can
@@ -656,6 +678,9 @@ let normalize e =
   Hashtbl.clear arr_env;
   Hashtbl.clear arr_dims;
   Hashtbl.clear dyn_env;
+  (* Phase G: seed globals after clearing so per-function locals still
+     have a fresh slate but global val names resolve. *)
+  reseed_globals ();
   (* ref_env is NOT cleared — ref slot bindings persist across definitions
      so that for-loop helpers can see refs defined in their enclosing
      function. Alpha-renaming keeps binder names globally unique. *)
@@ -669,6 +694,8 @@ let normalize_fun (params : (string * Ast.typ) list) (body : expr) : kexpr =
   Hashtbl.clear arr_env;
   Hashtbl.clear arr_dims;
   Hashtbl.clear dyn_env;
+  (* Phase G: seed globals so `fun f () = global_lut[i]` resolves. *)
+  reseed_globals ();
   List.iteri (fun i (name, ty) ->
     match ty with
     | TArrStatic (_, n) ->
