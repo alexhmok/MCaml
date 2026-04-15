@@ -640,6 +640,12 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
         KSeq(k_a,
           KLet(t_scale, KInt 65536, op_instr)))
 
+  (* Phase N §12.1 + Phase Math: identity bit-reinterpretation. Both
+     directions lower to the same code as the inner expression — the
+     coercion is purely in typing. No codegen changes needed. *)
+  | App ("raw_of_float", [a]) | App ("float_of_raw", [a]) ->
+      normalize_to dest a
+
   | App ("is_nil", [arg]) ->
       (* Desugar to equality against the -1 sentinel. KBinOp Eq already
          lowers to the standard boolean-as-int compile. *)

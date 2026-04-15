@@ -104,10 +104,21 @@ let () =
        that real Minecraft runs at datapack load (wired by
        tools/pack_datapack.py), and that sim test harnesses must run
        explicitly before the function under test. *)
-    let globals : (string * int list) list =
+    let globals : (string * typ * int list) list =
       List.filter_map (fun d ->
         match d with
         | Val (name, Array elems) ->
+            (* Infer element type from the literals: if any element is
+               a Float literal, the val is TArrStatic(TFloat, n);
+               otherwise TArrStatic(TInt, n). The runtime representation
+               is identical per §12.1 — 32-bit ints in storage — but
+               the declared element type matters for typing downstream,
+               because TFloat subscripts return TFloat which can flow
+               into fmul/fdiv/etc. without an explicit coercion. *)
+            let has_float = List.exists (fun e ->
+              match e with Float _ -> true | _ -> false) elems
+            in
+            let elt_ty = if has_float then TFloat else TInt in
             let ints = List.map (fun e ->
               match e with
               | Int i -> i
@@ -128,7 +139,7 @@ let () =
                        "mcaml: global val %s: element is not an int/float \
                         literal (v1 supports constant literals only)" name)
             ) elems in
-            Some (name, ints)
+            Some (name, TArrStatic (elt_ty, List.length ints), ints)
         | Val (name, _) ->
             failwith
               (Printf.sprintf
@@ -137,17 +148,10 @@ let () =
         | Fun _ -> None
       ) program
     in
-    List.iter (fun (name, ints) ->
+    List.iter (fun (name, ty, ints) ->
       let aid = "__g_" ^ name in
       let length = List.length ints in
-      (* Typing: expose the val to every function as TArrStatic TInt n
-         — the surface does not distinguish int-encoded and float-
-         encoded arrays at this layer (both are 32-bit scoreboard ints
-         per §12.1), so TArrStatic TInt is the honest type. *)
-      Typing.register_global_val name (TArrStatic (TInt, length));
-      (* knormal: register the stable aid so Index1/Index2 on the val
-         lower through the existing static-array machinery with the
-         global aid. *)
+      Typing.register_global_val name ty;
       Knormal.register_global_array name aid length
     ) globals;
 
@@ -374,7 +378,7 @@ let () =
        unaffected. *)
     (if globals <> [] then
        let cmds =
-         List.map (fun (name, ints) ->
+         List.map (fun (name, _ty, ints) ->
            Codegen_helpers.cmd_arr_lit_const ("__g_" ^ name) ints
          ) globals
        in

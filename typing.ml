@@ -119,6 +119,17 @@ let rec infer env e =
   | App ("to_int", [a]) ->
       if infer env a <> TFloat then raise (Error "to_int: arg must be float");
       TInt
+  (* Phase N §12.1: TFloat and TInt share the same 32-bit runtime
+     representation, so bit-level reinterpretation is free. These
+     builtins are pure typing coercions with zero codegen cost — used
+     by lib/math.mcaml to compute fractional-raw = x_bits mod 65536
+     etc. on a Q16.16 value. *)
+  | App ("raw_of_float", [a]) ->
+      if infer env a <> TFloat then raise (Error "raw_of_float: arg must be float");
+      TInt
+  | App ("float_of_raw", [a]) ->
+      if infer env a <> TInt then raise (Error "float_of_raw: arg must be int");
+      TFloat
 
   (* Phase A dyn-array builtins. [array_make] materializes a fresh
      TArrDyn TInt; [array_get]/[array_set] unify against an
