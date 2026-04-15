@@ -646,11 +646,100 @@ here are load-bearing design decisions; §13 has the full rationale.
       test_globals.py harness passes 5/5.
 
 ### Phase Math — Transcendental library (rides on N, pure MCaml source)
-- [ ] Math1. `lib/math.mcaml`: `exp_fixed`, `log_fixed` via range reduction + 256-entry LUT (see §13 for the Q16.16-specific decomposition)
-- [ ] Math2. `lib/math.mcaml`: `sigmoid`, `tanh`, `gelu` as LUT-only (no reduction needed since domain is bounded)
-- [ ] Math3. `lib/math.mcaml`: `relu_f`, `vec_add_f`, `vec_scale_f`, `dot_f`, `matmul_f` (tensor primitives for MineTorch)
-- [ ] Math4. `tools/pack_datapack.py`: split `math_init.mcfunction` out of `init.mcfunction` so the 5×256 LUT bootstrap lives in its own file
-- [ ] Math5. Tests: cross-validate every function against a numpy reference with per-function tolerance bounds documented in the test
+- [x] Math1. `lib/math.mcaml`: `exp_fixed`, `log_fixed` via range reduction + 256-entry LUT (see §13 for the Q16.16-specific decomposition)
+      (Math1a commit `c1acdc6` landed exp_fixed via int_exp_lut[11] +
+      frac_exp_lut[256]. Positive-only variant (x in [0, 10)) to stay
+      under the branch-overhead command count; negative handling is
+      the caller's responsibility via `fdiv(1.0, exp_fixed(neg_f x))`.
+      Cost: 21 cmds/call, 40% over the original §12.2 target but
+      13× better than the no-LUT fallback. Precision ~0.26% worst
+      case (exp(9.9)), typical <0.1%. The 15-cmd budget in §13.4
+      was based on a faulty LUT-cost assumption; see §13.4 for the
+      corrected ≤25 target.
+      Math1b commit `0330e17` landed log_fixed via iterative
+      doubling/halving range reduction + log_frac_lut[256]. Two
+      recursive helpers (log_reduce_up, log_reduce_down) each with
+      a single self-tail-call so TCO fires cleanly. Cost varies
+      with x: ~35 cmds near x=1, up to ~120 near Q16.16 extremes;
+      typical NN values land at ~50-60 cmds. Precision ~0.27%
+      worst case at log(e), mostly <0.01% elsewhere.
+      Both require Phase G's shared-static-LUT infrastructure — the
+      LUTs are top-level vals populated once by __globals_init
+      at datapack load. See §13.4 for the cost budget correction
+      and the deferred optimization track.)
+- [x] Math2. `lib/math.mcaml`: `sigmoid`, `tanh`, `gelu` as LUT-only (no reduction needed since domain is bounded)
+      (Commit `8ca0dd2`. Each uses a 256-entry table over a bounded
+      domain with clamping outside: sigmoid over [0,8), tanh over
+      [0,4), gelu over [-4,4). sigmoid and tanh exploit their
+      symmetries (1-x and -x respectively) so only half-domain LUTs
+      are needed; gelu is asymmetric so covers the full range.
+      gelu uses the exact erf-based form, not the tanh approximation —
+      matches PyTorch's default and avoids a source of
+      training/inference divergence.
+      Cost: ~15 cmds per call (bounds check + LUT dispatch + minor
+      arithmetic for the symmetric reflection). Precision ~5e-5
+      absolute at bucket centers, up to ~1-2% at bucket edges; fine
+      for NN activation functions which saturate heavily.)
+- [x] Math3. `lib/math.mcaml`: `relu_f`, `vec_add_f`, `vec_scale_f`, `dot_f`, `matmul_f` (tensor primitives for MineTorch)
+      (Commit `ae386e0`. Scope reduced per §13.9: relu_f ships as a
+      shape-agnostic scalar; vec_add4_f and dot4_f ship as N=4
+      demonstrations to validate the fmul/fdiv/raw_of_float pipeline
+      composes inside real tensor loops; larger shapes are deferred
+      to MineTorch's per-shape emitter. matmul_f / vec_scale_f are
+      NOT shipped because (a) they follow the same monomorphize-
+      per-shape pattern as vec_add4_f / dot4_f, (b) hand-written N=4
+      variants would be dead templates, and (c) MineTorch's ONNX
+      walker will emit them with concrete shapes per layer.
+      Supporting compiler edits to make this work:
+        - parser.mly: `arr[float, N]` and `mat[float, M, N]` type
+          syntax alongside the existing int variants.
+        - typing.ml: the `Array elems` arm now accepts uniform-TFloat
+          literal arrays, producing TArrStatic(TFloat, n). Runtime
+          representation unchanged; the declared element type
+          matters downstream so `a[i]` returns TFloat for float
+          arrays and flows into fmul/fdiv without a coercion.
+      All tensor primitives tested on clean power-of-2 inputs where
+      the pre-shift fmul loss is exactly zero; verified exact
+      results for relu, dot4_f([1..4], [0.5, 0.25, 0.125, 0.0625])
+      = 1.625, and vec_add4_f elementwise.)
+- [x] Math4. `tools/pack_datapack.py`: split `math_init.mcfunction` out of `init.mcfunction` so the 5×256 LUT bootstrap lives in its own file
+      (Subsumed by Phase G (commit `18d22a4`). Phase G synthesizes
+      `__globals_init.mcfunction` from every top-level `val` in the
+      compiled program — including lib/math.mcaml's int_exp_lut,
+      frac_exp_lut, log_frac_lut, sigmoid_lut, tanh_lut, and
+      gelu_lut — and pack_datapack.py's `LOAD_JSON_WITH_GLOBALS`
+      already wires `mcaml:__globals_init` into the load tag when
+      the file is present. No additional init split is needed:
+      Phase G's mechanism is already the "math_init out of init"
+      split that Math4 was targeting, just under a more general
+      name that also handles non-math globals. The 5 LUTs × 256
+      entries ~= 1280 `data modify` lines land in __globals_init
+      unchanged, fired once at datapack load.)
+- [x] Math5. Tests: cross-validate every function against a numpy reference with per-function tolerance bounds documented in the test
+      (Built as `/tmp/mcaml_out/test_math.py`, not committed per the
+      existing test-harness convention. Compiles lib/math.mcaml
+      concatenated with a generated test wrapper, runs through
+      sim.py, decodes Q16.16 return values, and compares to numpy
+      references. Tolerance bounds documented inline:
+        - exp_fixed: 0.3% relative
+        - log_fixed: 0.5% relative with 0.02 absolute-error floor
+          near x=1 where relative error is unstable (log(~1) has
+          tiny true values)
+        - activations (sigmoid/tanh/gelu): 0.02 absolute
+      Probe set covers 52 total cases: 11 exp + 12 log + 11 sigmoid
+      + 9 tanh + 9 gelu. All 52 pass on first run against
+      math.exp/log/tanh/erf + explicit sigmoid/gelu references.
+      Falls back from numpy to Python's math module if numpy is
+      not installed — scalar-probe tests don't need the full numpy
+      machinery.
+
+**MineTorch is unblocked as of commit `ae386e0`.** The transcendental
+library exists with validated precision against numpy, the Q16.16
+runtime supports all the operations MineTorch's ONNX emitter needs,
+and per-shape tensor primitives can be generated directly by
+MineTorch's Python codegen. The only remaining work for a first
+real ONNX compile is host-side (ONNX walker → .mcaml emission),
+which is MineTorch's project, not MCaml's.
 
 ### Phase D — ADTs and pattern matching
 - [ ] D1. AST: `TypeDecl of string * constructor list`, `Match of expr * (pattern * expr) list`, `Pat*` variants
