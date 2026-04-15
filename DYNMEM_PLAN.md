@@ -322,6 +322,78 @@ work.
       All five canaries byte-identical vs. pre-Phase-C; all 14
       Python-harness tests green (4 dyn-array + 5 cons + 5 region).)
 
+### Post-memory roadmap (see §13 for design)
+
+The original plan covered Phases A–C. Everything below is new scope added
+after the memory work landed, to take MCaml from "functional with heap" to
+"general-purpose ML-ish language with MineTorch-usable numerics." Tasks
+here are load-bearing design decisions; §13 has the full rationale.
+
+### Phase M — Native Mod operator (prereq for Phase N)
+- [ ] M1. `ast.ml`: add `Mod` to the `binop` variant
+- [ ] M2. `lexer.mll`: `%` → `PERCENT` token
+- [ ] M3. `parser.mly`: `expr PERCENT expr { BinOp(Mod, ...) }` at Mult/Div precedence
+- [ ] M4. `typing.ml`: extend the arithmetic arm
+- [ ] M5. `knormal.ml` / `cfg_build.ml`: reuse existing `IBinOp` path with a `Mod` variant
+- [ ] M6. `codegen_helpers.ml`: lower to `scoreboard players operation X %= Y`
+- [ ] M7. `const_fold.ml` / `copy_prop.ml` / `dce.ml`: mechanical arms for `Mod`
+- [ ] M8. Tests: `x % 10`, `x % 65536` as fractional-part extraction smoke test
+
+### Phase N — Fixed-point Q16.16 numerics
+- [ ] N1. `ast.ml` / `typing.ml`: retype `Float` literal from `TInt` alias to real `TFloat`; add `TFloat` type
+- [ ] N2. `lexer.mll`: `float` keyword → `T_FLOAT`
+- [ ] N3. `parser.mly`: `typ` arm for `T_FLOAT { TFloat }`, float literal already tokenized
+- [ ] N4. `knormal.ml`: float literal `x` compiles to `KInt (round (x *. 65536.0))`
+- [ ] N5. `typing.ml`: float arithmetic arms (Add/Sub/Mult/Div/neg/compare on TFloat)
+- [ ] N6. `codegen_helpers.ml`: `fixed_mul.mcfunction` helper (~3 cmds with pre-shift, ~8 cmds with split-half variant; pick one, document tradeoff inline)
+- [ ] N7. `codegen_helpers.ml`: `fixed_div.mcfunction` helper
+- [ ] N8. `cfg.ml`: decide between `IFixedMul`/`IFixedDiv` as new IR ops vs reusing `IBinOp` with typed operand metadata — go with the latter if feasible, to reuse the existing optimization stack
+- [ ] N9. `const_fold.ml`: fold `IFixedMul(IConst a, IConst b)` to `IConst ((a * b) lsr 16)` with overflow trap
+- [ ] N10. `main.ml` / `tools/pack_datapack.py`: extend init to reserve any new scoreboard slots
+- [ ] N11. Tests: `scripts/test_fixed_point.mcaml` covering add/sub/mul/div, round-trip, overflow saturation, int↔float conversion
+
+### Phase Math — Transcendental library (rides on N, pure MCaml source)
+- [ ] Math1. `lib/math.mcaml`: `exp_fixed`, `log_fixed` via range reduction + 256-entry LUT (see §13 for the Q16.16-specific decomposition)
+- [ ] Math2. `lib/math.mcaml`: `sigmoid`, `tanh`, `gelu` as LUT-only (no reduction needed since domain is bounded)
+- [ ] Math3. `lib/math.mcaml`: `relu_f`, `vec_add_f`, `vec_scale_f`, `dot_f`, `matmul_f` (tensor primitives for MineTorch)
+- [ ] Math4. `tools/pack_datapack.py`: split `math_init.mcfunction` out of `init.mcfunction` so the 5×256 LUT bootstrap lives in its own file
+- [ ] Math5. Tests: cross-validate every function against a numpy reference with per-function tolerance bounds documented in the test
+
+### Phase D — ADTs and pattern matching
+- [ ] D1. AST: `TypeDecl of string * constructor list`, `Match of expr * (pattern * expr) list`, `Pat*` variants
+- [ ] D2. Parser: `type t = A | B of int | C of t * t` syntax, `match e with | p -> e | ...`
+- [ ] D3. Typing: nominal-type environment; pattern typing; exhaustiveness + redundancy check
+- [ ] D4. Runtime: generalize `conspool` into a single `objpool` with tag-discriminated cells (see §13 decision D.a). Alternative: keep conspool for lists and add a sibling pool per ADT — decide in D4 before touching codegen
+- [ ] D5. Pattern compiler: decision-tree lowering to nested `if` / scoreboard matches in knormal
+- [ ] D6. Retire `TList`/`Cons`/`Nil`/`head`/`tail`/`is_nil` special cases; relower lists onto `type 'a list = Nil | Cons of 'a * 'a list` (or keep the fast path for ints as an optimization, decide in D6)
+- [ ] D7. Tuples as single-constructor ADTs (sugar): `(a, b)` → `Pair(a, b)` at parse time
+- [ ] D8. Records as named-field single-constructor ADTs: `{ x = 1; y = 2 }` → `Point(1, 2)` at parse time
+- [ ] D9. Tests: `scripts/test_adts.mcaml` covering variants, nested patterns, exhaustiveness errors, wildcard patterns
+
+### Phase E — Hindley-Milner inference + let-polymorphism
+- [ ] E1. `ast.ml`: extend `typ` with `TVar of tvar ref` and `TScheme of tvar list * typ`
+- [ ] E2. `typing.ml`: rewrite `infer` as unification-based, replacing the current equality checker
+- [ ] E3. Let-generalization at `let` bindings; instantiation at uses
+- [ ] E4. Annotations on `fun` params and return types become optional
+- [ ] E5. `for_lift.ml`: the `walk` env must tolerate unresolved `TVar`s (currently uses `Typing.infer` as a concrete-type oracle)
+- [ ] E6. `knormal.ml normalize_fun`: force resolution of any residual `TVar`s before the pass runs
+- [ ] E7. `monomorphize.ml`: keep the existing `TArrStatic`/`TMat` template path (length-in-type forces specialization). All other polymorphic types flow through uniform int representation — no new monomorphization work needed
+- [ ] E8. Tests: polymorphic `id`, polymorphic list helpers, HM error diagnostics
+
+### Phase F — First-class lambdas (specialization + escape-analysis fallback)
+- [ ] F1. Parser/AST: `fun x -> e`, partial application, `Lambda of pattern list * expr` AST node
+- [ ] F2. Closure conversion IR: one form pre-analysis, treats every lambda the same
+- [ ] F3. Escape analysis pass over `fn_table` (runs between Phase 2a inline and Phase 2b monomorphize). Produces per-lambda classification `{Known | Escaping of reason}`
+- [ ] F4. Specialization pass: whole-program defunctionalization for `Known` lambdas; clone HOFs per unique closure that flows in. Respects `MCAML_SPECIALIZE_LIMIT` (default K=8) and falls back to apply-dispatch when the budget is hit
+- [ ] F5. Apply-dispatch runtime for escaping lambdas: a closure objpool (reuse Phase D's objpool), the `mcaml:apply` macro-dispatch function, env-unpack prelude at lifted function entry
+- [ ] F6. Diagnostics: `[closure]` per-lambda report (specialized vs escaping + reason + cost estimate); `MCAML_STRICT_HOT=1` env knob to promote escaping-in-hot-loop to a compile error; `cost.ml` integration so `tick_split`/`tick_guard` budgets account for apply-dispatch cost
+- [ ] F7. Tests: literal lambdas in HOFs specialize; closures captured in ADTs take the apply path; strict-hot mode fires on the right patterns
+
+### Phase G — Remaining ML conveniences
+- [ ] G1. Mutual recursion: `fun f ... and g ...`
+- [ ] G2. Nested `let rec`
+- [ ] G3. Modules / namespaces / qualified names (requires lexer fix to allow `.` in qualified names, or pick an alternative separator)
+
 ## 3. Load-bearing design decisions
 
 These were settled in the design discussion that produced this plan. Do not
@@ -773,6 +845,86 @@ things correct.
 Pick the next open Phase C task and outline your plan before editing.
 ```
 
+### 8.6 MineTorch critical path kickoff (Phases M → N → Math)
+
+Use this to start the fixed-point-numerics track that unblocks MineTorch.
+It is a three-phase sequence but one kickoff: the phases are small enough
+that a single session can usually cover M and start N, and the design
+decisions are all in §12.
+
+```
+Read /Users/alexmok/MCaml/DYNMEM_PLAN.md §§1-2 and §12 (post-memory
+roadmap). We are on the MineTorch critical path: Phases M (native Mod
+operator), N (Q16.16 fixed-point numerics), and Math (transcendental
+library in pure MCaml source). The goal of this track is to land a
+usable `TFloat` type and a validated `lib/math.mcaml` so that
+MineTorch (the sibling ONNX→mcfunction project) can start generating
+real inference code.
+
+Load-bearing decisions from §12 that must not be relitigated:
+
+  - §12.1  Uniform int representation ABI. TFloat is a 32-bit
+           scoreboard int reinterpreted as Q16.16. No boxing.
+  - §12.2  Q16.16 only; IEEE-754 emulation is explicitly rejected
+           (precision not worth the tick cost). Multiply picks the
+           pre-shift variant OR the split-half variant in N6, not
+           both. Document the choice inline.
+  - §12.3  Mod is a hard prereq for N, not optional. Phase M lands
+           first, end of story. MC's `scoreboard players operation
+           %= ` already exists; MCaml just hasn't wired it through.
+  - §12.4  Transcendentals (exp, log, sigmoid, tanh, gelu) are
+           library code in lib/math.mcaml, NOT compiler built-ins.
+           Range reduction + 256-entry LUT, ~15 cmds/call. Bootstrap
+           via a separate math_init.mcfunction that init.mcfunction
+           calls, to keep init lean.
+
+Execution order:
+
+  1. Phase M. Land all 8 tasks (M1-M8). Rebuild with the CLAUDE.md
+     command sequence. Verify all five canaries byte-identical and
+     every Python exit suite (test_dyn_array.py, test_cons.py,
+     test_regions.py) still green. Smoke-test `x % 10` and
+     `x % 65536` as probes. Commit with "Phase M: native Mod".
+
+  2. Phase N. Land N1-N11 in order. The tricky one is N6/N8
+     (multiply lowering): decide whether to use pre-shift or
+     split-half and whether to introduce `IFixedMul` as a new IR
+     op or reuse `IBinOp` with an operand-type tag. Prefer reusing
+     IBinOp unless a concrete reason forces otherwise — the
+     optimization stack already handles IBinOp uniformly. Add
+     `scripts/test_fixed_point.mcaml` covering add/sub/mul/div,
+     overflow saturation, int<->float conversion, and run it
+     through /tmp/mcaml_out/sim.py. Commit per sub-task.
+
+  3. Phase Math. Write lib/math.mcaml as pure MCaml source using
+     array_make for the LUTs or `let t = [| ... |]` static arrays.
+     Cross-validate every function against a numpy reference in a
+     new /tmp/mcaml_out/test_math.py harness. Document the
+     per-function precision tolerance in the test. Add
+     tools/pack_datapack.py support for splitting math_init off
+     from init. Commit per function.
+
+Before starting any task: verify the current state of the codebase
+matches what §2 expects. If you find partially-completed work or
+the status looks stale, stop and tell me what you found before
+proceeding.
+
+After each sub-task: rebuild, run the canaries + Python exit
+suites, update §2 of the plan, commit with the task ID in the
+message. Do NOT combine tasks into mega-commits — one commit per
+task so the bisect trail is clean if Math reveals a bug in N.
+
+Escalation: stop and flag me if (a) a canary changes output,
+(b) a Q16.16 operation's cost exceeds the §12.2 budget (>10 cmds
+for add/sub/cmp, >8 for mul, >15 for exp/log), or (c) §12's
+decisions turn out to be wrong for a concrete reason. Otherwise
+proceed through the phase sequence without interruption.
+
+MineTorch is unblocked the moment Math lands and test_math.py
+reports every transcendental within tolerance of numpy. That is
+the exit criterion for this track.
+```
+
 ### 8.5 Resume-from-blocked kickoff
 
 Use this when a previous session stopped mid-task and you need to pick up
@@ -859,7 +1011,109 @@ the user if a task tempts you toward them.
   requires the caller to also yield and resume via a continuation
   mechanism — future work.
 
-## 12. Escalation triggers
+## 12. Post-memory roadmap — load-bearing decisions
+
+Phases A–C made MCaml a functional language with dynamic memory. The work
+below takes it toward a general-purpose ML-ish language and toward
+MineTorch-usable numerics. Each decision here has the same status as the
+§3 decisions: settled by design discussion, do not relitigate without a
+concrete blocker.
+
+### 13.1 Representation ABI: every value is one int
+
+This is already true in practice and is now committed in writing:
+
+- Scalars (`TInt`, `TBool`, `TUnit`, `TFloat`) are 32-bit signed scoreboard ints.
+- Handles (`TArrDyn`, `TList`, `TADT`, closures) are 32-bit signed scoreboard ints pointing into a pool.
+- No boxing. No tag bits on the scalar path. Tag bits live inside pool cells (Phase D), not on the value.
+
+This is what makes Phase E's let-polymorphism cheap — uniform representation means **no new codegen paths are needed for polymorphism beyond what the existing monomorphize-on-template covers for `TArrStatic`/`TMat`**. The only things that ever require template specialization are types that carry compile-time shape in the type itself (array length, matrix dimensions).
+
+### 13.2 Decimals are Q16.16 fixed-point, not IEEE float
+
+Software-emulated IEEE float is ~30 cmds/add and ~100 cmds/multiply, so a
+single matmul step blows past tick budgets before doing any work. Fixed-
+point is the only viable option.
+
+- **Format**: Q16.16 signed, stored as a 32-bit scoreboard int. Range ±32,767.999…, precision ~1.5e-5.
+- **Add/sub/neg/compare**: direct scoreboard ops, same cost as int arithmetic.
+- **Multiply**: dedicated helper. Two variants; pick in N6:
+  - *Pre-shift variant* (~3 cmds): shift both operands right by 8, multiply, interpret result as Q16.16. Loses low 8 bits of each operand. Use for hot inner loops.
+  - *Split-half variant* (~8 cmds): multiply 16-bit halves pair-wise and recombine. No precision loss. Use for general-purpose math.
+- **Divide**: scale numerator up, divide, interpret as Q16.16. ~5 cmds via helper.
+- **Weight loading**: `execute store result score … run data get storage <path> 65536` reads a NBT double and multiplies by the Q16.16 scale in one command. This is the one MC primitive that crosses the double/int boundary, and it's free. Host-side `tools/pack_datapack.py` quantizes weights at compile time.
+
+Dynamic range caveats:
+- Q16.16 saturates around `|x| > ~32k`. NN activations post-layer-norm rarely hit this.
+- `exp(x)` overflows Q16.16 at `x ≈ 10.4`. Clamp before calling.
+- Composing multiple operations amplifies precision loss. Expect divergence from numpy at the 3rd-4th decimal — document this in MineTorch validation.
+
+If a real workload needs more range later, the upgrade path is per-tensor scale tracking (type-level annotation), not switching the scalar format. Deferred until a concrete workload demands it.
+
+### 13.3 `Mod` operator is a prerequisite for N, not a separate design decision
+
+Minecraft's `scoreboard players operation X %= Y` already exists. MCaml's surface just hasn't wired it through the AST / parser / codegen. Adding it is ~20 lines (see Phase M) and it simplifies any hash / index / ring-buffer code. Without it, "fractional part of a Q16.16 value" costs 3 cmds (`x - (x / 65536) * 65536`); with it, 1 cmd. Do M before N.
+
+### 13.4 Transcendentals are library code, not compiler features
+
+Once fixed-point lands, every transcendental compiles to user-level MCaml. The canonical technique is **range reduction + LUT**:
+
+- **exp(x) for x ≥ 0**: split `n = x / 65536`, `f = x % 65536`, look up `int_exp[n]` (11 entries, n = 0..10) and `frac_exp[f / 256]` (256 entries covering `[1, e)`), multiply. Cost: ~11–16 cmds with Mod, ~13–18 cmds without. Precision ~1e-2 on output; add linear interpolation between LUT entries for ~1e-5 at +8 cmds.
+- **exp(x) for x < 0**: `exp(-x) = 1 / exp(|x|)`, one fixed-divide.
+- **log, sigmoid, tanh, gelu**: same structure, different tables.
+
+Table sizes are small (~0.5 KB NBT per function). Bootstrap them via a separate `math_init.mcfunction` called from `init.mcfunction` so the init file doesn't bloat with hundreds of `data modify` lines.
+
+**Crucial**: this is a pure library, not a compiler built-in. `lib/math.mcaml` is the first client of the fixed-point type and validates its usability for real workloads. MineTorch imports it; human users import it the same way.
+
+### 13.5 Unified object pool for ADTs, cons cells, and closures
+
+Phase D decides how ADTs are laid out in the pool. Two options:
+
+- **Option a (unified objpool)**: one pool `mcaml:objpool cells` with tag-discriminated compound cells. Cons cells become `{tag: 1, h, t}` (tag = `Cons` constructor id). ADTs for free.
+- **Option b (per-type pools)**: keep `conspool` for lists, add one pool per user-defined ADT, closures get their own pool.
+
+**Recommendation**: Option a. Fewer reserved storage paths, one `objpool_next` counter, one arena reset path. Cons cells pay a 1-cmd cost for the extra tag write but that's cheap relative to the 5-cmd `ICons` budget. Make the decision in D4 before touching codegen — once the pool layout is committed, backing out is expensive.
+
+Closures reuse this pool in F5. Closure cells are `{tag: $CLOSURE, code, env_field_0, env_field_1, ...}`.
+
+### 13.6 Lambdas: specialize aggressively, fall back gracefully
+
+One language surface, one lambda form, two lowering strategies picked by the compiler:
+
+- **Known lambdas** (never stored, never returned to an escaping context, never passed to an HOF parameter that escapes) get whole-program defunctionalization. Each HOF clones per unique closure that flows in. This is what MLton does and it gets ~95% of real HOF use at zero runtime cost.
+- **Escaping lambdas** fall through to the apply-dispatch runtime: closure pool cell, macro dispatch to `mcaml:apply`, env-unpack prelude. Cost is ~4 cmds fixed + 2 cmds per captured variable, per call, plus a hidden ~2× wall-clock multiplier from macro substitution.
+
+**Specialization budget**: `MCAML_SPECIALIZE_LIMIT=K` (default 8). Stop cloning after K specializations of a single source function and fall back to apply-dispatch beyond that. Prevents code size blowup in worst-case programs.
+
+**Diagnostic contract**: the compiler reports `[closure] <name>: specialized (N call sites)` or `[closure] <name>: ESCAPING via <reason> — ~M cmds/call, inside hot loop <loop>` so the user can see the cost tradeoff at compile time. `MCAML_STRICT_HOT=1` promotes escaping-in-hot-loop to a compile error.
+
+**What this loses**: closures stored in data structures (callback tables, parser combinators, visitor patterns), closures returned from factories, first-class modules. For MCaml's target workloads (ML inference, datapack event handlers) these are all absent or cold-path, so the loss is acceptable. For human-written interpreters / DSLs, users will feel it — document as a known limitation.
+
+### 13.7 Phase ordering rationale
+
+The order is D → E → F → G → M → N → Math, but **M → N → Math can run in parallel with D/E/F** because it touches a disjoint set of files. Recommended practical ordering:
+
+1. **M** (tiny, prerequisite, 1 session)
+2. **N** (fixed-point foundation, 2 sessions)
+3. **Math** (validates N with real workload, 2 sessions) ← MineTorch unblocked after this
+4. **D** (ADTs; can also be done before N if MineTorch is not the priority)
+5. **E** (HM + polymorphism; most useful after D because polymorphic list functions become writable)
+6. **F** (lambdas; depends on D for the pool layout and on E for the `'a -> 'b` type)
+7. **G** (remaining conveniences; lands whenever)
+
+The MineTorch path (M → N → Math → tools/pack_datapack.py extension) is only 4–5 sessions and doesn't require D/E/F to land first. Prioritize it if MineTorch has concrete deliverable pressure.
+
+### 13.8 Out of scope for this roadmap
+
+- IEEE-754 float emulation. Rejected as per §13.2; precision is not worth the tick cost.
+- `Box<dyn Fn>`-style opt-in escaping closures as a separate surface. The compiler's escape analysis makes this automatic — users don't need to annotate.
+- First-class modules, functors, object system. These are simulable with ADTs + specialized lambdas once D and F land; no separate runtime work needed.
+- String values. Still out of scope per §11.
+- Self-hosting MCaml. Would require escaping closures to be performant in hot loops, which the apply-dispatch cost model explicitly doesn't support.
+- Training (as opposed to inference) in MineTorch. Training needs f32-level precision and gradient tracking; Q16.16 is not sufficient. Inference only.
+
+## 13. Escalation triggers
 
 If any of these happen during a task, stop and flag to the user rather
 than working around them:
