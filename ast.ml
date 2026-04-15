@@ -5,7 +5,7 @@ type typ = TInt | TBool | TUnit | TSelector | TPos
          | TMat of typ * int * int    (* element type, rows, cols *)
          | TRef of typ                (* ref cell holding T *)
          | TList of typ               (* cons list: element type; handle at runtime *)
-type binop = Add | Sub | Mult | Div | Eq | Neq | Lt | Leq | Gt | Geq | And | Or
+type binop = Add | Sub | Mult | Div | Mod | Eq | Neq | Lt | Leq | Gt | Geq | And | Or
 
 (* Phase A: dynamic-heap pool tag. Lives in ast.ml (not cfg.ml) so that
    codegen_helpers — which is built before cfg.ml — can reference it. *)

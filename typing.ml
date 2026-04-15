@@ -36,7 +36,7 @@ let rec infer env e =
       let t1 = infer env e1 in
       let t2 = infer env e2 in
       (match op, t1, t2 with
-       | (Add|Sub|Mult|Div), TInt, TInt -> TInt
+       | (Add|Sub|Mult|Div|Mod), TInt, TInt -> TInt
        | (Eq|Neq|Lt|Gt|Leq|Geq), TInt, TInt -> TBool
        | (And|Or), TBool, TBool -> TBool
        | _ -> raise (Error "Type mismatch in binary operation"))

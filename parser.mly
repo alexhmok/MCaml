@@ -15,7 +15,7 @@
 
 /* Symbols */
 %token LPAREN RPAREN LBRACE RBRACE COMMA COLON SEMICOLON
-%token EQUAL PLUS MINUS TIMES DIV LT GT LEQ GEQ NEQ AND OR
+%token EQUAL PLUS MINUS TIMES DIV PERCENT LT GT LEQ GEQ NEQ AND OR
 %token TILDE CARET EOF
 %token LBAR RBAR LBRACK RBRACK
 %token CONS
@@ -56,7 +56,7 @@
 %left EQUAL NEQ LT GT LEQ GEQ
 %right CONS
 %left PLUS MINUS
-%left TIMES DIV
+%left TIMES DIV PERCENT
 %nonassoc BANG REF
 %left LBRACK
 
@@ -177,6 +177,6 @@ coord_part:
   | CARET i = INT   { Local (Some (float_of_int i)) }
 
 %inline binop:
-  | PLUS { Add } | MINUS { Sub } | TIMES { Mult } | DIV { Div }
+  | PLUS { Add } | MINUS { Sub } | TIMES { Mult } | DIV { Div } | PERCENT { Mod }
   | EQUAL { Eq } | NEQ { Neq } | LT { Lt } | GT { Gt } | LEQ { Leq } | GEQ { Geq }
   | AND { And } | OR { Or }

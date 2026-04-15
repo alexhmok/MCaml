@@ -1,0 +1,30 @@
+(* Phase M: native Mod operator smoke tests.
+
+   Expected $ret values:
+     test_mod_small     -> 3   (13 % 10)
+     test_mod_large     -> 1234  (1234 % 65536 — fractional-part probe
+                                 for the Q16.16 path that lands in N)
+     test_mod_exact     -> 0   (20 % 5)
+     test_mod_chain     -> 0   ((13 % 10) % 3 = 3 % 3)
+     test_mod_var       -> 4   (let x = 100 in x % 8)
+     test_mod_rmw_loop  -> 20  (for i=0..10, acc += i % 5 →
+                                0+1+2+3+4+0+1+2+3+4 = 20) *)
+
+fun test_mod_small () : int = 13 % 10
+
+fun test_mod_large () : int = 1234 % 65536
+
+fun test_mod_exact () : int = 20 % 5
+
+fun test_mod_chain () : int = (13 % 10) % 3
+
+fun test_mod_var () : int =
+  let x = 100 in
+  x % 8
+
+fun test_mod_rmw_loop () : int =
+  let acc = ref 0 in
+  for i = 0 to 10 do
+    acc := !acc + (i % 5)
+  done;
+  !acc

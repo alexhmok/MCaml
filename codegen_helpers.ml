@@ -21,7 +21,7 @@ let cmp_str = function
   | _ -> "="
 
 let op_str = function
-  | Add -> "+=" | Sub -> "-=" | Mult -> "*=" | Div -> "/="
+  | Add -> "+=" | Sub -> "-=" | Mult -> "*=" | Div -> "/=" | Mod -> "%="
   | And -> "<"                          (* scoreboard min; valid for 0/1 *)
   | Or  -> ">"                          (* scoreboard max; valid for 0/1 *)
   | _ -> "+="

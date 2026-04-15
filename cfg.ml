@@ -213,7 +213,7 @@ let instr_uses (i : instr) : vreg list =
 let string_of_binop op =
   let open Ast in
   match op with
-  | Add -> "+" | Sub -> "-" | Mult -> "*" | Div -> "/"
+  | Add -> "+" | Sub -> "-" | Mult -> "*" | Div -> "/" | Mod -> "%"
   | Eq -> "=" | Neq -> "!=" | Lt -> "<" | Gt -> ">" | Leq -> "<=" | Geq -> ">="
   | And -> "&&" | Or -> "||"
 

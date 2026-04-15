@@ -68,6 +68,7 @@ rule read = parse
   | "-"      { MINUS }
   | "*"      { TIMES }
   | "/"      { DIV }
+  | "%"      { PERCENT }
   | "<"      { LT }
   | ">"      { GT }
   | "<="     { LEQ }

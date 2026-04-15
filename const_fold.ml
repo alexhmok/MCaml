@@ -79,6 +79,11 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
                    (i, kill m d, false)
                  else
                    fold (ka / kb)
+             | Mod  ->
+                 if kb = 0 then
+                   (i, kill m d, false)
+                 else
+                   fold (ka mod kb)
              | Eq   -> fold (bool_int (ka = kb))
              | Neq  -> fold (bool_int (ka <> kb))
              | Lt   -> fold (bool_int (ka < kb))

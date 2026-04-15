@@ -330,14 +330,47 @@ after the memory work landed, to take MCaml from "functional with heap" to
 here are load-bearing design decisions; §13 has the full rationale.
 
 ### Phase M — Native Mod operator (prereq for Phase N)
-- [ ] M1. `ast.ml`: add `Mod` to the `binop` variant
-- [ ] M2. `lexer.mll`: `%` → `PERCENT` token
-- [ ] M3. `parser.mly`: `expr PERCENT expr { BinOp(Mod, ...) }` at Mult/Div precedence
-- [ ] M4. `typing.ml`: extend the arithmetic arm
-- [ ] M5. `knormal.ml` / `cfg_build.ml`: reuse existing `IBinOp` path with a `Mod` variant
-- [ ] M6. `codegen_helpers.ml`: lower to `scoreboard players operation X %= Y`
-- [ ] M7. `const_fold.ml` / `copy_prop.ml` / `dce.ml`: mechanical arms for `Mod`
-- [ ] M8. Tests: `x % 10`, `x % 65536` as fractional-part extraction smoke test
+- [x] M1. `ast.ml`: add `Mod` to the `binop` variant
+- [x] M2. `lexer.mll`: `%` → `PERCENT` token
+- [x] M3. `parser.mly`: `PERCENT` token + precedence-table entry at
+      `%left TIMES DIV PERCENT` + inline `binop` arm. No new grammar
+      rule — the existing `expr op = binop expr` production picks up
+      `Mod` through the inline, so the reduce/reduce hazard from
+      adding a dedicated arm is avoided.
+- [x] M4. `typing.ml`: extended the `(Add|Sub|Mult|Div), TInt, TInt → TInt`
+      arithmetic arm to `(Add|Sub|Mult|Div|Mod)`.
+- [x] M5. `knormal.ml` / `cfg_build.ml`: zero edits needed — the BinOp
+      arm in knormal (`KBinOp(op, t1, t2)`) and the cfg_build arm
+      (`IBinOp(d, op, v1, v2)`) are both generic over `op`, so `Mod`
+      rode through both passes without change.
+- [x] M6. `codegen_helpers.ml`: added `Mod → "%="` to `op_str`, lowering
+      through the existing `cmd_score_binop` path. Emits exactly two
+      commands per Mod (copy + `%=`), same cost as any other
+      non-comparison binop. 3 cmds if const_fold already elided the
+      self-copy; 2 cmds otherwise. Well under the §12.2 budget (the 10-
+      cmd add/sub/cmp target; Mod isn't even in the Q16.16 cost table
+      because it's an int-level op).
+- [x] M7. `const_fold.ml` / `copy_prop.ml` / `dce.ml` / `local_cse.ml`:
+      const_fold gained a both-known fold arm for `Mod` with
+      div-by-zero protection (matches the existing `Div` arm's
+      shape). local_cse's `is_commutative` predicate now lists `Mod`
+      on the non-commutative side (grouped with `Sub`/`Div`). copy_prop
+      and dce are op-agnostic and needed no edits. strength_reduce
+      and cfg.ml's `string_of_binop` also got their `Mod` arms (the
+      former rides through its existing `| _ -> None` catchalls so
+      Mod simply contributes nothing to the IV classifier; the latter
+      maps `Mod → "%"` for CFG dump readability).
+- [x] M8. Tests: `scripts/test_mod.mcaml` covers six cases: `13 % 10`
+      (small), `1234 % 65536` (fractional-part probe for the Q16.16
+      path that lands in N), `20 % 5` (exact multiple → 0), a chained
+      `(13 % 10) % 3`, a `let`-bound variable dividend `100 % 8`, and
+      a for-loop rmw pattern accumulating `i % 5` across
+      `i ∈ [0, 10)`. Validated through `sim.py` with one extension
+      (Java-style semantics for the new `%=` op: result sign matches
+      dividend, truncation toward zero, matching Minecraft's own
+      `scoreboard players operation %=`). All five canaries
+      byte-identical vs. pre-Phase-M HEAD; all 15 pre-existing Python
+      exit-suite tests still green.
 
 ### Phase N — Fixed-point Q16.16 numerics
 - [ ] N1. `ast.ml` / `typing.ml`: retype `Float` literal from `TInt` alias to real `TFloat`; add `TFloat` type

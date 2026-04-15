@@ -28,6 +28,7 @@ type token =
   | RBAR
   | PLUS
   | PIPE
+  | PERCENT
   | OR
   | NEQ
   | MINUS
