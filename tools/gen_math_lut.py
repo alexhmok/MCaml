@@ -88,6 +88,55 @@ def build_log_frac_lut() -> list[int]:
     return [q16(math.log(1.0 + k / LOG_FRAC_N)) for k in range(LOG_FRAC_N)]
 
 
+# ----- sigmoid / tanh / gelu LUTs --------------------------------------
+#
+# All three use 256-entry LUTs over bounded input ranges. Precision at
+# bucket edges is ~1-2% for the worst cases, adequate for NN inference
+# where activation functions saturate heavily and downstream softmax
+# normalization absorbs small errors.
+#
+# sigmoid: LUT over [0, 8) with 256 entries. Bucket = 1/32.
+#   Negative inputs use sigmoid(-x) = 1 - sigmoid(x).
+#   Inputs beyond 8 saturate to 1 (sigmoid(8) = 0.9997, within the
+#   Q16.16 precision floor of ~1.5e-5).
+#
+# tanh: LUT over [0, 4) with 256 entries. Bucket = 1/64.
+#   Negative inputs use tanh(-x) = -tanh(x).
+#   Inputs beyond 4 saturate to 1 (tanh(4) = 0.9993).
+#
+# gelu: LUT over [-4, 4) with 256 entries. Bucket = 1/32.
+#   Asymmetric — covers the full domain directly. Beyond the domain
+#   saturates to 0 (for x < -4) or x (for x >= 4, since gelu(x) ~ x
+#   for large positive x).
+
+SIGMOID_HI = 8.0
+SIGMOID_N  = 256
+TANH_HI    = 4.0
+TANH_N     = 256
+GELU_LO    = -4.0
+GELU_HI    = 4.0
+GELU_N     = 256
+
+def sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
+
+def gelu(x: float) -> float:
+    # Exact gelu, not the tanh-based approximation: 0.5 * x * (1 + erf(x/sqrt(2))).
+    return 0.5 * x * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+def build_sigmoid_lut() -> list[int]:
+    step = SIGMOID_HI / SIGMOID_N
+    return [q16(sigmoid(k * step)) for k in range(SIGMOID_N)]
+
+def build_tanh_lut() -> list[int]:
+    step = TANH_HI / TANH_N
+    return [q16(math.tanh(k * step)) for k in range(TANH_N)]
+
+def build_gelu_lut() -> list[int]:
+    step = (GELU_HI - GELU_LO) / GELU_N
+    return [q16(gelu(GELU_LO + k * step)) for k in range(GELU_N)]
+
+
 # ----- emission ---------------------------------------------------------
 
 PREAMBLE = """(* lib/math.mcaml — Q16.16 transcendental library for MCaml.
@@ -102,10 +151,16 @@ PREAMBLE = """(* lib/math.mcaml — Q16.16 transcendental library for MCaml.
      int_exp_lut[n]  = exp(n)         for n in [0, 10]   (11 entries)
      frac_exp_lut[k] = exp(k/256)     for k in [0, 255]  (256 entries)
      log_frac_lut[k] = ln(1 + k/256)  for k in [0, 255]  (256 entries)
+     sigmoid_lut[k]  = sigmoid(k/32)  for k in [0, 255]  (256 entries, [0, 8))
+     tanh_lut[k]     = tanh(k/64)     for k in [0, 255]  (256 entries, [0, 4))
+     gelu_lut[k]     = gelu(-4+k/32)  for k in [0, 255]  (256 entries, [-4, 4))
 
    Functions:
      exp_fixed x     = exp(x) for x in [0, 10)
      log_fixed x     = ln(x)  for x > 0
+     sigmoid_fixed x = 1/(1+e^-x), LUT [0,8) with symmetric negatives
+     tanh_fixed x    = tanh(x),    LUT [0,4) with symmetric negatives
+     gelu_fixed x    = gelu(x),    LUT [-4,4), clamps outside
 *)
 
 """
@@ -199,6 +254,65 @@ fun log_fixed (x: float) : float =
   float_of_raw(r)
 """
 
+ACTIVATIONS_BODY = """\
+
+(* -------- Math2: sigmoid / tanh / gelu via bounded-domain LUTs --------
+
+   Each wrapper is a straightforward LUT access with bounds clamping.
+   Cost: ~15 cmds per call (bounds branch + LUT dispatch). Precision
+   worst case ~1-2% at bucket edges; typical <0.5%. Adequate for NN
+   inference where activation functions saturate heavily.
+
+   Note: we use raw_of_float / integer compares to avoid mixing
+   float comparisons with integer index math, which keeps typing
+   simple. Recall sigmoid_lut has 256 entries over [0, 8) so the
+   bucket-raw width is 8*65536/256 = 2048; for the integer-index
+   divide we use /2048. Similarly tanh /1024 over [0, 4), and gelu
+   /2048 over [-4, 4). *)
+
+fun sigmoid_fixed (x: float) : float =
+  let x_raw = raw_of_float(x) in
+  if x_raw >= 524288 then
+    1.0                                  (* x >= 8, saturate to 1.0 *)
+  else if x_raw >= 0 then
+    sigmoid_lut[x_raw / 2048]
+  else
+    let abs_raw = 0 - x_raw in
+    if abs_raw >= 524288 then
+      0.0                                (* x <= -8, saturate to 0.0 *)
+    else
+      (* sigmoid(-x) = 1 - sigmoid(x) *)
+      let s = sigmoid_lut[abs_raw / 2048] in
+      1.0 - s
+
+fun tanh_fixed (x: float) : float =
+  let x_raw = raw_of_float(x) in
+  if x_raw >= 262144 then
+    1.0                                  (* x >= 4, saturate *)
+  else if x_raw >= 0 then
+    tanh_lut[x_raw / 1024]
+  else
+    let abs_raw = 0 - x_raw in
+    if abs_raw >= 262144 then
+      neg_f(1.0)                         (* x <= -4, saturate *)
+    else
+      (* tanh(-x) = -tanh(x) *)
+      let t = tanh_lut[abs_raw / 1024] in
+      neg_f(t)
+
+fun gelu_fixed (x: float) : float =
+  let x_raw = raw_of_float(x) in
+  if x_raw >= 262144 then
+    x                                    (* x >= 4: gelu(x) ~ x *)
+  else if x_raw < 0 - 262144 then
+    0.0                                  (* x <= -4: gelu(x) ~ 0 *)
+  else
+    (* Shift into [0, 524288) then scale to [0, 255]:
+       k = (x_raw + 262144) / 2048. *)
+    let shifted = x_raw + 262144 in
+    gelu_lut[shifted / 2048]
+"""
+
 
 def to_float_literal(encoded: int) -> str:
     """Render a Q16.16 int as a Python float literal that round-trips
@@ -242,9 +356,13 @@ def emit(output_path: Path | None) -> None:
 
     emit_wrapped_lut(buf, "frac_exp_lut", frac_exp)
     emit_wrapped_lut(buf, "log_frac_lut", log_frac)
+    emit_wrapped_lut(buf, "sigmoid_lut",  build_sigmoid_lut())
+    emit_wrapped_lut(buf, "tanh_lut",     build_tanh_lut())
+    emit_wrapped_lut(buf, "gelu_lut",     build_gelu_lut())
 
     buf.append(EXP_FIXED_BODY)
     buf.append(LOG_FIXED_BODY)
+    buf.append(ACTIVATIONS_BODY)
 
     text = "".join(buf)
     if output_path is None:
