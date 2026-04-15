@@ -526,7 +526,33 @@ here are load-bearing design decisions; §13 has the full rationale.
       new field, which is a much larger diff than adding two variants.
       This task was documentation-only; the decision was implemented
       as part of N5's commit `753fc6b`.)
-- [ ] N9. `const_fold.ml`: fold `IFixedMul(IConst a, IConst b)` to `IConst ((a * b) lsr 16)` with overflow trap
+- [x] N9. `const_fold.ml`: fold `IFixedMul(IConst a, IConst b)` to `IConst ((a * b) lsr 16)` with overflow trap
+      (Crucial invariant: folded and unfolded paths must produce
+      byte-identical scoreboard results, or bisect across a fold
+      boundary would yield false positives. The fold formulas
+      therefore mirror the **runtime** lowerings exactly — including
+      their precision loss — rather than using the mathematically
+      exact `(a * b) lsr 16`:
+        - FMult: `(ka / 256) * (kb / 256)`  (matches N6 pre-shift)
+        - FDiv:  `((ka * 256) / kb) * 256`  (matches N7 scale-up)
+      Both use OCaml integer division which truncates toward zero,
+      same as Java / Minecraft. Int32 overflow at any step skips the
+      fold (since OCaml's 63-bit int would produce a value the
+      runtime couldn't represent); the runtime instruction then fires
+      as usual.
+      Algebraic simps (FMult by 0 → 0, FMult by 1.0 → a,
+      FDiv by 1.0 → a) deliberately NOT added: FMult by the Q16.16
+      encoding of 1.0 (= 65536) gives `(ka/256) * (65536/256) =
+      (ka/256)*256`, which is only equal to ka when ka is a multiple
+      of 256. Folding to a copy would observably change the low 8
+      bits. Same issue for FDiv by 1.0. Skip both — the runtime
+      performs the shift-shuffle correctly.
+      Probes: `let x = fmul(1.5, 2.0)` folds to `IConst 196608`
+      (= 3.0 * 65536, exact); `let x = fmul(0.1, 0.1)` folds to
+      `IConst 625` (= lossy runtime value); `let x = fdiv(10, 3)`
+      folds to `IConst 218368` (byte-identical to the runtime-
+      computed value from N7 probes). All 15 Python-harness tests
+      still green.)
 - [~] N10. `main.ml` / `tools/pack_datapack.py`: extend init to reserve any new scoreboard slots
       (Partial — landed with N6: `tools/pack_datapack.py`
       INIT_MCFUNCTION now initializes `$c256 = 256`, and

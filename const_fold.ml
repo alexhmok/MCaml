@@ -84,12 +84,40 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
                    (i, kill m d, false)
                  else
                    fold (ka mod kb)
-             (* Phase N / N5: Q16.16 fold arms for FMult/FDiv are
-                deferred to N9, where the shift-right-16 and scale-
-                before-divide semantics land together. For now, pass
-                through without folding. *)
-             | FMult | FDiv ->
-                 (i, kill m d, false)
+             (* Phase N / N9: Q16.16 fold arms. Must match the runtime
+                lowering EXACTLY including precision loss — folded and
+                unfolded code paths must produce byte-identical
+                scoreboard results or any bisect across a fold boundary
+                would yield a false positive. Skip fold on int32
+                overflow since the runtime would wrap differently from
+                OCaml's 63-bit native int. *)
+             | FMult ->
+                 (* Matches codegen_helpers N6 pre-shift: (a/256)*(b/256). *)
+                 let a' = ka / 256 in
+                 let b' = kb / 256 in
+                 let product = a' * b' in
+                 if product > 2147483647 || product < -2147483648 then
+                   (i, kill m d, false)
+                 else
+                   fold product
+             | FDiv ->
+                 (* Matches codegen_helpers N7 scale-up-numerator:
+                    ((a*256)/b)*256. Guard against div-by-zero AND
+                    int32 overflow at either multiply step. *)
+                 if kb = 0 then
+                   (i, kill m d, false)
+                 else begin
+                   let first = ka * 256 in
+                   if first > 2147483647 || first < -2147483648 then
+                     (i, kill m d, false)
+                   else
+                     let divided = first / kb in
+                     let result = divided * 256 in
+                     if result > 2147483647 || result < -2147483648 then
+                       (i, kill m d, false)
+                     else
+                       fold result
+                 end
              | Eq   -> fold (bool_int (ka = kb))
              | Neq  -> fold (bool_int (ka <> kb))
              | Lt   -> fold (bool_int (ka < kb))
