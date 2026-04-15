@@ -393,7 +393,17 @@ here are load-bearing design decisions; §13 has the full rationale.
       `T_FLOAT { TFloat }` to the `typ` nonterminal between `T_INT`
       and `T_BOOL`. No menhir conflicts. `(x: float)` now parses as
       TFloat; float literals still fail at knormal until N4.)
-- [ ] N4. `knormal.ml`: float literal `x` compiles to `KInt (round (x *. 65536.0))`
+- [x] N4. `knormal.ml`: float literal `x` compiles to `KInt (round (x *. 65536.0))`
+      (Replaces the pre-Phase-N failwith in knormal's `Float f` arm
+      with `int_of_float (Float.round (f *. 65536.0))`. Rounds to
+      nearest (half-away-from-zero via OCaml's `Float.round`), which
+      is what a user typing a literal expects. Out-of-range literals
+      (|x| ≥ 32768, or more precisely: scaled value outside int32)
+      fail loudly at knormal time with a clear message — silent
+      clamping on a hand-typed literal would hide user errors.
+      Probes: `1.5 → 98304`, `-3.25 → -212992`, `32767.0 →
+      2147418112` (within int32 max); `99999.0` fails at knormal
+      with the range error. All 15 Python-harness tests still green.)
 - [ ] N5. `typing.ml`: float arithmetic arms (Add/Sub/Mult/Div/neg/compare on TFloat)
 - [ ] N6. `codegen_helpers.ml`: `fixed_mul.mcfunction` helper (~3 cmds with pre-shift, ~8 cmds with split-half variant; pick one, document tradeoff inline)
 - [ ] N7. `codegen_helpers.ml`: `fixed_div.mcfunction` helper

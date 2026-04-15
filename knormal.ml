@@ -113,7 +113,21 @@ let rec all_ints (es : expr list) : int list option =
 (* Normalize an expression, writing the result to 'dest' if provided *)
 let rec normalize_to (dest : string option) (e : expr) : kexpr =
   match e with
-  | Float _ -> failwith "Float literals not supported"
+  | Float f ->
+      (* Phase N / N4: Q16.16 encoding. The literal x compiles to
+         round(x * 65536) as an int. §12.2: Q16.16 range is
+         [-32768, 32768), which after scaling fits exactly in int32.
+         Compile-time reject out-of-range literals (silent clamp
+         would hide a user error on a value they typed by hand). *)
+      let scaled = Float.round (f *. 65536.0) in
+      if scaled < -2147483648.0 || scaled > 2147483647.0 then
+        failwith
+          (Printf.sprintf
+             "Phase N: float literal %g out of Q16.16 range \
+              (representable range is approximately [-32768, 32768))"
+             f);
+      let i = int_of_float scaled in
+      (match dest with Some d -> KLet(d, KInt i, KUnit) | None -> KUnit)
   | Int i ->
       (match dest with Some d -> KLet(d, KInt i, KUnit) | None -> KUnit)
       
