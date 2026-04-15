@@ -1113,6 +1113,48 @@ The MineTorch path (M → N → Math → tools/pack_datapack.py extension) is on
 - Self-hosting MCaml. Would require escaping closures to be performant in hot loops, which the apply-dispatch cost model explicitly doesn't support.
 - Training (as opposed to inference) in MineTorch. Training needs f32-level precision and gradient tracking; Q16.16 is not sufficient. Inference only.
 
+### 13.9 Array-length polymorphism is a host-side concern, not a compiler feature
+
+MineTorch is a general ONNX → mcfunction compiler, so across the
+ecosystem it sees unbounded shape variety (different embed dims, image
+sizes, vocab sizes per model). The natural reaction is to make MCaml's
+`arr[int, n]` length-polymorphic so one `dot` / `vec_add` / `matmul`
+helper covers every shape. We are explicitly NOT doing that for v1.
+
+Rationale:
+
+- MineTorch is a host-side code generator, not human-written code. The
+  source-duplication pain that would motivate length-polymorphism only
+  exists for humans. Emitting `dot_768` next to `dot_1024` is one extra
+  f-string in MineTorch's emitter; it doesn't care.
+- Per-op cost is what matters for inference throughput. `IArrGet` on
+  static arrays is ~1 cmd (literal storage path); `IHeapGet` on dyn
+  arrays is ~5 cmds via macro dispatch. Matmul inner loops live or die
+  on this. A length-polymorphic implementation that erases length at
+  the type level still has to either (a) be a runtime handle (= dyn
+  array, 5× cost) or (b) monomorphize per shape anyway, in which case
+  Phase L is just ergonomic sugar over what the existing monomorphizer
+  already does.
+- Within any single ONNX file the unique shape count is bounded by the
+  model architecture, not the workload. A big transformer is maybe
+  20–100 unique shapes total. The MCaml monomorphizer producing one
+  clone per shape per call site is fine on code size; compile time is
+  a host-side cost paid once per model build.
+
+The MineTorch v1 strategy is therefore: emit per-shape monomorphic
+helpers from the ONNX walker; hot path (matmuls inside the layer-stack
+loop) uses static `arr[int, n]`; cold path (one-shot embedding lookup,
+final logit projection) MAY use `darr` if shape resolution is awkward,
+trading 5× per-op cost for code-size savings on ops that run once per
+token.
+
+**Bisect trigger to revisit Phase L**: if monomorphizer profiling shows
+the MCaml compile of a real ONNX-emitted .mcaml file taking >1s, OR if
+a workload comes in that genuinely needs runtime length (variable
+sequence length served from one compiled model), revisit. Until then,
+Phase L stays in the "nice for human ergonomics, not on the critical
+path" backlog.
+
 ## 13. Escalation triggers
 
 If any of these happen during a task, stop and flag to the user rather
