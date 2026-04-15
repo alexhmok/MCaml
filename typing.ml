@@ -99,6 +99,12 @@ let rec infer env e =
   | App ("neg_f", [a]) ->
       if infer env a <> TFloat then raise (Error "neg_f: arg must be float");
       TFloat
+  | App ("to_float", [a]) ->
+      if infer env a <> TInt then raise (Error "to_float: arg must be int");
+      TFloat
+  | App ("to_int", [a]) ->
+      if infer env a <> TFloat then raise (Error "to_int: arg must be float");
+      TInt
 
   (* Phase A dyn-array builtins. [array_make] materializes a fresh
      TArrDyn TInt; [array_get]/[array_set] unify against an

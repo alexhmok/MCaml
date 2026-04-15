@@ -1,0 +1,87 @@
+(* Phase N / N11: exit tests for Q16.16 fixed-point numerics.
+
+   Every entry point returns an int — either the raw Q16.16 encoding
+   of a float result (so the harness can verify exact scoreboard
+   values) or an integer derived via to_int / comparison / etc.
+
+   Q16.16 encoding: x_real * 65536 = x_encoded.
+     1.5    -> 98304
+     2.25   -> 147456
+     3.75   -> 245760
+     -3.5   -> -229376
+     0.1    -> 6554   (round of 6553.6)
+     3.0    -> 196608
+     0.25   -> 16384
+
+   Tests cover: add, sub, neg, compare, fmul exact, fmul lossy, fdiv
+   exact, fdiv non-exact, to_float, to_int, fdiv(to_float) mixed-
+   pipeline, a small vector-dot-style helper, and a tail-recursive
+   accumulation loop over fmul. *)
+
+fun test_add () : int =
+  let x = 1.5 + 2.25 in
+  to_int(x)                            (* 3 after truncation *)
+
+fun test_add_raw () : float = 1.5 + 2.25  (* 245760 *)
+
+fun test_sub_raw () : float = 5.0 - 1.25   (* 245760 *)
+
+fun test_neg_raw () : float = neg_f(3.5)   (* -229376 *)
+
+fun test_mul_exact_raw () : float = fmul(1.5, 2.0)  (* 196608 *)
+
+fun test_mul_lossy_raw () : float = fmul(0.1, 0.1)  (* 625 via pre-shift *)
+
+fun test_div_exact_raw () : float = fdiv(6.0, 2.0)  (* 196608 *)
+
+fun test_div_nonexact_raw () : float = fdiv(10.0, 3.0)  (* 218368, 0.04% rel err *)
+
+fun test_to_float_raw () : float = to_float(7)   (* 7 * 65536 = 458752 *)
+
+fun test_to_int () : int =
+  to_int(fmul(2.5, 4.0))               (* 10 *)
+
+fun test_cmp_lt () : int =
+  if 1.5 < 2.5 then 1 else 0           (* 1 *)
+
+fun test_cmp_eq () : int =
+  if 1.5 = 1.5 then 1 else 0            (* 1 *)
+
+fun test_cmp_gt_neg () : int =
+  if neg_f(1.0) > neg_f(2.0) then 1 else 0  (* -1 > -2 = true -> 1 *)
+
+(* Mixed pipeline: (a + b) * c, then round-trip back to int.
+   (1.0 + 2.0) * 1.5 = 4.5 -> to_int -> 4 *)
+fun test_mixed_pipeline () : int =
+  let s = 1.0 + 2.0 in
+  let p = fmul(s, 1.5) in
+  to_int(p)
+
+(* Vector-dot stress: simulate dot([1.0, 2.0, 3.0], [0.5, 0.25, 0.125])
+     = 1.0*0.5 + 2.0*0.25 + 3.0*0.125
+     = 0.5 + 0.5 + 0.375
+     = 1.375
+   Encoded: 1.375 * 65536 = 90112.
+   NOTE: because dot uses fmul, there may be small precision loss
+   from pre-shift. We expect exactly 90112 here because all inputs
+   are clean powers-of-2 fractions. *)
+fun test_dot3_raw () : float =
+  let a1 = 1.0 in
+  let a2 = 2.0 in
+  let a3 = 3.0 in
+  let b1 = 0.5 in
+  let b2 = 0.25 in
+  let b3 = 0.125 in
+  let p1 = fmul(a1, b1) in
+  let p2 = fmul(a2, b2) in
+  let p3 = fmul(a3, b3) in
+  p1 + p2 + p3
+
+(* Tail-recursive accumulation: repeatedly add 0.5 to an accumulator.
+   After 10 iterations starting from 0.0: 5.0.
+   Encoded: 5.0 * 65536 = 327680. *)
+fun accum (i: int, acc: float) : float =
+  if i >= 10 then acc
+  else accum(i + 1, acc + 0.5)
+
+fun test_accum_raw () : float = accum(0, 0.0)

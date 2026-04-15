@@ -591,6 +591,33 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
         KLet(t_a, KUnit,
           KSeq(k_a, op_instr)))
 
+  (* Phase N / N11: int<->float conversions. to_float(a) = a * 65536;
+     to_int(a) = a / 65536 (truncates fractional part). Both lower to
+     a regular int IBinOp against a fresh $c65536 temp; codegen uses
+     the existing Mult/Div helpers so no new lowering. Constraint:
+     to_float(a) overflows int32 for |a| >= 32768 — caller's
+     responsibility since we don't emit a runtime check. *)
+  | App ("to_float", [a]) ->
+      let t_a = new_temp () in
+      let t_scale = new_temp () in
+      let k_a = normalize_to (Some t_a) a in
+      let op_instr = match dest with
+        | Some d -> KLet(d, KBinOp(Mult, t_a, t_scale), KUnit)
+        | None -> KUnit in
+      KLet(t_a, KUnit,
+        KSeq(k_a,
+          KLet(t_scale, KInt 65536, op_instr)))
+  | App ("to_int", [a]) ->
+      let t_a = new_temp () in
+      let t_scale = new_temp () in
+      let k_a = normalize_to (Some t_a) a in
+      let op_instr = match dest with
+        | Some d -> KLet(d, KBinOp(Div, t_a, t_scale), KUnit)
+        | None -> KUnit in
+      KLet(t_a, KUnit,
+        KSeq(k_a,
+          KLet(t_scale, KInt 65536, op_instr)))
+
   | App ("is_nil", [arg]) ->
       (* Desugar to equality against the -1 sentinel. KBinOp Eq already
          lowers to the standard boolean-as-int compile. *)

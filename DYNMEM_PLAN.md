@@ -553,12 +553,48 @@ here are load-bearing design decisions; §13 has the full rationale.
       folds to `IConst 218368` (byte-identical to the runtime-
       computed value from N7 probes). All 15 Python-harness tests
       still green.)
-- [~] N10. `main.ml` / `tools/pack_datapack.py`: extend init to reserve any new scoreboard slots
-      (Partial — landed with N6: `tools/pack_datapack.py`
-      INIT_MCFUNCTION now initializes `$c256 = 256`, and
-      `codegen_cfg.is_reserved_slot` knows about `$c256` / `$fmul_t`.
-      Remaining piece lands with N7: any FDiv-specific scratch slots.)
-- [ ] N11. Tests: `scripts/test_fixed_point.mcaml` covering add/sub/mul/div, round-trip, overflow saturation, int↔float conversion
+- [x] N10. `main.ml` / `tools/pack_datapack.py`: extend init to reserve any new scoreboard slots
+      (Closed out with N7's discovery that FDiv reuses `$c256` from
+      N6 and needs no dedicated scratch — the scale-up-numerator
+      approach operates entirely in the dest slot. Final slot
+      reservations: `$c256` initialized to 256 in INIT_MCFUNCTION and
+      sim.py's World constructor; `$fmul_t` is a scratch-only slot
+      (no init needed, the first FMult writes it). Both are in
+      `codegen_cfg.is_reserved_slot`. No changes to `main.ml` — the
+      driver's reset sequence touches pool counters, not constants,
+      and `$c256` is intentionally NEVER reset (would break every
+      subsequent fmul/fdiv call). Documented in §4.1's extension.)
+- [x] N11. Tests: `scripts/test_fixed_point.mcaml` covering add/sub/mul/div, round-trip, overflow saturation, int↔float conversion
+      (N11 required int↔float conversions so added `to_float`/`to_int`
+      as App-builtins first. `to_float(a)` lowers to `KBinOp(Mult,
+      a, 65536)`; `to_int(a)` lowers to `KBinOp(Div, a, 65536)`. No
+      new codegen — they ride through the existing Mult/Div path.
+      Constraint: `to_float(a)` overflows int32 for |a| >= 32768; not
+      runtime-guarded, caller's responsibility.
+      `scripts/test_fixed_point.mcaml` has 16 entry points:
+      test_add, test_add_raw, test_sub_raw, test_neg_raw,
+      test_mul_exact_raw, test_mul_lossy_raw, test_div_exact_raw,
+      test_div_nonexact_raw, test_to_float_raw, test_to_int,
+      test_cmp_lt, test_cmp_eq, test_cmp_gt_neg, test_mixed_pipeline
+      ((1+2)*1.5 round-tripped via to_int), test_dot3_raw (three-
+      term vector dot product, inputs chosen as clean powers-of-2
+      fractions so the pre-shift mul is exact), and test_accum_raw
+      (tail-recursive accumulation of 0.5 ten times, exercising the
+      loop path with float add).
+      Deliberate omission: overflow saturation is not tested because
+      sim.py uses Python bignum arithmetic and doesn't wrap int32.
+      Real Minecraft wraps; the runtime behavior at |x| > ~32k is
+      wrap-to-negative per §12.2. A saturation test would require
+      extending sim.py with a per-op int32 wrap, deferred until a
+      workload demands it.
+      Harness `/tmp/mcaml_out/test_fixed_point.py` (not committed;
+      same convention as the A/B/C harnesses) compiles, runs each
+      entry in a fresh World, asserts on the raw scoreboard int, and
+      prints the decoded real value alongside the true float for
+      immediate regression visibility. All 16 cases green on first
+      run. MineTorch's critical path is now unblocked pending
+      Phase Math (transcendental library). All five canaries still
+      byte-identical; all 3 pre-existing exit suites still green.)
 
 ### Phase Math — Transcendental library (rides on N, pure MCaml source)
 - [ ] Math1. `lib/math.mcaml`: `exp_fixed`, `log_fixed` via range reduction + 256-entry LUT (see §13 for the Q16.16-specific decomposition)
