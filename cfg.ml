@@ -214,6 +214,7 @@ let string_of_binop op =
   let open Ast in
   match op with
   | Add -> "+" | Sub -> "-" | Mult -> "*" | Div -> "/" | Mod -> "%"
+  | FMult -> "*f" | FDiv -> "/f"
   | Eq -> "=" | Neq -> "!=" | Lt -> "<" | Gt -> ">" | Leq -> "<=" | Geq -> ">="
   | And -> "&&" | Or -> "||"
 

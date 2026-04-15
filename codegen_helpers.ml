@@ -39,6 +39,12 @@ let cmd_score_copy (d : string) (s : string) : string =
    same physical slot, or the second command would read a clobbered value.
    Comparison binops lower to a single `execute store success …` command. *)
 let cmd_score_binop (d : string) (op : binop) (v1 : string) (v2 : string) : string list =
+  (* Phase N / N5: FMult/FDiv lowering lands in N6/N7. For now, any
+     IBinOp with these ops reaching codegen is a bug — fail loudly. *)
+  (match op with
+   | FMult | FDiv ->
+       failwith "Phase N: FMult/FDiv lowering lands in N6/N7"
+   | _ -> ());
   if is_comparison op then
     match op with
     | Neq ->

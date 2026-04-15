@@ -84,6 +84,12 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
                    (i, kill m d, false)
                  else
                    fold (ka mod kb)
+             (* Phase N / N5: Q16.16 fold arms for FMult/FDiv are
+                deferred to N9, where the shift-right-16 and scale-
+                before-divide semantics land together. For now, pass
+                through without folding. *)
+             | FMult | FDiv ->
+                 (i, kill m d, false)
              | Eq   -> fold (bool_int (ka = kb))
              | Neq  -> fold (bool_int (ka <> kb))
              | Lt   -> fold (bool_int (ka < kb))

@@ -553,6 +553,44 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
              KSeq(k_l,
                KLet(d, KUnit, KTail(d, t_l)))))
 
+  (* Phase N / N5: Q16.16 builtins. fmul/fdiv normalize both operands
+     to temps and emit KBinOp with the dedicated FMult/FDiv variants.
+     neg_f desugars to `0 - a` using a fresh zero temp. *)
+  | App ("fmul", [a; b]) ->
+      let t1 = new_temp () in
+      let t2 = new_temp () in
+      let k1 = normalize_to (Some t1) a in
+      let k2 = normalize_to (Some t2) b in
+      let op_instr = match dest with
+        | Some d -> KLet(d, KBinOp(FMult, t1, t2), KUnit)
+        | None -> KUnit in
+      KLet(t1, KUnit,
+        KSeq(k1,
+          KLet(t2, KUnit,
+            KSeq(k2, op_instr))))
+  | App ("fdiv", [a; b]) ->
+      let t1 = new_temp () in
+      let t2 = new_temp () in
+      let k1 = normalize_to (Some t1) a in
+      let k2 = normalize_to (Some t2) b in
+      let op_instr = match dest with
+        | Some d -> KLet(d, KBinOp(FDiv, t1, t2), KUnit)
+        | None -> KUnit in
+      KLet(t1, KUnit,
+        KSeq(k1,
+          KLet(t2, KUnit,
+            KSeq(k2, op_instr))))
+  | App ("neg_f", [a]) ->
+      let t_zero = new_temp () in
+      let t_a = new_temp () in
+      let k_a = normalize_to (Some t_a) a in
+      let op_instr = match dest with
+        | Some d -> KLet(d, KBinOp(Sub, t_zero, t_a), KUnit)
+        | None -> KUnit in
+      KLet(t_zero, KInt 0,
+        KLet(t_a, KUnit,
+          KSeq(k_a, op_instr)))
+
   | App ("is_nil", [arg]) ->
       (* Desugar to equality against the -1 sentinel. KBinOp Eq already
          lowers to the standard boolean-as-int compile. *)

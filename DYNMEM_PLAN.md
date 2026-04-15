@@ -404,7 +404,44 @@ here are load-bearing design decisions; §13 has the full rationale.
       Probes: `1.5 → 98304`, `-3.25 → -212992`, `32767.0 →
       2147418112` (within int32 max); `99999.0` fails at knormal
       with the range error. All 15 Python-harness tests still green.)
-- [ ] N5. `typing.ml`: float arithmetic arms (Add/Sub/Mult/Div/neg/compare on TFloat)
+- [x] N5. `typing.ml`: float arithmetic arms (Add/Sub/Mult/Div/neg/compare on TFloat)
+      (Design decision: `*` and `/` on TFloat are REJECTED at the
+      typing level with a clear error message. Users route through
+      explicit `fmul` / `fdiv` App-builtins, matching the project's
+      existing pattern for surface-visible primitives (`array_make`,
+      `head`, `is_nil`, etc.). Rationale: overloading `*` to dispatch
+      on operand type would require knormal to track a per-variable
+      type environment, which it currently does not. Making typing
+      elaborate (AST-to-AST transform) would be a bigger refactor
+      than the whole Phase N track combined. Future Phase E may
+      revisit with type-directed dispatch.
+      Add/Sub on TFloat are the exception — they reuse `+` / `-`
+      because Q16.16 add is scalar-identical to int add
+      ((x*65536) + (y*65536) = (x+y)*65536), so no new codegen path
+      is needed. Comparisons likewise reuse `<`/`>`/`=`/etc because
+      Q16.16 is a monotonic signed encoding — the scoreboard-int
+      compare gives the right answer.
+      New binop variants `FMult` / `FDiv` added to `ast.ml`,
+      threaded through `cfg.ml string_of_binop`, `local_cse.ml
+      is_commutative` (FMult commutative, FDiv not), `const_fold.ml`
+      (no-fold pass-through for now; Q16.16 fold arms land in N9),
+      and `codegen_helpers.ml cmd_score_binop` (explicit failwith
+      stub pending N6/N7 lowering — same pattern as B4/C1 used
+      before their codegen landed).
+      New App builtins typecheck: `fmul(a, b): float` requires both
+      args TFloat, `fdiv(a, b): float` same, `neg_f(a): float`
+      requires one TFloat arg. knormal lowers `fmul`/`fdiv` to
+      `KBinOp(FMult/FDiv, t1, t2)` via a dedicated App arm (matches
+      `head`/`tail`/`is_nil` pattern); `neg_f` desugars to
+      `KBinOp(Sub, t_zero, t_a)` so no new codegen path is needed.
+      Probes: `1.5 + 2.25` emits int-level `+=` on encoded values
+      (98304 + 147456 = 245760 = 3.75 * 65536 ✓); `neg_f(3.5)`
+      emits `0 - 229376 = -229376 = -3.5 * 65536` ✓;
+      `1.5 < 2.5` emits `execute store success … if score … < …`
+      returning true (scalar compare is monotonic on Q16.16);
+      `1.5 * 2.0` fails at typing with a clear pointer to fmul;
+      `fmul(1.5, 2.0)` reaches codegen and hits the N5 failwith
+      stub as expected. All 15 Python-harness tests still green.)
 - [ ] N6. `codegen_helpers.ml`: `fixed_mul.mcfunction` helper (~3 cmds with pre-shift, ~8 cmds with split-half variant; pick one, document tradeoff inline)
 - [ ] N7. `codegen_helpers.ml`: `fixed_div.mcfunction` helper
 - [ ] N8. `cfg.ml`: decide between `IFixedMul`/`IFixedDiv` as new IR ops vs reusing `IBinOp` with typed operand metadata — go with the latter if feasible, to reuse the existing optimization stack

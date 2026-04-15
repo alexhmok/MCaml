@@ -41,7 +41,17 @@ let rec infer env e =
       let t2 = infer env e2 in
       (match op, t1, t2 with
        | (Add|Sub|Mult|Div|Mod), TInt, TInt -> TInt
+       (* Phase N / N5: Add and Sub on Q16.16 are scalar-identical to
+          int add/sub because (x*65536 + y*65536) = (x+y)*65536.
+          Mult/Div on TFloat are rejected — users must call fmul/fdiv
+          which lower to FMult/FDiv (different codegen). *)
+       | (Add|Sub), TFloat, TFloat -> TFloat
+       | (Mult|Div), TFloat, TFloat ->
+           raise (Error "use fmul/fdiv for Q16.16 multiply/divide; \
+                         `*` and `/` on float would emit int semantics \
+                         and silently lose the fractional part")
        | (Eq|Neq|Lt|Gt|Leq|Geq), TInt, TInt -> TBool
+       | (Eq|Neq|Lt|Gt|Leq|Geq), TFloat, TFloat -> TBool
        | (And|Or), TBool, TBool -> TBool
        | _ -> raise (Error "Type mismatch in binary operation"))
 
@@ -69,6 +79,26 @@ let rec infer env e =
   | App ("is_nil", [arg]) ->
       let _ = infer env arg in
       TBool
+
+  (* Phase N / N5: Q16.16 fixed-point multiply/divide/negate builtins.
+     We use explicit App-builtins instead of overloading `*`/`/` because
+     dispatching on operand type would require knormal to track a
+     per-variable type environment, which it currently doesn't. The
+     deliberate asymmetry — `+`/`-` work on TFloat, but `*`/`/` route
+     through fmul/fdiv — matches the asymmetry in how they lower: Add
+     and Sub are one scoreboard op each; FMult and FDiv are multi-
+     command inlined sequences (see N6/N7). *)
+  | App ("fmul", [a; b]) ->
+      if infer env a <> TFloat then raise (Error "fmul: first arg must be float");
+      if infer env b <> TFloat then raise (Error "fmul: second arg must be float");
+      TFloat
+  | App ("fdiv", [a; b]) ->
+      if infer env a <> TFloat then raise (Error "fdiv: first arg must be float");
+      if infer env b <> TFloat then raise (Error "fdiv: second arg must be float");
+      TFloat
+  | App ("neg_f", [a]) ->
+      if infer env a <> TFloat then raise (Error "neg_f: arg must be float");
+      TFloat
 
   (* Phase A dyn-array builtins. [array_make] materializes a fresh
      TArrDyn TInt; [array_get]/[array_set] unify against an

@@ -41,8 +41,8 @@ end
 module BMap = Map.Make (BKey)
 
 let is_commutative : Ast.binop -> bool = function
-  | Add | Mult | Eq | Neq | And | Or -> true
-  | Sub | Div | Mod | Lt | Leq | Gt | Geq   -> false
+  | Add | Mult | FMult | Eq | Neq | And | Or -> true
+  | Sub | Div | Mod | FDiv | Lt | Leq | Gt | Geq   -> false
 
 let normalize_operands (op : Ast.binop) (a : vreg) (b : vreg) : vreg * vreg =
   if is_commutative op && compare a b > 0 then (b, a) else (a, b)
