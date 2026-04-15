@@ -69,9 +69,38 @@ let cmd_score_binop (d : string) (op : binop) (v1 : string) (v2 : string) : stri
        d obj_name obj_name;
      Printf.sprintf "scoreboard players operation %s %s *= $fmul_t %s"
        d obj_name obj_name]
-  end else if op = FDiv then
-    failwith "Phase N: FDiv lowering lands in N7"
-  else
+  end else if op = FDiv then begin
+    (* Phase N / N7: Q16.16 fixed-point divide via scale-up numerator.
+       Derivation: want c_encoded = (a_real / b_real) * 65536
+                                  = (a * 65536) / b           (from a = a_real*65536, b = b_real*65536)
+       Naive `a * 65536 / b` overflows int32 for |a| > 2^15. We split
+       the 65536 scale into 256 * 256 applied around the divide:
+           d = v1
+           d *= $c256               ; d = a * 256  (saturates if |a_real| > 128)
+           d /= v2                  ; d = (a * 256) / b
+           d *= $c256               ; d = ((a*256)/b) * 256 = (a*65536)/b
+       4 commands (3 if regalloc aliased d = v1). Constraint: the
+       dividend's true value must be < 128 or `d *= $c256` overflows
+       int32. For NN inference this is satisfied because activations
+       are O(1) post-normalization and the dividend is usually the
+       smaller quantity. Values beyond 128 need a split-half divide
+       (~10 cmds, not implemented). Under §12.2's implicit div budget.
+       Divide-by-zero: scoreboard operation `/= 0` is a Minecraft
+       error in real MC; sim.py's `/=` arm returns 0 silently. The
+       compiler does not guard — caller's responsibility. *)
+    let copy_v1 =
+      if d = v1 then []
+      else [Printf.sprintf "scoreboard players operation %s %s = %s %s"
+              d obj_name v1 obj_name]
+    in
+    copy_v1 @
+    [Printf.sprintf "scoreboard players operation %s %s *= $c256 %s"
+       d obj_name obj_name;
+     Printf.sprintf "scoreboard players operation %s %s /= %s %s"
+       d obj_name v2 obj_name;
+     Printf.sprintf "scoreboard players operation %s %s *= $c256 %s"
+       d obj_name obj_name]
+  end else
   if is_comparison op then
     match op with
     | Neq ->

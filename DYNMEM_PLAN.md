@@ -482,7 +482,30 @@ here are load-bearing design decisions; §13 has the full rationale.
       const-fold arm with Q16.16 semantics.
       All five canaries byte-identical; all 15 Python-harness tests
       still green.)
-- [ ] N7. `codegen_helpers.ml`: `fixed_div.mcfunction` helper
+- [x] N7. `codegen_helpers.ml`: `fixed_div.mcfunction` helper
+      (Went with **inline scale-up numerator**, same rationale as N6:
+      helper-file dispatch adds ~3-5 cmds of call overhead per op.
+      Sequence (4 cmds, 3 when d = v1):
+          d = v1                   # elided if d = v1
+          d *= $c256                ; d = a * 256
+          d /= v2                   ; d = (a * 256) / b
+          d *= $c256                ; d = ((a*256)/b) * 256 = (a*65536)/b
+      Derivation: want c_encoded = (a * 65536) / b, but `a * 65536`
+      overflows int32 for |a| > 2^15. Split the 65536 scale into
+      two 256 multiplies around the divide. Constraint: the DIVIDEND's
+      true value must be < 128 or the first `*= $c256` overflows.
+      For NN inference this holds because dividends are activations
+      (O(1) post-normalization). Values beyond 128 would need a
+      split-half variant (~10 cmds, not implemented in v1).
+      Reuses `$c256` from N6 — no new reserved slots. Divide-by-zero
+      is NOT guarded; real Minecraft raises an error, sim.py's `/=`
+      arm returns 0 silently.
+      Probes: `fdiv(6, 2) = 3` exact, `fdiv(1, 4) = 0.25` exact,
+      `fdiv(10, 3) = 3.332` (0.04% rel err vs 3.333...), `fdiv(100, 7)
+      = 14.285` (0.004% rel err). Non-exact cases lose precision
+      at ~1/65536 ≈ 1.5e-5 per result LSB, which is the Q16.16 floor.
+      All five canaries byte-identical; all 15 Python-harness tests
+      still green.)
 - [x] N8. `cfg.ml`: decide between `IFixedMul`/`IFixedDiv` as new IR ops vs reusing `IBinOp` with typed operand metadata — go with the latter if feasible, to reuse the existing optimization stack
       (Decided in N5: **reuse IBinOp** with new `FMult` / `FDiv`
       variants on the `binop` constructor. Rationale: every existing
