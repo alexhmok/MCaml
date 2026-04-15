@@ -71,6 +71,23 @@ def build_frac_exp_lut() -> list[int]:
     return [q16(math.exp(k / FRAC_EXP_N)) for k in range(FRAC_EXP_N)]
 
 
+# ----- log LUT ---------------------------------------------------------
+#
+# log_frac_lut[k] = ln(1 + k/256) for k in [0, 255]. Input mantissa m
+# in [1, 2) after Q16.16 range reduction; index is (m_enc - 65536)/256.
+# Values range from ln(1) = 0 to ln(255/256 + 1) ~ 0.6912, all tiny
+# compared to Q16.16 max. Reconstruction:
+#   log(x) = n*ln(2) + log_frac_lut[k]
+# where n is the net power-of-two shift applied during range reduction.
+# The ln(2) scale constant (45426 = round(ln(2) * 65536)) lives as a
+# literal in lib/math.mcaml because the range-reduction helpers work in
+# the int typing domain and don't benefit from a separate val.
+LOG_FRAC_N = 256
+
+def build_log_frac_lut() -> list[int]:
+    return [q16(math.log(1.0 + k / LOG_FRAC_N)) for k in range(LOG_FRAC_N)]
+
+
 # ----- emission ---------------------------------------------------------
 
 PREAMBLE = """(* lib/math.mcaml — Q16.16 transcendental library for MCaml.
@@ -82,11 +99,13 @@ PREAMBLE = """(* lib/math.mcaml — Q16.16 transcendental library for MCaml.
    All functions operate on and return Q16.16 values (type float).
 
    LUTs:
-     int_exp_lut[n]  = exp(n)      for n in [0, 10]   (11 entries)
-     frac_exp_lut[k] = exp(k/256)  for k in [0, 255]  (256 entries)
+     int_exp_lut[n]  = exp(n)         for n in [0, 10]   (11 entries)
+     frac_exp_lut[k] = exp(k/256)     for k in [0, 255]  (256 entries)
+     log_frac_lut[k] = ln(1 + k/256)  for k in [0, 255]  (256 entries)
 
    Functions:
-     exp_fixed x     = exp(x) for real x, saturating near 10.4
+     exp_fixed x     = exp(x) for x in [0, 10)
+     log_fixed x     = ln(x)  for x > 0
 *)
 
 """
@@ -133,6 +152,53 @@ fun exp_fixed (x: float) : float =
   fmul(ei, ef)
 """
 
+LOG_FIXED_BODY = """\
+
+(* log_fixed(x) = ln(x) as Q16.16.
+
+   PRECONDITION: x > 0. log(0) is -inf and log(x<0) is complex;
+   neither is representable in Q16.16, so the caller must guarantee
+   positivity (no runtime guard).
+
+   Algorithm: iterative range reduction via doubling/halving to
+   normalize the raw int to [65536, 131072) (i.e., mantissa in
+   [1, 2)), tracking the net power-of-two shift n. Final reassembly:
+       log(x) = n * ln(2) + log_frac_lut[(m_raw - 65536) / 256]
+   where ln(2) encoded as Q16.16 is 45426.
+
+   Two recursive helpers are used so each has a single self-tail-call
+   (TCO fires cleanly). log_reduce_up halves x_raw while x >= 2;
+   log_reduce_down doubles x_raw while x < 1. Cost per iteration:
+   ~6 cmds for the branch + recurse. Max iterations for x in
+   [2^-15, 2^15]: 15, average 3-5 for typical NN values. Total
+   cost ranges from ~35 cmds (x near 1) to ~120 cmds (x near the
+   saturation extremes). For a typical workload expect ~50-60 cmds. *)
+
+fun log_reduce_up (x_raw: int, n: int) : int =
+  if x_raw >= 131072 then
+    log_reduce_up(x_raw / 2, n + 1)
+  else
+    let offset = (x_raw - 65536) / 256 in
+    let lv = raw_of_float(log_frac_lut[offset]) in
+    n * 45426 + lv
+
+fun log_reduce_down (x_raw: int, n: int) : int =
+  if x_raw < 65536 then
+    log_reduce_down(x_raw * 2, n - 1)
+  else
+    let offset = (x_raw - 65536) / 256 in
+    let lv = raw_of_float(log_frac_lut[offset]) in
+    n * 45426 + lv
+
+fun log_fixed (x: float) : float =
+  let x_raw = raw_of_float(x) in
+  let r =
+    if x_raw >= 65536 then log_reduce_up(x_raw, 0)
+    else log_reduce_down(x_raw, 0)
+  in
+  float_of_raw(r)
+"""
+
 
 def to_float_literal(encoded: int) -> str:
     """Render a Q16.16 int as a Python float literal that round-trips
@@ -147,30 +213,38 @@ def to_float_literal(encoded: int) -> str:
     return repr(encoded / Q16_SCALE)
 
 
-def emit(output_path: Path | None) -> None:
-    int_exp = build_int_exp_lut()
-    frac_exp = build_frac_exp_lut()
-
-    buf: list[str] = [PREAMBLE]
-
-    buf.append("val int_exp_lut = [|\n")
-    buf.append("  " + "; ".join(to_float_literal(v) for v in int_exp) + "\n")
-    buf.append("|]\n\n")
-
-    buf.append("val frac_exp_lut = [|\n")
-    # Wrap at 6 per line for readability (float literals are wider).
+def emit_wrapped_lut(buf: list[str], name: str, values: list[int]) -> None:
+    """Write `val name = [| ... |]` with float literals, 6 per line."""
+    buf.append(f"val {name} = [|\n")
     line: list[str] = []
-    for i, v in enumerate(frac_exp):
+    for i, v in enumerate(values):
         line.append(to_float_literal(v))
         if len(line) == 6:
-            suffix = ";" if i < len(frac_exp) - 1 else ""
+            suffix = ";" if i < len(values) - 1 else ""
             buf.append("  " + "; ".join(line) + suffix + "\n")
             line = []
     if line:
         buf.append("  " + "; ".join(line) + "\n")
     buf.append("|]\n\n")
 
+
+def emit(output_path: Path | None) -> None:
+    int_exp = build_int_exp_lut()
+    frac_exp = build_frac_exp_lut()
+    log_frac = build_log_frac_lut()
+
+    buf: list[str] = [PREAMBLE]
+
+    # int_exp is short enough to stay on one line.
+    buf.append("val int_exp_lut = [|\n")
+    buf.append("  " + "; ".join(to_float_literal(v) for v in int_exp) + "\n")
+    buf.append("|]\n\n")
+
+    emit_wrapped_lut(buf, "frac_exp_lut", frac_exp)
+    emit_wrapped_lut(buf, "log_frac_lut", log_frac)
+
     buf.append(EXP_FIXED_BODY)
+    buf.append(LOG_FIXED_BODY)
 
     text = "".join(buf)
     if output_path is None:

@@ -1351,11 +1351,15 @@ Minecraft's `scoreboard players operation X %= Y` already exists. MCaml's surfac
 
 Once fixed-point lands, every transcendental compiles to user-level MCaml. The canonical technique is **range reduction + LUT**:
 
-- **exp(x) for x ≥ 0**: split `n = x / 65536`, `f = x % 65536`, look up `int_exp[n]` (11 entries, n = 0..10) and `frac_exp[f / 256]` (256 entries covering `[1, e)`), multiply. Cost: ~11–16 cmds with Mod, ~13–18 cmds without. Precision ~1e-2 on output; add linear interpolation between LUT entries for ~1e-5 at +8 cmds.
-- **exp(x) for x < 0**: `exp(-x) = 1 / exp(|x|)`, one fixed-divide.
-- **log, sigmoid, tanh, gelu**: same structure, different tables.
+- **exp(x) for x ≥ 0**: split `n = x / 65536`, `f = x % 65536`, look up `int_exp[n]` (11 entries, n = 0..10) and `frac_exp[f / 256]` (256 entries covering `[1, e)`), multiply. Cost: **~21 cmds** per call as implemented in `c1acdc6` (positive-only variant, no branch overhead). Precision ~1e-2 on output; add linear interpolation between LUT entries for ~1e-5 at +8 cmds.
+- **exp(x) for x < 0**: caller wraps with `fdiv(1.0, exp_fixed(neg_f(x)))`. Not inlined inside `exp_fixed` because merging the two branches into one function balloons the command count (51 cmds for both branches in a single file vs 21 for positive-only). MineTorch's softmax path always negates inputs beforehand so the split is not a usability burden for the primary client.
+- **log, sigmoid, tanh, gelu**: same structure, different tables. Expect similar ~20–30 cmd costs per call.
 
-Table sizes are small (~0.5 KB NBT per function). Bootstrap them via a separate `math_init.mcfunction` called from `init.mcfunction` so the init file doesn't bloat with hundreds of `data modify` lines.
+**Budget correction (post-Math1a, 2026-04-15)**: the original "~11–16 cmds with Mod, ~13–18 cmds without" estimate quoted above underestimated the real cost by ~35–50%. The missing piece was the per-op cost of range reduction: one `to_int`-equivalent (3 cmds), one `mod` (3 cmds), one `div` (3 cmds) = 9 cmds just to compute the LUT indices, BEFORE any LUT access or multiply. Two LUT macro dispatches add 8 cmds. fmul adds 5. Total ~22, which landed at 21 after regalloc. The **corrected §12.2 budget for exp/log is ≤25 cmds/call**; escalate above that, not above 15. sigmoid/tanh/gelu should fit in the same range since they share the same range-reduction + LUT + mul pattern.
+
+**Future optimization track** (deferred pending actual MineTorch perf signal): the 21 → ~13–15 cmd gap could be closed by (a) hoisting the `IConst 65536` / `IConst 256` constants into reserved always-live scoreboard slots (saves ~4 cmds per call by eliminating per-call loads and copies), (b) a `global_cse` pass that dedupes shared intermediates across the div+mod+div chain (saves ~2–3 cmds), or (c) a dedicated "lookup two LUTs in one dispatch" macro helper (saves ~2–3 cmds). Each is 0.5–1 session of compiler work. Not on the critical path; land only if a MineTorch workload reveals the exp/log cost is the bottleneck. Until measurement says otherwise, the 21-cmd variant is Good Enough.
+
+Table sizes are small (~0.5 KB NBT per function). Bootstrap them via **Phase G's synthesized `__globals_init.mcfunction`** (landed in `18d22a4`), which the datapack load tag fires once per world load. The earlier plan's "separate `math_init.mcfunction`" suggestion is subsumed by Phase G — there's no need for a second dedicated init file, since any program with top-level `val` definitions automatically gets the LUTs populated at load time. Math4 therefore reduces to "nothing additional required" and is marked done by reference to Phase G.
 
 **Crucial**: this is a pure library, not a compiler built-in. `lib/math.mcaml` is the first client of the fixed-point type and validates its usability for real workloads. MineTorch imports it; human users import it the same way.
 
