@@ -161,6 +161,9 @@ PREAMBLE = """(* lib/math.mcaml — Q16.16 transcendental library for MCaml.
      sigmoid_fixed x = 1/(1+e^-x), LUT [0,8) with symmetric negatives
      tanh_fixed x    = tanh(x),    LUT [0,4) with symmetric negatives
      gelu_fixed x    = gelu(x),    LUT [-4,4), clamps outside
+     relu_f x        = max(x, 0)
+     vec_add4_f a b out  = element-wise a + b into out (N=4 demo)
+     dot4_f a b      = float dot product (N=4 demo)
 *)
 
 """
@@ -313,6 +316,39 @@ fun gelu_fixed (x: float) : float =
     gelu_lut[shifted / 2048]
 """
 
+TENSOR_BODY = """\
+
+(* -------- Math3: tensor primitives --------
+
+   relu_f is shape-agnostic — it's a scalar map and takes no array
+   parameter. vec_add4_f / dot4_f are fixed-N=4 demonstrations of
+   the element-wise-add and dot-product patterns. Larger shapes are
+   MineTorch's responsibility: per §13.9, MineTorch emits per-shape
+   monomorphic helpers during ONNX -> mcaml code generation, so
+   there's no value in shipping an N=768 dot_f in the hand-written
+   library — it would just be dead template. Users who want wider
+   hand-written tensor ops can copy the N=4 templates and substitute
+   their shape. *)
+
+fun relu_f (x: float) : float =
+  let x_raw = raw_of_float(x) in
+  if x_raw >= 0 then x else 0.0
+
+fun vec_add4_f (a: arr[float, 4], b: arr[float, 4], out: arr[float, 4]) : int =
+  for i = 0 to 4 do
+    out[i] := a[i] + b[i]
+  done;
+  0
+
+fun dot4_f (a: arr[float, 4], b: arr[float, 4]) : float =
+  let acc = ref 0 in
+  for i = 0 to 4 do
+    let prod = fmul(a[i], b[i]) in
+    acc := !acc + raw_of_float(prod)
+  done;
+  float_of_raw(!acc)
+"""
+
 
 def to_float_literal(encoded: int) -> str:
     """Render a Q16.16 int as a Python float literal that round-trips
@@ -363,6 +399,7 @@ def emit(output_path: Path | None) -> None:
     buf.append(EXP_FIXED_BODY)
     buf.append(LOG_FIXED_BODY)
     buf.append(ACTIVATIONS_BODY)
+    buf.append(TENSOR_BODY)
 
     text = "".join(buf)
     if output_path is None:

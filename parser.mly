@@ -96,7 +96,9 @@ typ:
   | T_SEL { TSelector }
   | T_POS { TPos }
   | T_ARR LBRACK T_INT COMMA n = INT RBRACK { TArrStatic(TInt, n) }
+  | T_ARR LBRACK T_FLOAT COMMA n = INT RBRACK { TArrStatic(TFloat, n) }
   | T_MAT LBRACK T_INT COMMA m = INT COMMA n = INT RBRACK { TMat(TInt, m, n) }
+  | T_MAT LBRACK T_FLOAT COMMA m = INT COMMA n = INT RBRACK { TMat(TFloat, m, n) }
   | T_LIST { TList TInt }
   | T_DARR { TArrDyn TInt }
   | REF T_INT { TRef TInt }

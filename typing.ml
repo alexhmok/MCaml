@@ -198,6 +198,12 @@ let rec infer env e =
            let ts = List.map (infer env) elems in
            if List.for_all (fun t -> t = TInt) ts then
              TArrStatic (TInt, List.length elems)
+           (* Phase Math: accept uniform float element arrays. Runtime
+              representation is still int (Q16.16) per §12.1, but the
+              declared element type matters for downstream fmul/fdiv
+              unification. *)
+           else if List.for_all (fun t -> t = TFloat) ts then
+             TArrStatic (TFloat, List.length elems)
            else
              let get_inner_len t =
                match t with
