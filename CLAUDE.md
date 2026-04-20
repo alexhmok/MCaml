@@ -156,7 +156,7 @@ the project root to keep generated files out of the source tree.
 
 ## Simulator
 
-`/tmp/mcaml_out/sim.py` is a Python model of the Minecraft command subset that MCaml emits: `scoreboard players set/operation`, `execute if/unless score … matches N`, `execute store success/result`, `function mcaml:<name> [with storage …]`, `data modify storage …`, macro substitution (`$(key)`). Used by every test suite to verify `$ret` values and `say` outputs without running actual Minecraft.
+Canonical location: `sim/sim.py` (checked into this repo). Copied to `/tmp/mcaml_out/sim.py` at test time by MineTorch's `validation/_harness.py` (`ensure_sim()`). A Python model of the Minecraft command subset that MCaml emits: `scoreboard players set/operation`, `execute if/unless score … matches N`, `execute store success/result`, `function mcaml:<name> [with storage …]`, `data modify storage …`, macro substitution (`$(key)`), `return 0` (tick_guard exit). Used by every test suite to verify `$ret` values and `say` outputs without running actual Minecraft.
 
 ## Datapack packaging
 
