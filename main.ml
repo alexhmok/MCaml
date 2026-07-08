@@ -240,7 +240,7 @@ let () =
              | Cfg.IHeapAllocConst _ | Cfg.IHeapAlloc _
              | Cfg.IHeapGet _ | Cfg.IHeapSet _
              (* Phase B: cons ops also consume dynamic memory (the
-                conspool), so a cons-only program still needs the
+                objpool), so a cons-only program still needs the
                 end-of-invocation arena reset. *)
              | Cfg.ICons _ | Cfg.IHead _ | Cfg.ITail _ ->
                  any_dyn_heap_use := true
@@ -287,8 +287,8 @@ let () =
     let reset_cmds = [
       "data modify storage mcaml:scratch cells set value []";
       "scoreboard players set $scratch_next vars 0";
-      "data modify storage mcaml:conspool pairs set value []";
-      "scoreboard players set $conspool_next vars 0";
+      "data modify storage mcaml:objpool cells set value []";
+      "scoreboard players set $objpool_next vars 0";
     ] in
     (* Target: the body file if LICM split fired (else the main file).
        Append must happen before tick_split so reset commands ride into

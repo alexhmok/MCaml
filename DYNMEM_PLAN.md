@@ -829,7 +829,46 @@ which is MineTorch's project, not MCaml's.
       16-probe battery green (stubs, witnesses, arity/type/cross-type/
       unknown-ctor/dup-ctor errors, greedy-BAR semantics, ADT-typed
       fun params). Suite 66/66; all five canaries byte-identical.)
-- [ ] D4. Runtime: generalize `conspool` into a single `objpool` with tag-discriminated cells (see §13 decision D.a). Alternative: keep conspool for lists and add a sibling pool per ADT — decide in D4 before touching codegen
+- [x] D4. Runtime: generalize `conspool` into a single `objpool` with tag-discriminated cells (see §13 decision D.a). Alternative: keep conspool for lists and add a sibling pool per ADT — decide in D4 before touching codegen
+      (Option (a) implemented: cons cells now live in
+      `mcaml:objpool cells` as `{tag:1, h, t}` compounds; one
+      `$objpool_next` counter, one arena-reset path. The h/t field
+      names are kept so cons_head/cons_tail stay field-addressed at
+      3 cmds; D5's generic ADT cells will use `{tag, f0, f1, ...}`.
+      **Tags are per-type**: D3 assigns 0..n-1 in decl order within
+      each type, and a tag is only interpreted under the scrutinee's
+      static type — tags are NOT globally unique, and that's fine
+      because the type checker guarantees a match only ever inspects
+      cells of its scrutinee's declared type. Cons's tag is 1 (its
+      decl-order index in the builtin list type).
+      **ICons stayed at 5 commands, not the sanctioned 6**: the tag
+      is a codegen-time constant, so it rides inside the
+      `append value {tag:1,h:0,t:0}` literal — no separate tag-write
+      command exists. The §13.5 "+1 cmd for the tag write" assumption
+      was pessimistic; the same holds for D5 ADT allocation since
+      ctor tags are always static. IHead/ITail unchanged at 3 cmds
+      (only the storage path moved). Region enter (2 cmds), primitive
+      exit (2 dispatches), truncate helper (3 guarded cmds), and both
+      C5 walkers kept their §5.6 budgets; the stash/rebuild walkers
+      preserve the tag through the region_tmp round-trip via the same
+      literal trick (the list walker only ever traverses tag-1 cells).
+      Migrated: codegen_helpers.ml (cmd_cons, cons_head/tail bodies,
+      region enter/exit, truncate + walker bodies),
+      codegen_cfg.ml (reserved slots `$objpool_next` /
+      `$region_save_<k>_objpool`, helper filenames
+      `region_truncate_<k>_objpool`), main.ml §4.4 reset,
+      tools/pack_datapack.py INIT_MCFUNCTION, comments in
+      cfg/dce/cost/knormal. sim/sim.py needed ZERO changes — its
+      storage model is namespace-generic and its compound-literal
+      parser already handles the 3-field cell. Zero live `conspool`
+      references remain outside this plan's history.
+      Verified: suite 66/66 + async, all four regenerated /tmp
+      harnesses green (18 checks: 6 cons + 5 region incl. pool/
+      region_tmp post-conditions + 7 dyn-array/params, plus 16
+      fixed-point), five canaries byte-identical, command counts by
+      CFG-dump/file inspection. The /tmp harnesses were regenerated
+      pool-name-agnostic (they detect conspool vs objpool from the
+      compiled output) so they now survive this kind of migration.)
 - [ ] D5. Pattern compiler: decision-tree lowering to nested `if` / scoreboard matches in knormal
 - [ ] D6. Retire `TList`/`Cons`/`Nil`/`head`/`tail`/`is_nil` special cases; relower lists onto `type 'a list = Nil | Cons of 'a * 'a list` (or keep the fast path for ints as an optimization, decide in D6)
 - [ ] D7. Tuples as single-constructor ADTs (sugar): `(a, b)` → `Pair(a, b)` at parse time
@@ -879,12 +918,17 @@ would regress SROA/LICM on matmul-shaped workloads, which is the stated target.
 |------|----------|--------------|-------------|
 | Per-invocation scratch | `storage mcaml:scratch cells` | `$scratch_next` | flat int |
 | Long-lived / permanent | `storage mcaml:permheap cells` | `$permheap_next` | flat int |
-| Cons cells | `storage mcaml:conspool pairs` | `$conspool_next` | compound `{h, t}` |
+| Heap objects (cons + ADTs) | `storage mcaml:objpool cells` | `$objpool_next` | tagged compound |
 
-Cons cells use a compound layout (not flat ints) so `head`/`tail` are
-field-addressed and cost 3 commands instead of 5. Dynamic arrays use flat
-ints so contiguous `base + idx` addressing works. The two pools never share
-storage.
+Heap objects use a tag-discriminated compound layout (D4, §13.5 option a):
+cons cells are `{tag: 1, h, t}`; D5's generic ADT cells are
+`{tag: <ctor id>, f0, f1, ...}`. Tags are per-type (D3 assigns 0..n-1 in
+decl order) and are only interpreted under the scrutinee's static type —
+they are not globally unique. The compound layout (not flat ints) keeps
+`head`/`tail` field-addressed at 3 commands instead of 5. Dynamic arrays
+use flat ints so contiguous `base + idx` addressing works. The pools never
+share storage. (Pre-D4 history: cons cells lived in their own
+`mcaml:conspool pairs` pool as untagged `{h, t}`.)
 
 ### 3.3 No user-visible `free`, no refcounting, no tracing GC
 
@@ -947,13 +991,14 @@ adding the new ops.
 Add these to the reserved-slot set alongside `$ret`, `$arr_result`,
 `$tick_iters`, `$arr_set_val`:
 
-- `$conspool_next` — bump counter for cons pool
+- `$objpool_next` — bump counter for the unified object pool (D4; was
+  `$conspool_next` pre-D4)
 - `$scratch_next` — bump counter for scratch pool
 - `$permheap_next` — bump counter for permheap pool
 - `$arr_idx` — carrier for pre-computed `base + idx` on dynamic array access
-- `$region_save_0`, `$region_save_1`, ... — snapshot slots for region
-  entries (one triple per nesting level; 4 levels of nesting is almost
-  certainly enough for v1)
+- `$region_save_<k>_scratch` / `$region_save_<k>_objpool` — snapshot slots
+  for region entries (one pair per nesting level k ∈ [0,3]; 4 levels of
+  nesting is almost certainly enough for v1)
 
 ### 4.2 Nil sentinel
 
@@ -967,10 +1012,10 @@ allocated cell's handle is always `>= 0`, so the sentinel is unambiguous.
 `init.mcfunction` grows six new lines, added by `tools/pack_datapack.py`:
 
 ```
-data modify storage mcaml:conspool pairs set value []
+data modify storage mcaml:objpool cells set value []
 data modify storage mcaml:scratch cells set value []
 data modify storage mcaml:permheap cells set value []
-scoreboard players set $conspool_next vars 0
+scoreboard players set $objpool_next vars 0
 scoreboard players set $scratch_next vars 0
 scoreboard players set $permheap_next vars 0
 ```
@@ -984,14 +1029,14 @@ reset block just before its final return terminator:
 ```
 data modify storage mcaml:scratch cells set value []
 scoreboard players set $scratch_next vars 0
-data modify storage mcaml:conspool pairs set value []
-scoreboard players set $conspool_next vars 0
+data modify storage mcaml:objpool cells set value []
+scoreboard players set $objpool_next vars 0
 ```
 
 `permheap` is **not** reset — it persists across invocations by design.
 
 **Public-entry primitive-return contract.** The reset block zeros the
-scratch and conspool pools unconditionally. Any `TList` / `TArrDyn`
+scratch and objpool pools unconditionally. Any `TList` / `TArrDyn`
 handle returned from a public-entry function is therefore dangling
 immediately after the caller's `/function mcaml:<name>` dispatch
 completes: the handle integer is still sitting in the `vars`
@@ -1012,7 +1057,7 @@ after truncation. Two new paths, added to `init.mcfunction` via
 `tools/pack_datapack.py` alongside the pool paths in §4.3:
 
 ```
-data modify storage mcaml:region_tmp conspool set value []
+data modify storage mcaml:region_tmp objpool set value []
 data modify storage mcaml:region_tmp scratch set value []
 ```
 
@@ -1021,12 +1066,15 @@ trigger on "new reserved scoreboard slot not listed in §4.1" does not
 apply. Permheap has no region_tmp counterpart because permheap is
 never truncated.
 
-The conspool region_tmp path is consumed by
+The objpool region_tmp path is consumed by
 `region_walker_list_stash.mcfunction` (appends) and
-`region_walker_list_rebuild.mcfunction` (drains from the tail). The
-scratch region_tmp path is reserved for the TArrDyn walker (not
-implemented in v1; TArrDyn region returns fail loudly at codegen time
-until a future session extends the walker set).
+`region_walker_list_rebuild.mcfunction` (drains from the tail). Both
+walkers preserve each cell's `tag` through the round-trip — for the
+v1 list walker the tag is statically 1, so it rides in the append
+literals at zero command cost. The scratch region_tmp path is
+reserved for the TArrDyn walker (not implemented in v1; TArrDyn
+region returns fail loudly at codegen time until a future session
+extends the walker set).
 
 The "public entry-point" determination in v1 is every top-level `fun`
 that isn't called by any other function in the same compilation unit. If
@@ -1042,12 +1090,17 @@ Reference for §A6, §B6, §C4. Copy-paste-able into codegen code.
 ### 5.1 `ICons(d, h, t)` — 5 commands, no macro dispatch
 
 ```
-data modify storage mcaml:conspool pairs append value {h:0,t:0}
-execute store result storage mcaml:conspool pairs[-1].h int 1 run scoreboard players get <h> vars
-execute store result storage mcaml:conspool pairs[-1].t int 1 run scoreboard players get <t> vars
-scoreboard players operation <d> vars = $conspool_next vars
-scoreboard players add $conspool_next vars 1
+data modify storage mcaml:objpool cells append value {tag:1,h:0,t:0}
+execute store result storage mcaml:objpool cells[-1].h int 1 run scoreboard players get <h> vars
+execute store result storage mcaml:objpool cells[-1].t int 1 run scoreboard players get <t> vars
+scoreboard players operation <d> vars = $objpool_next vars
+scoreboard players add $objpool_next vars 1
 ```
+
+D4 note: §13.5 sanctioned a 6th command for the tag write, but the tag
+is a codegen-time constant (Cons = 1), so it rides inside the append
+literal — ICons stays at 5 commands. D5's ADT allocation gets the same
+treatment since ctor tags are always static.
 
 ### 5.2 `IHead(d, c)` — 3 commands
 
@@ -1060,7 +1113,7 @@ scoreboard players operation <d> vars = $arr_result vars
 Where `cons_head.mcfunction` is a single line:
 
 ```
-$execute store result score $arr_result vars run data get storage mcaml:conspool pairs[$(idx)].h 1
+$execute store result score $arr_result vars run data get storage mcaml:objpool cells[$(idx)].h 1
 ```
 
 `ITail` is symmetric with `.t`.
@@ -1116,7 +1169,7 @@ Enter (for nesting level `k`):
 
 ```
 scoreboard players operation $region_save_<k>_scratch vars = $scratch_next vars
-scoreboard players operation $region_save_<k>_conspool vars = $conspool_next vars
+scoreboard players operation $region_save_<k>_objpool vars = $objpool_next vars
 ```
 
 Exit (small-return case, primitive return type):
@@ -1126,7 +1179,7 @@ Exit (small-return case, primitive return type):
 (* repeated (old_next - saved_next) times: *)
 data remove storage mcaml:scratch cells[-1]
 scoreboard players operation $scratch_next vars = $region_save_<k>_scratch vars
-(* same for conspool *)
+(* same for objpool *)
 ```
 
 The `data remove` loop must be generated as a helper to stay under
@@ -1566,7 +1619,9 @@ Quick reference. See §4 for the full contract.
 
 | Term | Meaning |
 |------|---------|
-| pool | One of the three NBT lists: `scratch`, `permheap`, `conspool` |
+| pool | One of the three NBT lists: `scratch`, `permheap`, `objpool` |
+| objpool | Unified heap-object pool (D4): tag-discriminated compound cells for cons and ADTs |
+| tag | Per-type ctor index (D3, 0..n-1 in decl order) stored in each objpool cell; interpreted only under the scrutinee's static type |
 | bump counter | `$<pool>_next` scoreboard slot holding next free index |
 | handle | An integer vreg value that identifies an allocation in a pool |
 | nil | `-1` handle, sentinel for empty list |
@@ -1679,6 +1734,11 @@ Phase D decides how ADTs are laid out in the pool. Two options:
 - **Option b (per-type pools)**: keep `conspool` for lists, add one pool per user-defined ADT, closures get their own pool.
 
 **Recommendation**: Option a. Fewer reserved storage paths, one `objpool_next` counter, one arena reset path. Cons cells pay a 1-cmd cost for the extra tag write but that's cheap relative to the 5-cmd `ICons` budget. Make the decision in D4 before touching codegen — once the pool layout is committed, backing out is expensive.
+
+**[LANDED in D4]**: Option a implemented. The predicted 1-cmd tag-write
+cost turned out to be zero — the tag is a codegen-time constant and rides
+inside the `append value {tag:1,h:0,t:0}` literal, so `ICons` stayed at
+5 commands. See §2 D4 and §5.1.
 
 Closures reuse this pool in F5. Closure cells are `{tag: $CLOSURE, code, env_field_0, env_field_1, ...}`.
 

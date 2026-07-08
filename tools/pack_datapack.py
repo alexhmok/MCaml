@@ -34,12 +34,12 @@ INIT_MCFUNCTION = """\
 scoreboard objectives add vars dummy
 data modify storage mcaml:stk frames set value []
 data modify storage mcaml:tmp args set value {}
-data modify storage mcaml:conspool pairs set value []
+data modify storage mcaml:objpool cells set value []
 data modify storage mcaml:scratch cells set value []
 data modify storage mcaml:permheap cells set value []
-data modify storage mcaml:region_tmp conspool set value []
+data modify storage mcaml:region_tmp objpool set value []
 data modify storage mcaml:region_tmp scratch set value []
-scoreboard players set $conspool_next vars 0
+scoreboard players set $objpool_next vars 0
 scoreboard players set $scratch_next vars 0
 scoreboard players set $permheap_next vars 0
 scoreboard players set $c256 vars 256

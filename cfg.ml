@@ -56,15 +56,16 @@ type instr =
   | IHeapAlloc      of vreg * heap_pool * vreg         (* d = pool_next; pool_next += <n_vreg> *)
   | IHeapGet        of vreg * heap_pool * vreg * vreg  (* d := pool[base + idx] *)
   | IHeapSet        of heap_pool * vreg * vreg * vreg  (* pool[base + idx] := v, side-effecting *)
-  (* Phase B cons-list ops. Conspool is its own pool (compound cells
-     {h, t}), separate from scratch/permheap. ICons bumps $conspool_next
+  (* Phase B cons-list ops. Cons cells live in the unified objpool
+     (tag-discriminated compound cells {tag:1, h, t} per §13.5),
+     separate from scratch/permheap. ICons bumps $objpool_next
      and writes NBT (side-effecting). IHead/ITail read via per-field
      macro helpers (mirror IArrGet's hidden $arr_result write). *)
   | ICons           of vreg * vreg * vreg              (* d := cons(h, t), side-effecting *)
   | IHead           of vreg * vreg                     (* d := head(c) *)
   | ITail           of vreg * vreg                     (* d := tail(c) *)
   (* Phase C region brackets. [IRegionEnter k] snapshots $scratch_next/
-     $conspool_next into $region_save_<k>_* ; [IRegionExit (k, ret, typ)]
+     $objpool_next into $region_save_<k>_* ; [IRegionExit (k, ret, typ)]
      copies the return value into the parent arena (via a per-[typ]
      deep-copy walker, if the type carries heap handles), truncates the
      two pools back to their saved marks, and restores the bump counters.

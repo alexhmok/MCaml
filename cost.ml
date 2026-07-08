@@ -64,7 +64,7 @@ let estimate (i : instr) : int =
   | IHead _                     -> 3
   | ITail _                     -> 3
   (* Phase C region brackets. Enter is two score ops (save scratch +
-     conspool). Exit for primitive return is: call region_truncate_<k>
+     objpool). Exit for primitive return is: call region_truncate_<k>
      helper (1 cmd) + restore two bump counters (2 cmds). Heap returns
      add the walker cost but that lands with C5 — primitive-return
      placeholder estimate here is 3 for the exit. *)

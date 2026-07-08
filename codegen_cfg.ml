@@ -79,7 +79,7 @@ type state = {
   (* Phase C: levels (k) for which IRegionExit fired in this function.
      After the block walk, [emit] appends the per-level truncation
      helpers [region_truncate_<k>_scratch.mcfunction] and
-     [region_truncate_<k>_conspool.mcfunction] to [helpers]. Filename
+     [region_truncate_<k>_objpool.mcfunction] to [helpers]. Filename
      dedup in main.ml collapses the copies across functions. *)
   mutable region_exit_levels : int list;
   (* Phase C / C5: flagged when any IRegionExit with a TList return
@@ -120,15 +120,15 @@ let push_cmds (st : state) (prefix : string) (cmds : string list) : unit =
    helpers, and param_N is set per-call so its old value is meaningless. *)
 let is_reserved_slot (s : string) : bool =
   s = "$ret" || s = "$arr_result" || s = "$tick_iters" ||
-  s = "$scratch_next" || s = "$permheap_next" || s = "$conspool_next" ||
+  s = "$scratch_next" || s = "$permheap_next" || s = "$objpool_next" ||
   s = "$arr_idx" ||
   (* Phase C §4.1: region save slots, one pair per nesting level
      (permheap intentionally not snapshotted per §4.4). v1 caps at
      4 levels (k ∈ [0,3]); cfg_build fails loudly above that. *)
-  s = "$region_save_0_scratch" || s = "$region_save_0_conspool" ||
-  s = "$region_save_1_scratch" || s = "$region_save_1_conspool" ||
-  s = "$region_save_2_scratch" || s = "$region_save_2_conspool" ||
-  s = "$region_save_3_scratch" || s = "$region_save_3_conspool" ||
+  s = "$region_save_0_scratch" || s = "$region_save_0_objpool" ||
+  s = "$region_save_1_scratch" || s = "$region_save_1_objpool" ||
+  s = "$region_save_2_scratch" || s = "$region_save_2_objpool" ||
+  s = "$region_save_3_scratch" || s = "$region_save_3_objpool" ||
   (* C5 deep-copy walker scratch slots (shared across levels). *)
   s = "$wr_h" || s = "$wr_cache_h" || s = "$wr_prev" || s = "$wr_tmp_h" ||
   (* Phase N / N6: Q16.16 fmul scratch. $c256 holds the literal 256 so
@@ -383,18 +383,18 @@ let emit (cfg : cfg_func) : (string * string list) list =
   if st.emit_cons_tail then
     st.helpers <- ("cons_tail", [cons_tail_body]) :: st.helpers;
   (* Phase C: per-level truncation helpers, one scratch and one
-     conspool helper per level observed in this function. Filenames
+     objpool helper per level observed in this function. Filenames
      are global so main.ml's filename dedupe collapses copies from
      multiple functions sharing the same levels. *)
   List.iter (fun k ->
     let sname = Printf.sprintf "region_truncate_%d_scratch" k in
-    let cname = Printf.sprintf "region_truncate_%d_conspool" k in
+    let cname = Printf.sprintf "region_truncate_%d_objpool" k in
     st.helpers <- (sname, region_truncate_scratch_body k) :: st.helpers;
-    st.helpers <- (cname, region_truncate_conspool_body k) :: st.helpers
+    st.helpers <- (cname, region_truncate_objpool_body k) :: st.helpers
   ) st.region_exit_levels;
   (* Phase C / C5: TList-return walker helpers. Level-independent —
      the stash walker walks the child chain and the rebuild walker
-     empties region_tmp conspool into the parent conspool, neither
+     empties region_tmp objpool into the parent objpool, neither
      referencing the per-level save slots. Single shared filename
      per walker, deduped across all functions by main.ml. *)
   if st.emit_region_walker_list then begin

@@ -43,7 +43,7 @@ type kexpr =
   (* KHeapSet(pool, base_vreg, idx_vreg, val_vreg) — pool[base+idx] := val *)
   | KHeapSet of heap_pool * string * string * string
   (* --- Phase B cons-list primitives --- *)
-  (* KCons(d, h_vreg, t_vreg) — d := cons(h, t); conspool append. *)
+  (* KCons(d, h_vreg, t_vreg) — d := cons(h, t); objpool append. *)
   | KCons of string * string * string
   (* KHead(d, c_vreg) — d := head(c) *)
   | KHead of string * string

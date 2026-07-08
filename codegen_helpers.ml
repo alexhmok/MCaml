@@ -284,21 +284,27 @@ let cmd_heap_set
 
 (* ---- Phase B cons ops ---- *)
 
-(* §5.1 ICons — 5 commands inline, no macro helper. The pairs[-1] trick:
-   we append a fresh {h:0,t:0} compound, then store-result into the
-   [-1].h / [-1].t fields. [-1] is a literal NBT path index, not a
-   runtime value, so no macro expansion is needed on the write side. *)
+(* §5.1 ICons — 5 commands inline, no macro helper. The cells[-1]
+   trick: we append a fresh {tag:1,h:0,t:0} compound, then store-result
+   into the [-1].h / [-1].t fields. [-1] is a literal NBT path index,
+   not a runtime value, so no macro expansion is needed on the write
+   side. D4: cells live in the unified objpool and carry Cons's tag
+   (= 1, its D3 decl-order ctor index within the builtin list type).
+   The tag rides in the append literal because it is a codegen-time
+   constant — no separate tag-write command, so ICons stays at 5 cmds
+   (§13.5 budgeted 6). D5's generic ADT cells ({tag, f0, f1, ...}) get
+   the same treatment since ctor tags are always static. *)
 let cmd_cons (d : string) (h : string) (t : string) : string list =
-  [ "data modify storage mcaml:conspool pairs append value {h:0,t:0}";
+  [ "data modify storage mcaml:objpool cells append value {tag:1,h:0,t:0}";
     Printf.sprintf
-      "execute store result storage mcaml:conspool pairs[-1].h int 1 run scoreboard players get %s %s"
+      "execute store result storage mcaml:objpool cells[-1].h int 1 run scoreboard players get %s %s"
       h obj_name;
     Printf.sprintf
-      "execute store result storage mcaml:conspool pairs[-1].t int 1 run scoreboard players get %s %s"
+      "execute store result storage mcaml:objpool cells[-1].t int 1 run scoreboard players get %s %s"
       t obj_name;
-    Printf.sprintf "scoreboard players operation %s %s = $conspool_next %s"
+    Printf.sprintf "scoreboard players operation %s %s = $objpool_next %s"
       d obj_name obj_name;
-    Printf.sprintf "scoreboard players add $conspool_next %s 1" obj_name ]
+    Printf.sprintf "scoreboard players add $objpool_next %s 1" obj_name ]
 
 (* §5.2 IHead / ITail — 3 commands each via a per-field macro helper.
    Symmetric, parameterized by field name ("h" or "t"). *)
@@ -319,17 +325,19 @@ let cmd_cons_tail (d : string) (c : string) : string list =
   cmd_cons_field d c "t"
 
 (* Body of [cons_head.mcfunction] / [cons_tail.mcfunction]. Each is a
-   single macro-expanded line reading the field out of conspool[idx]
+   single macro-expanded line reading the field out of objpool[idx]
    into [$arr_result]. Emitted once per program via main.ml's filename
-   dedupe (same mechanism as [scratch_get.mcfunction]). *)
+   dedupe (same mechanism as [scratch_get.mcfunction]). Cons cells keep
+   their h/t field names inside the tagged objpool cell precisely so
+   these stay field-addressed at 3 cmds post-D4. *)
 let cons_head_body : string =
   Printf.sprintf
-    "$execute store result score $arr_result %s run data get storage mcaml:conspool pairs[$(idx)].h 1"
+    "$execute store result score $arr_result %s run data get storage mcaml:objpool cells[$(idx)].h 1"
     obj_name
 
 let cons_tail_body : string =
   Printf.sprintf
-    "$execute store result score $arr_result %s run data get storage mcaml:conspool pairs[$(idx)].t 1"
+    "$execute store result score $arr_result %s run data get storage mcaml:objpool cells[$(idx)].t 1"
     obj_name
 
 (* ---- function calls ---- *)
@@ -409,7 +417,7 @@ let cmd_region_enter (k : int) : string list =
       "scoreboard players operation $region_save_%d_scratch %s = $scratch_next %s"
       k obj_name obj_name;
     Printf.sprintf
-      "scoreboard players operation $region_save_%d_conspool %s = $conspool_next %s"
+      "scoreboard players operation $region_save_%d_objpool %s = $objpool_next %s"
       k obj_name obj_name;
   ]
 
@@ -418,17 +426,17 @@ let cmd_region_enter (k : int) : string list =
 let cmd_region_exit_primitive (k : int) : string list =
   [
     Printf.sprintf "function mcaml:region_truncate_%d_scratch" k;
-    Printf.sprintf "function mcaml:region_truncate_%d_conspool" k;
+    Printf.sprintf "function mcaml:region_truncate_%d_objpool" k;
   ]
 
 (* §5.6 exit, TList TInt-return path (Strategy B). Given the child-
    region root handle in [ret], dispatches the stash walker (reads
-   every reachable cell from mcaml:conspool into mcaml:region_tmp
-   conspool, preserving forward order), runs both truncation helpers
-   (zeros scratch, pops conspool back to saved), initializes
+   every reachable cell from mcaml:objpool into mcaml:region_tmp
+   objpool, preserving forward order), runs both truncation helpers
+   (zeros scratch, pops objpool back to saved), initializes
    [$wr_prev] to -1, then dispatches the rebuild walker (drains
    region_tmp by popping from the tail, re-appending each cell to
-   conspool with [t := $wr_prev], so the iteration order reverses
+   objpool with [t := $wr_prev], so the iteration order reverses
    twice and the final chain ends up in the original order). The
    new head handle lands in [$wr_prev] at the end, and the caller's
    final [ret := $wr_prev] rewrites the user vreg to the parent-
@@ -438,16 +446,16 @@ let cmd_region_exit_list_int (k : int) (ret : string) : string list =
     (* 1. Seed the stash walker with the child root handle. *)
     Printf.sprintf "scoreboard players operation $wr_h %s = %s %s"
       obj_name ret obj_name;
-    (* 2. Stash walker: fills region_tmp conspool from the child chain. *)
+    (* 2. Stash walker: fills region_tmp objpool from the child chain. *)
     "function mcaml:region_walker_list_stash";
     (* 3. Truncation helpers: pop region-allocated cells out of the
           primary pools back to the saved marks. *)
     Printf.sprintf "function mcaml:region_truncate_%d_scratch" k;
-    Printf.sprintf "function mcaml:region_truncate_%d_conspool" k;
+    Printf.sprintf "function mcaml:region_truncate_%d_objpool" k;
     (* 4. Seed the rebuild walker with nil tail. *)
     Printf.sprintf "scoreboard players set $wr_prev %s -1" obj_name;
     (* 5. Rebuild walker: drains region_tmp, re-appends cells to
-          conspool so the final list is at parent-region handles. *)
+          objpool so the final list is at parent-region handles. *)
     "function mcaml:region_walker_list_rebuild";
     (* 6. Rewrite ret to the new parent-region head handle. *)
     Printf.sprintf "scoreboard players operation %s %s = $wr_prev %s"
@@ -458,10 +466,15 @@ let cmd_region_exit_list_int (k : int) (ret : string) : string list =
    Reads the current child handle from [$wr_h] and terminates when
    it hits -1 (nil). Each iteration reads cell[$wr_h]'s h and t
    fields via the existing cons_head / cons_tail macro helpers
-   (which write to $arr_result), then appends a fresh {h: ..., t:0}
-   to region_tmp conspool. The rebuild walker fills in the t-field
-   later during its own pass; until then every stashed cell carries
-   t:0 and nothing reads it. *)
+   (which write to $arr_result), then appends a fresh
+   {tag:1, h: ..., t:0} to region_tmp objpool. The rebuild walker
+   fills in the t-field later during its own pass; until then every
+   stashed cell carries t:0 and nothing reads it. The tag MUST be
+   preserved through the stash/rebuild round-trip (a rebuilt cell
+   without its tag would corrupt every post-region match once D5
+   lands); this walker only ever traverses TList cells, whose tag is
+   statically 1, so preserving it costs nothing — it rides in the
+   append literals here and in the rebuild body below. *)
 let region_walker_list_stash_body : string list =
   [
     Printf.sprintf
@@ -480,16 +493,16 @@ let region_walker_list_stash_body : string list =
     Printf.sprintf
       "scoreboard players operation $wr_h %s = $arr_result %s"
       obj_name obj_name;
-    "data modify storage mcaml:region_tmp conspool append value {h:0,t:0}";
+    "data modify storage mcaml:region_tmp objpool append value {tag:1,h:0,t:0}";
     Printf.sprintf
-      "execute store result storage mcaml:region_tmp conspool[-1].h int 1 run scoreboard players get $wr_cache_h %s"
+      "execute store result storage mcaml:region_tmp objpool[-1].h int 1 run scoreboard players get $wr_cache_h %s"
       obj_name;
     "function mcaml:region_walker_list_stash";
   ]
 
-(* Rebuild walker body. Drains mcaml:region_tmp conspool from the
+(* Rebuild walker body. Drains mcaml:region_tmp objpool from the
    tail. Each iteration pops region_tmp[-1], appends a fresh cell to
-   mcaml:conspool with h = the popped value and t = [$wr_prev] (the
+   mcaml:objpool with h = the popped value and t = [$wr_prev] (the
    previous iteration's new handle, initially -1 for the first cell
    which becomes the nil-terminated end of the new list). [$wr_prev]
    is then advanced to the new cell's handle, so the final value of
@@ -501,23 +514,23 @@ let region_walker_list_stash_body : string list =
 let region_walker_list_rebuild_body : string list =
   [
     Printf.sprintf
-      "execute unless data storage mcaml:region_tmp conspool[0] run return 0";
+      "execute unless data storage mcaml:region_tmp objpool[0] run return 0";
     Printf.sprintf
-      "execute store result score $wr_tmp_h %s run data get storage mcaml:region_tmp conspool[-1].h 1"
+      "execute store result score $wr_tmp_h %s run data get storage mcaml:region_tmp objpool[-1].h 1"
       obj_name;
-    "data remove storage mcaml:region_tmp conspool[-1]";
-    "data modify storage mcaml:conspool pairs append value {h:0,t:0}";
+    "data remove storage mcaml:region_tmp objpool[-1]";
+    "data modify storage mcaml:objpool cells append value {tag:1,h:0,t:0}";
     Printf.sprintf
-      "execute store result storage mcaml:conspool pairs[-1].h int 1 run scoreboard players get $wr_tmp_h %s"
-      obj_name;
-    Printf.sprintf
-      "execute store result storage mcaml:conspool pairs[-1].t int 1 run scoreboard players get $wr_prev %s"
+      "execute store result storage mcaml:objpool cells[-1].h int 1 run scoreboard players get $wr_tmp_h %s"
       obj_name;
     Printf.sprintf
-      "scoreboard players operation $wr_prev %s = $conspool_next %s"
+      "execute store result storage mcaml:objpool cells[-1].t int 1 run scoreboard players get $wr_prev %s"
+      obj_name;
+    Printf.sprintf
+      "scoreboard players operation $wr_prev %s = $objpool_next %s"
       obj_name obj_name;
     Printf.sprintf
-      "scoreboard players add $conspool_next %s 1" obj_name;
+      "scoreboard players add $objpool_next %s 1" obj_name;
     "function mcaml:region_walker_list_rebuild";
   ]
 
@@ -543,15 +556,15 @@ let region_truncate_scratch_body (k : int) : string list =
     Printf.sprintf "%s function mcaml:region_truncate_%d_scratch" guard k;
   ]
 
-let region_truncate_conspool_body (k : int) : string list =
+let region_truncate_objpool_body (k : int) : string list =
   let guard =
     Printf.sprintf
-      "execute if score $conspool_next %s > $region_save_%d_conspool %s run"
+      "execute if score $objpool_next %s > $region_save_%d_objpool %s run"
       obj_name k obj_name
   in
   [
-    Printf.sprintf "%s data remove storage mcaml:conspool pairs[-1]" guard;
-    Printf.sprintf "%s scoreboard players remove $conspool_next %s 1"
+    Printf.sprintf "%s data remove storage mcaml:objpool cells[-1]" guard;
+    Printf.sprintf "%s scoreboard players remove $objpool_next %s 1"
       guard obj_name;
-    Printf.sprintf "%s function mcaml:region_truncate_%d_conspool" guard k;
+    Printf.sprintf "%s function mcaml:region_truncate_%d_objpool" guard k;
   ]
