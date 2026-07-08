@@ -86,6 +86,9 @@ let rec free_vars (bound : S.t) (e : expr) : S.t =
            (free_vars (S.add i bound) body))
   | Nil -> S.empty
   | Cons (h, t) -> S.union (free_vars bound h) (free_vars bound t)
+  | Tuple es ->
+      List.fold_left (fun acc a -> S.union acc (free_vars bound a))
+        S.empty es
   | Region (_, e) -> free_vars bound e
   | Match (e, arms) ->
       List.fold_left (fun acc (p, body) ->
@@ -97,7 +100,7 @@ and pattern_vars (p : pattern) : S.t =
   match p with
   | PWild | PInt _ | PNil -> S.empty
   | PVar x -> S.singleton x
-  | PCtor (_, ps) ->
+  | PCtor (_, ps) | PTuple ps ->
       List.fold_left (fun acc p -> S.union acc (pattern_vars p)) S.empty ps
   | PCons (ph, pt) -> S.union (pattern_vars ph) (pattern_vars pt)
 
@@ -215,6 +218,9 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
       let (h', d1) = walk parent env h in
       let (t', d2) = walk parent env t in
       (Cons (h', t'), d1 @ d2)
+  | Tuple es ->
+      let pairs = List.map (walk parent env) es in
+      (Tuple (List.map fst pairs), List.concat_map snd pairs)
   | Region (tr, e) ->
       let (e', d) = walk parent env e in
       (Region (tr, e'), d)  (* share tr *)

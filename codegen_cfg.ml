@@ -306,6 +306,7 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
                  | Ast.TArrStatic _ -> "TArrStatic"
                  | Ast.TMat _ -> "TMat"
                  | Ast.TRef _ -> "TRef"
+                 | Ast.TTuple _ -> "TTuple"
                  | _ -> "<unknown>")))
 
 (* Lower a terminator. Only [TTail] produces commands; the others are

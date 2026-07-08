@@ -6,6 +6,7 @@ type typ = TInt | TFloat | TBool | TUnit | TSelector | TPos
          | TRef of typ                (* ref cell holding T *)
          | TList of typ               (* cons list: element type; handle at runtime *)
          | TAdt of string             (* Phase D: nominal user-declared ADT; runtime value is an objpool handle (or a small-int for nullary-only enums — D4 decides) *)
+         | TTuple of typ list         (* D7: structural tuple; runtime value is an objpool handle to a {tag:0, f0...} cell *)
 
 (* Phase D: one constructor of a declared ADT: name + field types.
    Constructor names must be Capitalized (validated at registration in
@@ -25,6 +26,10 @@ type pattern =
      behind the -1 sentinel ABI (§13.5 D6 note). *)
   | PNil                               (* [] — matches the -1 sentinel *)
   | PCons of pattern * pattern         (* h :: t *)
+  (* D7: tuple pattern. Dedicated variant per the D6 precedent — tuples
+     are structural and never enter the ctor namespace. Always a
+     complete single-ctor signature, so match dispatch reads no tag. *)
+  | PTuple of pattern list             (* (p1, p2, ...) — arity >= 2 *)
 type binop = Add | Sub | Mult | Div | Mod
            | FMult | FDiv                 (* Phase N: Q16.16 fixed-point multiply/divide *)
            | Eq | Neq | Lt | Leq | Gt | Geq | And | Or
@@ -61,6 +66,7 @@ type expr =
   | Cons of expr * expr                    (* h :: t — cons cell *)
   | Region of typ ref * expr               (* region (fun () -> body) — the [typ ref] is written by typing.ml and read by knormal.ml so the IR's IRegionExit can carry the return type the deep-copy walker dispatches on *)
   | Match of expr * (pattern * expr) list  (* Phase D: match e with | p -> e | ... *)
+  | Tuple of expr list                     (* D7: (e1, e2, ...) — arity >= 2; allocates one {tag:0, f0...} objpool cell *)
 
 type def =
   | Val of string * expr

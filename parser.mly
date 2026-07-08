@@ -53,6 +53,8 @@ let pattern_of_id name =
 %type <Ast.expr> seq_expr
 %type <Ast.coord_part> coord_part
 %type <Ast.typ> typ
+%type <Ast.typ> typ_atom
+%type <Ast.typ list> star_typ_list
 %type <(string * Ast.typ)> param
 %type <Ast.binop> binop
 %type <(string * Ast.typ) list> param_list
@@ -119,9 +121,13 @@ ctor:
   | name = ID { (name, []) }
   | name = ID OF ts = ctor_typs { (name, ts) }
 
+/* D7: ctor fields split on TIMES at the top level (OCaml's rule), so
+   `of int * t` stays TWO fields and a tuple-typed field must be
+   parenthesized: `of (int * int) * t`. This is why the elements are
+   typ_atom, not typ. */
 ctor_typs:
-  | t = typ { [t] }
-  | t = typ TIMES rest = ctor_typs { t :: rest }
+  | t = typ_atom { [t] }
+  | t = typ_atom TIMES rest = ctor_typs { t :: rest }
 
 param_list:
   | { [] }
@@ -134,7 +140,16 @@ nonempty_param_list:
 param:
   | name = ID COLON t = typ { (name, t) }
 
+/* D7: `int * int` is a tuple type. One TIMES-free atom collapses to
+   itself; two or more become TTuple. */
 typ:
+  | ts = star_typ_list { match ts with [t] -> t | ts -> TTuple ts }
+
+star_typ_list:
+  | t = typ_atom { [t] }
+  | t = typ_atom TIMES rest = star_typ_list { t :: rest }
+
+typ_atom:
   | T_INT { TInt }
   | T_FLOAT { TFloat }
   | T_BOOL { TBool }
@@ -150,6 +165,7 @@ typ:
   | name = ID { TAdt name }   /* Phase D: nominal reference to a declared ADT; existence checked in typing */
   | REF T_INT { TRef TInt }
   | REF T_BOOL { TRef TBool }
+  | LPAREN t = typ RPAREN { t }   /* D7: grouping, e.g. a tuple-typed ctor field `of (int * int) * t` */
 
 seq_expr:
   | e = expr %prec BELOW_SEMI { e }
@@ -174,6 +190,12 @@ expr:
   | e1 = expr CONS e2 = expr { Cons(e1, e2) }
 
   | LET x = ID EQUAL e1 = seq_expr IN e2 = seq_expr { Let(x, e1, e2) }
+  /* D7: destructuring let — parse-time sugar for a one-arm match.
+     Tuple patterns only (records destructure via match). Typing's
+     exhaustiveness check rejects a refutable pattern here (e.g.
+     `let (0, b) = e`) exactly as it would a one-arm match. */
+  | LET LPAREN p = pattern COMMA ps = pattern_comma_list RPAREN EQUAL e1 = seq_expr IN e2 = seq_expr
+      { Match(e1, [ (PTuple (p :: ps), e2) ]) }
   | IF cond = expr THEN e1 = expr ELSE e2 = expr { If(cond, e1, e2) }
 
   | func = ID LPAREN args = arg_list RPAREN { App(func, args) }
@@ -185,6 +207,10 @@ expr:
 
   | LPAREN e = seq_expr RPAREN { e }
   | LPAREN RPAREN { Unit }
+  /* D7: tuple expression. Reuses nonempty_arg_list for the tail, so
+     `(a, b, c)` is Tuple [a; b; c] while `f(a, b)` stays a two-arg
+     App (the App production consumes its own LPAREN). */
+  | LPAREN e = expr COMMA rest = nonempty_arg_list RPAREN { Tuple (e :: rest) }
 
   | REF e = expr { Ref e }
   | BANG e = expr { Deref e }
@@ -235,6 +261,9 @@ atom_pattern:
         PCtor(name, ps) }
   | LBRACK RBRACK { PNil }
   | LPAREN p = pattern RPAREN { p }
+  /* D7: tuple pattern — (p1, p2, ...). One-element parens stay
+     grouping (the arm above). */
+  | LPAREN p = pattern COMMA ps = pattern_comma_list RPAREN { PTuple (p :: ps) }
 
 pattern_comma_list:
   | p = pattern { [p] }

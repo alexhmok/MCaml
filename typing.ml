@@ -38,10 +38,14 @@ let is_constructor (name : string) : bool = Hashtbl.mem ctor_info name
 (* ADT ctor fields must be single-scoreboard-int values (§12.1 uniform
    representation): scalars and handles. TArrDyn is a (base, len) vreg
    PAIR per §3.4 so it doesn't fit one cell field — rejected in v1. *)
-let check_field_type (decl : string) (cname : string) (ft : typ) : unit =
+let rec check_field_type (decl : string) (cname : string) (ft : typ) : unit =
   match ft with
   | TInt | TFloat | TBool -> ()
   | TList _ -> ()   (* single int handle *)
+  | TTuple ts ->
+      (* D7: a tuple is one objpool handle, so it fits a cell field.
+         Its own elements must obey the same rules. *)
+      List.iter (check_field_type decl cname) ts
   | TAdt n ->
       if not (Hashtbl.mem adt_decls n) then
         raise (Error (Printf.sprintf
@@ -107,6 +111,8 @@ let rec string_of_pattern (p : pattern) : string =
   | PCons (ph, pt) ->
       (* Parenthesized so a witness nested in ctor args stays readable *)
       "(" ^ string_of_pattern ph ^ " :: " ^ string_of_pattern pt ^ ")"
+  | PTuple ps ->
+      "(" ^ String.concat ", " (List.map string_of_pattern ps) ^ ")"
 
 (* Validate a pattern against the scrutinee type; return its binders.
    Duplicate binders inside one pattern are caught in alpha.ml
@@ -134,6 +140,16 @@ let rec check_pattern (t : typ) (p : pattern) : (string * typ) list =
        | TList TInt ->
            check_pattern TInt ph @ check_pattern (TList TInt) pt
        | _ -> raise (Error "pattern _ :: _ requires a list scrutinee"))
+  | PTuple ps ->
+      (match t with
+       | TTuple ts ->
+           if List.length ts <> List.length ps then
+             raise (Error (Printf.sprintf
+               "tuple pattern has %d component(s) but the scrutinee is \
+                a %d-tuple" (List.length ps) (List.length ts)));
+           List.concat (List.map2 check_pattern ts ps)
+       | _ ->
+           raise (Error "tuple pattern requires a tuple scrutinee"))
   | PCtor (c, ps) ->
       (match Hashtbl.find_opt ctor_info c with
        | None ->
@@ -156,6 +172,34 @@ let rec check_pattern (t : typ) (p : pattern) : (string * typ) list =
                   "constructor pattern %s requires a scrutinee of type %s"
                   c adt))))
 
+(* D7: tuple elements live in objpool cell fields, so they follow the
+   same representability rules as ctor fields, with tuple-specific
+   messages. *)
+let rec check_tuple_elem (ty : typ) : unit =
+  match ty with
+  | TInt | TFloat | TBool -> ()
+  | TList _ -> ()
+  | TTuple ts -> List.iter check_tuple_elem ts
+  | TAdt n ->
+      if not (Hashtbl.mem adt_decls n) then
+        raise (Error (Printf.sprintf
+          "tuple element of unknown type '%s'" n))
+  | TArrDyn _ ->
+      raise (Error
+        "tuple element: darr is not supported in v1 (a dynamic array \
+         is a base+len pair, not a single handle)")
+  | TUnit | TSelector | TPos ->
+      raise (Error
+        "tuple element type is not representable as an objpool cell \
+         field")
+  | TArrStatic _ | TMat _ ->
+      raise (Error
+        "tuple element: static arrays/matrices are compile-time \
+         storage, not first-class values")
+  | TRef _ ->
+      raise (Error "tuple element: ref fields would break purity — \
+                    rejected")
+
 let wilds n = List.init n (fun _ -> PWild)
 
 let rec split_at n l =
@@ -173,7 +217,7 @@ let specialize_ctor (c : string) (ar : int) (matrix : pattern list list) =
     match row with
     | PCtor (c', ps) :: rest -> if c' = c then Some (ps @ rest) else None
     | (PWild | PVar _) :: rest -> Some (wilds ar @ rest)
-    | (PInt _ | PNil | PCons _) :: _ -> None
+    | (PInt _ | PNil | PCons _ | PTuple _) :: _ -> None
     | [] -> None) matrix
 
 let specialize_int (i : int) (matrix : pattern list list) =
@@ -181,7 +225,17 @@ let specialize_int (i : int) (matrix : pattern list list) =
     match row with
     | PInt j :: rest -> if i = j then Some rest else None
     | (PWild | PVar _) :: rest -> Some rest
-    | (PCtor _ | PNil | PCons _) :: _ -> None
+    | (PCtor _ | PNil | PCons _ | PTuple _) :: _ -> None
+    | [] -> None) matrix
+
+(* D7: tuple column. Tuples are a single always-present "ctor" of
+   arity [ar], so specialization just unfolds the components. *)
+let specialize_tuple (ar : int) (matrix : pattern list list) =
+  List.filter_map (fun row ->
+    match row with
+    | PTuple ps :: rest -> Some (ps @ rest)
+    | (PWild | PVar _) :: rest -> Some (wilds ar @ rest)
+    | (PInt _ | PCtor _ | PNil | PCons _) :: _ -> None
     | [] -> None) matrix
 
 (* D6: TList column specializations. The list signature is the fixed
@@ -192,7 +246,7 @@ let specialize_nil (matrix : pattern list list) =
     match row with
     | PNil :: rest -> Some rest
     | (PWild | PVar _) :: rest -> Some rest
-    | (PInt _ | PCtor _ | PCons _) :: _ -> None
+    | (PInt _ | PCtor _ | PCons _ | PTuple _) :: _ -> None
     | [] -> None) matrix
 
 let specialize_cons (matrix : pattern list list) =
@@ -200,7 +254,7 @@ let specialize_cons (matrix : pattern list list) =
     match row with
     | PCons (ph, pt) :: rest -> Some (ph :: pt :: rest)
     | (PWild | PVar _) :: rest -> Some (PWild :: PWild :: rest)
-    | (PInt _ | PCtor _ | PNil) :: _ -> None
+    | (PInt _ | PCtor _ | PNil | PTuple _) :: _ -> None
     | [] -> None) matrix
 
 let default_matrix (matrix : pattern list list) =
@@ -234,6 +288,22 @@ let rec useful (tys : typ list) (matrix : pattern list list)
        | PInt i ->
            (match useful trest (specialize_int i matrix) qrest with
             | Some w -> Some (PInt i :: w)
+            | None -> None)
+       | PTuple ps ->
+           let ts =
+             match ty with
+             | TTuple ts -> ts
+             | _ ->
+                 raise (Error
+                   "internal: tuple pattern on a non-tuple column in \
+                    match analysis")
+           in
+           let ar = List.length ps in
+           (match useful (ts @ trest)
+                    (specialize_tuple ar matrix) (ps @ qrest) with
+            | Some w ->
+                let (wf, wr) = split_at ar w in
+                Some (PTuple wf :: wr)
             | None -> None)
        | PNil ->
            (match useful trest (specialize_nil matrix) qrest with
@@ -323,6 +393,29 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                          else PCons (PWild, PWild)
                        in
                        Some (head :: w)
+                   | None -> None)
+            | TTuple ts ->
+                (* D7: the tuple signature has exactly one "ctor" and it
+                   is complete iff any PTuple heads the column. When
+                   none does, every row is wild/var here and the default
+                   matrix is equivalent (and cheaper). *)
+                let ar = List.length ts in
+                let has_tuple =
+                  List.exists (fun row ->
+                    match row with PTuple _ :: _ -> true | _ -> false)
+                    matrix
+                in
+                if has_tuple then
+                  (match useful (ts @ trest)
+                           (specialize_tuple ar matrix)
+                           (wilds ar @ qrest) with
+                   | Some w ->
+                       let (wf, wr) = split_at ar w in
+                       Some (PTuple wf :: wr)
+                   | None -> None)
+                else
+                  (match useful trest (default_matrix matrix) qrest with
+                   | Some w -> Some (PWild :: w)
                    | None -> None)
             | TInt ->
                 (* the int signature is never complete *)
@@ -638,6 +731,13 @@ let rec infer env e =
        | TRef t when t = tv -> TUnit
        | TRef _ -> raise (Error "ref := value type mismatch")
        | _ -> raise (Error ":= requires a ref on the left"))
+
+  | Tuple es ->
+      (* D7: structural tuple. Every element must be representable as
+         an objpool cell field (one scoreboard int each). *)
+      let ts = List.map (infer env) es in
+      List.iter check_tuple_elem ts;
+      TTuple ts
 
   | Nil ->
       (* v1: monomorphic int lists. Nil defaults to TList TInt; the Cons

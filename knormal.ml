@@ -704,6 +704,20 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
                KLet(t_neg, KInt (-1),
                  KLet(d, KBinOp(Eq, t_l, t_neg), KUnit)))))
 
+  | Tuple es ->
+      (* D7: a tuple is a single-ctor ADT cell {tag:0, f0...} — same
+         allocation as a ctor application, with the fixed tag 0 (the
+         tag is never read: tuple matches dispatch on the complete
+         single-ctor signature with zero tag tests). With no ambient
+         dest the allocation is dropped but element sub-expressions
+         still evaluate (Cons/ctor precedent). *)
+      let temps = List.map (fun _ -> new_temp ()) es in
+      let ks = List.map2 (fun a t -> normalize_to (Some t) a) es temps in
+      let seq body = List.fold_right (fun k acc -> KSeq (k, acc)) ks body in
+      (match dest with
+       | None -> seq KUnit
+       | Some d -> seq (KLet (d, KUnit, KAdtAlloc (d, 0, temps))))
+
   | App (f, args) when Typing.is_constructor f ->
       (* Phase D / D5: constructor application. Normalize every field
          into a temp, then allocate one tagged objpool cell. With no
@@ -767,7 +781,12 @@ and compile_match (dest : string option) (occs : string list)
     : kexpr =
   let is_irrefutable = function
     | Ast.PWild | Ast.PVar _ -> true
-    | Ast.PInt _ | Ast.PCtor _ | Ast.PNil | Ast.PCons _ -> false
+    (* PTuple is "refutable" for column-selection purposes even though
+       the tuple ctor always matches — selecting the column unfolds the
+       components (and discharges their binders) without emitting any
+       test. *)
+    | Ast.PInt _ | Ast.PCtor _ | Ast.PNil | Ast.PCons _
+    | Ast.PTuple _ -> false
   in
   match rows with
   | [] ->
@@ -952,6 +971,47 @@ and compile_match (dest : string option) (occs : string list)
              in
              KLet (t_tag, KUnit, KSeq (KTagGet (t_tag, occ), chain))
            end
+       | Ast.PTuple ps0 ->
+           (* D7: tuple column — an always-complete single-ctor
+              signature, so NO test is emitted (the D5 single-ctor rule
+              with zero tag reads). Components unfold in place; the
+              used-fields filter keeps `_` components from emitting an
+              obj_f<k> read. *)
+           let ar = List.length ps0 in
+           let f_temps = List.init ar (fun _ -> new_temp ()) in
+           let spec_rows =
+             List.filter_map
+               (fun row ->
+                  let (p, rest, binds, body) = split_row row in
+                  match p with
+                  | Ast.PTuple subs -> Some (subs @ rest, binds, body)
+                  | Ast.PWild ->
+                      Some (List.init ar (fun _ -> Ast.PWild) @ rest,
+                            binds, body)
+                  | Ast.PVar x ->
+                      Some (List.init ar (fun _ -> Ast.PWild) @ rest,
+                            (x, occ) :: binds, body)
+                  | _ -> None)
+               rows
+           in
+           let used = Array.make (max ar 1) false in
+           List.iter
+             (fun (ps, _, _) ->
+                List.iteri
+                  (fun i p ->
+                     if i < ar && p <> Ast.PWild then used.(i) <- true)
+                  ps)
+             spec_rows;
+           let sub = compile_match dest (f_temps @ occs_rest) spec_rows in
+           let rec add_reads i acc =
+             if i < 0 then acc
+             else
+               add_reads (i - 1)
+                 (if used.(i)
+                  then KSeq (KFieldGet (List.nth f_temps i, occ, i), acc)
+                  else acc)
+           in
+           add_reads (ar - 1) sub
        | Ast.PNil | Ast.PCons _ ->
            (* D6: TList column. The two-ctor signature {[], ::} is
               discriminated by a single Eq-against--1 compare on the

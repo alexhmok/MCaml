@@ -95,6 +95,7 @@ let rec g env e =
   | RefSet (r, v) -> RefSet (g env r, g env v)
   | Nil -> Nil
   | Cons (h, t) -> Cons (g env h, g env t)
+  | Tuple es -> Tuple (List.map (g env) es)
   | Region (tr, e) -> Region (tr, g env e)   (* share tr so typing's write is visible downstream *)
   (* Phase D: pattern variables are binders — rename them like Let/For
      binders so `let r = 5 in match e with Circle(r) -> r` resolves the
@@ -119,7 +120,8 @@ and check_dup_binders p =
     match p with
     | PWild | PInt _ | PNil -> acc
     | PVar x -> x :: acc
-    | PCtor (_, ps) -> List.fold_left (fun a q -> binders q a) acc ps
+    | PCtor (_, ps) | PTuple ps ->
+        List.fold_left (fun a q -> binders q a) acc ps
     | PCons (ph, pt) -> binders pt (binders ph acc)
   in
   let names = List.sort compare (binders p []) in
@@ -148,6 +150,13 @@ and rename_pattern env p =
           (p' :: acc, e')) ([], env) ps
       in
       (PCtor (c, List.rev ps_rev), env')
+  | PTuple ps ->
+      let (ps_rev, env') =
+        List.fold_left (fun (acc, e) p ->
+          let (p', e') = rename_pattern e p in
+          (p' :: acc, e')) ([], env) ps
+      in
+      (PTuple (List.rev ps_rev), env')
   | PNil -> (PNil, env)
   | PCons (ph, pt) ->
       let (ph', env') = rename_pattern env ph in
