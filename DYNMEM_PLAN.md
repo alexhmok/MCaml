@@ -2458,6 +2458,144 @@ commits separate from implementation commits, and leave the tree
 green. When F is fully closed, author §8.14 for Phase G.
 ```
 
+### 8.14 G4 kickoff (parameterized user type decls — pulled ahead of Phase F)
+
+Re-pasteable across sessions: check §2 G4 for status.
+
+```
+Read /Users/alexmok/MCaml/DYNMEM_PLAN.md — §2 for current status (all
+of Phases A–E plus M/N/Math are closed; G4 is being pulled AHEAD of
+Phase F because it has no dependency on lambdas), §13.10 for the
+Phase E decisions this builds on (esp. decision 2 schemes-in-env, the
+tvar single-int amendment, and decision 4 which deferred this task),
+§13.5 for the D6/D7/D8 "dedicated variants, not namespace entries"
+precedents, §13 (bottom) for escalation triggers. Read CLAUDE.md for
+the pipeline and the manual rebuild command. Verify `git status` is
+clean before starting.
+
+This task is G4: parameterized user type declarations —
+`type 'a option = None | Some of 'a`, `type 'a box = Box of 'a` —
+with arity-checked type application (`int option`) in annotation and
+ctor-field positions. This is the record nil-story's prerequisite
+(§13.5 D8 note: `type node = { v : int; next : node option }`).
+Runtime cost is ZERO by construction: §13.1 uniform representation
+means an instantiated 'a is always one scoreboard int, cells stay
+{tag, f0...}, tags stay per-type decl-order — typing is the only
+layer that changes, exactly like Phase E. Expect 1–2 sessions.
+
+Make the DECISIONS first and document them in a new §13.11 before
+writing code (D5/D6 protocol) — and in the same commit, amend §8.13's
+"document them in a new §13.11" line to point Phase F at §13.12
+(numbering by landing order):
+
+  1. AST representation of applied types — `TAdt of string` must
+     grow arguments. Evaluate: (a) widen to `TAdt of string * typ
+     list` ([] = existing nullary uses; every current TAdt mention
+     updates mechanically, OCaml's exhaustiveness finds them all) vs
+     (b) a separate `TAppAdt of string * typ list` beside bare TAdt
+     (no churn, but every future consumer must remember two arms).
+     Recommend (a) — one representation, and the compiler enumerates
+     every site to fix. Whatever lands: unify gets
+     TAdt(a,xs)/TAdt(b,ys) → a=b && pairwise; occurs/free_tvars/
+     copy_with/zonk_default/string_of_typ (render as `int option`)
+     get args arms; knormal/codegen never inspect the args (tags are
+     already per-type).
+  2. Decl-side type variables — `'a` in `Some of 'a` is a BINDER,
+     not a unification var. Recommend a dedicated `TParam of string`
+     in typ, legal ONLY inside registered ctor field types;
+     instantiation at every ctor use/pattern substitutes TParam ->
+     the use's type arguments (fresh tvars when inferring). Do NOT
+     reuse TVar refs for decl params — a destructive bind would
+     corrupt the decl for every later use. tvar_bindable and the
+     representability checkers get TParam arms (representable: the
+     tvar single-int amendment guarantees every instantiation is one
+     int); unify treats a surviving TParam as an internal error.
+  3. Lexer for `'a` — `'` is currently an illegal character. Add a
+     TYVAR token (`''' ['a'-'z' 'a'-'z' '0'-'9' '_']*` — check the
+     exact ident charset against ID's). AUDIT collisions before
+     committing: string/`cmd!` payload lexing, selector tokens, and
+     the FLOAT/DOT rules must be unaffected (grep lexer.mll for every
+     rule that could consume a quote). Zero new menhir conflicts is
+     the gate, as always.
+  4. Type application surface syntax — OCaml postfix: `int option`,
+     nested `int option option`, parenthesized `(int * int) option`.
+     Grammar: left-recursive `typ_atom: t = typ_atom; name = ID
+     { ... }` beside the existing bare-ID arm; bare use of a
+     parameterized type name and applying a NON-parameterized one are
+     ARITY ERRORS at typing (decl arity recorded at registration).
+     Decide v1 param count: single 'a only (recommend — covers
+     option/box/list-shaped decls; multi-param `('a, 'b) either`
+     is a mechanical follow-up) — document either way.
+  5. Does `list` join the postfix grammar? The E4b probe found
+     `shape list` annotations unparseable (the `list` keyword is
+     hardwired to TList TInt). Recommend YES as part of G4:
+     `typ_atom T_LIST → TList t` postfix arm beside the keyword arm
+     (bare `list` stays TList TInt for back-compat). This closes the
+     E4b annotation gap for free. Records: parameterized RECORD
+     decls (`type 'a cell = { v : 'a }`) — recommend DEFER; document
+     that record decls stay monomorphic (the nil-story only needs
+     `node option` as a FIELD type, which works once ADT application
+     lands).
+  6. Typing mechanics — adt_decls value grows the param list;
+     ctor_info fields may contain TParam. Ctor APPLICATION
+     (`Some(e)`): instantiate the owner's params with fresh tvars
+     (or the annotation's args), unify field types, return
+     TAdt(owner, args). Ctor PATTERN: substitute the scrutinee's
+     args into field types before recursing (the PCtor TVar-pinning
+     arm pins to TAdt(owner, fresh...)). Maranget: the
+     complete-signature test keys on the owner name (args don't
+     change the ctor set); specialize substitutes args into field
+     types so witnesses stay concrete. Self-reference through an
+     application (`type tree2 = Leaf | N of tree2 option`) must
+     resolve via the register-name-first rule (D3).
+
+Behaviors that MUST survive (all pinned by the existing battery):
+- Every §13.10 Phase E decision and the tvar single-int amendment;
+  zero clones for polymorphic functions (a `'a option` value is one
+  handle — NO monomorphization of user types, ever).
+- Monomorphic ADT decls type and compile byte-identically (canaries +
+  both self-checking suites); tags stay decl-order per-type; the D5
+  decision-tree shapes and obj_tag/obj_f<k> budgets are untouched.
+- One global ctor namespace, Capitalized-ctor convention, record
+  field namespace, D3's decl-before-use ordering.
+- Every pre-existing typing error message (probe-update-in-same-
+  commit rule applies; arity errors are NEW messages — name the type,
+  the declared arity, and the applied arity).
+
+Guardrails (the full battery, now TEN checks):
+- Baseline BEFORE the first edit: rebuild per CLAUDE.md; suite 66/66
+  + async; Phase D suite 40/40; Phase E suite 42/42
+  (tools/sim_check_phase_e.py — includes its 12 rejection probes);
+  hash the five canaries; all EIGHT /tmp harnesses green (regenerate
+  per §2 conventions if /tmp was cleared).
+- Five canaries byte-identical through the whole task (typing-only
+  change — any drift is stop-and-investigate).
+- Zero new menhir conflicts; lexer audit per decision 3.
+- Exit tests: scripts/test_param_types.mcaml + /tmp harness per D9
+  conventions — 'a option round-trip (Some/None dispatch through a
+  polymorphic get_or), option at int/bool/tuple/ADT payloads in one
+  program, nested `int option option`, `node option` record field
+  (the nil-story shape: a nil-free linked record), option-of-list +
+  list-of-option, exhaustiveness witness rendering applied types
+  (`Some(_)`), plus rejection probes: bare `option` (arity 0 vs 1),
+  `int int option`-style over-application, applying a
+  non-parameterized type, unbound `'b` in a decl
+  (`type t = K of 'b`), and ctor arg type mismatch naming the
+  instantiated (not TParam) types. Consider folding a couple of
+  runtime checks into a mc_test_suite_phase_e-style addition or a
+  small standalone self-checking suite — decide and document.
+
+If the TAdt widening reveals a pass that DOES inspect ADT args
+downstream of typing (there should be none — knormal/codegen key on
+tags and ctor_info only), STOP and flag per §13 rather than threading
+args through it.
+
+After the session: update §2 G4 with commit hashes (decision-doc
+commit separate from implementation), leave the tree green, and note
+whether multi-param decls and parameterized records were deferred
+(they become G4b/G4c bullets if so).
+```
+
 ## 9. Rollback and A/B flags
 
 Add these environment flags in the same style as the existing
