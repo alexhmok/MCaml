@@ -103,6 +103,10 @@ let rec string_of_pattern (p : pattern) : string =
   | PCtor (c, []) -> c
   | PCtor (c, ps) ->
       c ^ "(" ^ String.concat ", " (List.map string_of_pattern ps) ^ ")"
+  | PNil -> "[]"
+  | PCons (ph, pt) ->
+      (* Parenthesized so a witness nested in ctor args stays readable *)
+      "(" ^ string_of_pattern ph ^ " :: " ^ string_of_pattern pt ^ ")"
 
 (* Validate a pattern against the scrutinee type; return its binders.
    Duplicate binders inside one pattern are caught in alpha.ml
@@ -118,6 +122,18 @@ let rec check_pattern (t : typ) (p : pattern) : (string * typ) list =
           "int literal pattern %s requires an int scrutinee"
           (string_of_pattern p)));
       []
+  | PNil ->
+      (match t with
+       | TList TInt -> []
+       | _ -> raise (Error "pattern [] requires a list scrutinee"))
+  | PCons (ph, pt) ->
+      (* D6: v1 monomorphic int lists (B2) — head is int, tail is list.
+         A ctor sub-pattern in head position is therefore untypeable
+         until Phase E, matching the fact that `::` can't build one. *)
+      (match t with
+       | TList TInt ->
+           check_pattern TInt ph @ check_pattern (TList TInt) pt
+       | _ -> raise (Error "pattern _ :: _ requires a list scrutinee"))
   | PCtor (c, ps) ->
       (match Hashtbl.find_opt ctor_info c with
        | None ->
@@ -157,7 +173,7 @@ let specialize_ctor (c : string) (ar : int) (matrix : pattern list list) =
     match row with
     | PCtor (c', ps) :: rest -> if c' = c then Some (ps @ rest) else None
     | (PWild | PVar _) :: rest -> Some (wilds ar @ rest)
-    | PInt _ :: _ -> None
+    | (PInt _ | PNil | PCons _) :: _ -> None
     | [] -> None) matrix
 
 let specialize_int (i : int) (matrix : pattern list list) =
@@ -165,7 +181,26 @@ let specialize_int (i : int) (matrix : pattern list list) =
     match row with
     | PInt j :: rest -> if i = j then Some rest else None
     | (PWild | PVar _) :: rest -> Some rest
-    | PCtor _ :: _ -> None
+    | (PCtor _ | PNil | PCons _) :: _ -> None
+    | [] -> None) matrix
+
+(* D6: TList column specializations. The list signature is the fixed
+   two-ctor set {[], ::} — [] has arity 0, :: arity 2 with column types
+   [TInt; TList TInt] (v1 monomorphic, per check_pattern). *)
+let specialize_nil (matrix : pattern list list) =
+  List.filter_map (fun row ->
+    match row with
+    | PNil :: rest -> Some rest
+    | (PWild | PVar _) :: rest -> Some rest
+    | (PInt _ | PCtor _ | PCons _) :: _ -> None
+    | [] -> None) matrix
+
+let specialize_cons (matrix : pattern list list) =
+  List.filter_map (fun row ->
+    match row with
+    | PCons (ph, pt) :: rest -> Some (ph :: pt :: rest)
+    | (PWild | PVar _) :: rest -> Some (PWild :: PWild :: rest)
+    | (PInt _ | PCtor _ | PNil) :: _ -> None
     | [] -> None) matrix
 
 let default_matrix (matrix : pattern list list) =
@@ -199,6 +234,19 @@ let rec useful (tys : typ list) (matrix : pattern list list)
        | PInt i ->
            (match useful trest (specialize_int i matrix) qrest with
             | Some w -> Some (PInt i :: w)
+            | None -> None)
+       | PNil ->
+           (match useful trest (specialize_nil matrix) qrest with
+            | Some w -> Some (PNil :: w)
+            | None -> None)
+       | PCons (ph, pt) ->
+           (match useful (TInt :: TList TInt :: trest)
+                    (specialize_cons matrix) (ph :: pt :: qrest) with
+            | Some w ->
+                let (wf, wr) = split_at 2 w in
+                (match wf with
+                 | [wh; wt] -> Some (PCons (wh, wt) :: wr)
+                 | _ -> assert false)
             | None -> None)
        | PWild | PVar _ ->
            let head_ctor_names =
@@ -241,6 +289,40 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                         | Some (cn, fields) ->
                             Some (PCtor (cn, wilds (List.length fields)) :: w)
                         | None -> Some (PWild :: w))
+                   | None -> None)
+            | TList _ ->
+                (* D6: the list signature is complete iff both a []
+                   and a :: head appear in the column. *)
+                let has_nil =
+                  List.exists (fun row ->
+                    match row with PNil :: _ -> true | _ -> false) matrix
+                and has_cons =
+                  List.exists (fun row ->
+                    match row with PCons _ :: _ -> true | _ -> false)
+                    matrix
+                in
+                if has_nil && has_cons then
+                  (match useful trest (specialize_nil matrix) qrest with
+                   | Some w -> Some (PNil :: w)
+                   | None ->
+                       (match useful (TInt :: TList TInt :: trest)
+                                (specialize_cons matrix)
+                                (PWild :: PWild :: qrest) with
+                        | Some w ->
+                            let (wf, wr) = split_at 2 w in
+                            (match wf with
+                             | [wh; wt] -> Some (PCons (wh, wt) :: wr)
+                             | _ -> assert false)
+                        | None -> None))
+                else
+                  (match useful trest (default_matrix matrix) qrest with
+                   | Some w ->
+                       (* name a missing list ctor for the witness *)
+                       let head =
+                         if not has_nil then PNil
+                         else PCons (PWild, PWild)
+                       in
+                       Some (head :: w)
                    | None -> None)
             | TInt ->
                 (* the int signature is never complete *)

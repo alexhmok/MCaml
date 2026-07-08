@@ -95,10 +95,11 @@ let rec free_vars (bound : S.t) (e : expr) : S.t =
 (* Phase D: names bound by a pattern (PVar binders, recursively). *)
 and pattern_vars (p : pattern) : S.t =
   match p with
-  | PWild | PInt _ -> S.empty
+  | PWild | PInt _ | PNil -> S.empty
   | PVar x -> S.singleton x
   | PCtor (_, ps) ->
       List.fold_left (fun acc p -> S.union acc (pattern_vars p)) S.empty ps
+  | PCons (ph, pt) -> S.union (pattern_vars ph) (pattern_vars pt)
 
 (* Walk an expression carrying a type env. Returns (new_expr, extra_defs). *)
 let rec walk (parent : string) (env : typ M.t) (e : expr)

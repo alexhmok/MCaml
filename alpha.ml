@@ -117,9 +117,10 @@ let rec g env e =
 and check_dup_binders p =
   let rec binders p acc =
     match p with
-    | PWild | PInt _ -> acc
+    | PWild | PInt _ | PNil -> acc
     | PVar x -> x :: acc
     | PCtor (_, ps) -> List.fold_left (fun a q -> binders q a) acc ps
+    | PCons (ph, pt) -> binders pt (binders ph acc)
   in
   let names = List.sort compare (binders p []) in
   let rec dup = function
@@ -147,6 +148,11 @@ and rename_pattern env p =
           (p' :: acc, e')) ([], env) ps
       in
       (PCtor (c, List.rev ps_rev), env')
+  | PNil -> (PNil, env)
+  | PCons (ph, pt) ->
+      let (ph', env') = rename_pattern env ph in
+      let (pt', env'') = rename_pattern env' pt in
+      (PCons (ph', pt'), env'')
 
 (* Rename Definitions (Top Level) *)
 let h env d =

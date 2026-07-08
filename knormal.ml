@@ -767,7 +767,7 @@ and compile_match (dest : string option) (occs : string list)
     : kexpr =
   let is_irrefutable = function
     | Ast.PWild | Ast.PVar _ -> true
-    | Ast.PInt _ | Ast.PCtor _ -> false
+    | Ast.PInt _ | Ast.PCtor _ | Ast.PNil | Ast.PCons _ -> false
   in
   match rows with
   | [] ->
@@ -952,6 +952,95 @@ and compile_match (dest : string option) (occs : string list)
              in
              KLet (t_tag, KUnit, KSeq (KTagGet (t_tag, occ), chain))
            end
+       | Ast.PNil | Ast.PCons _ ->
+           (* D6: TList column. The two-ctor signature {[], ::} is
+              discriminated by a single Eq-against--1 compare on the
+              HANDLE — no tag read, ever (§13.5 D6 note): a non-nil
+              TList handle always points at a tag-1 cell. Same 2-cmd
+              IConst+Eq sequence is_nil desugars to.
+              Shape: [if occ == -1 then <nil rows> else <cons rows>].
+              The nil specialization keeps default rows, so when no
+              PNil head appears it degenerates to the default matrix;
+              exhaustiveness guarantees it is then non-empty. *)
+           let has_cons =
+             List.exists
+               (fun row ->
+                  let (p, _, _, _) = split_row row in
+                  match p with Ast.PCons _ -> true | _ -> false)
+               rows
+           in
+           let nil_rows =
+             List.filter_map
+               (fun row ->
+                  let (p, rest, binds, body) = split_row row in
+                  match p with
+                  | Ast.PNil -> Some (rest, binds, body)
+                  | Ast.PWild -> Some (rest, binds, body)
+                  | Ast.PVar x -> Some (rest, (x, occ) :: binds, body)
+                  | _ -> None)
+               rows
+           in
+           if nil_rows = [] then
+             failwith
+               "match lowering: list column without a [] or default \
+                row — typing exhaustiveness invariant broken";
+           let then_k = compile_match dest occs_rest nil_rows in
+           let else_k =
+             if has_cons then begin
+               (* Cons branch: sub-occurrences read through the
+                  existing KHead/KTail (they ARE the field getters,
+                  3 cmds each), and only when some sub-pattern
+                  inspects or binds — same used-fields filter as
+                  KFieldGet (both are never DCE'd). *)
+               let t_h = new_temp () in
+               let t_t = new_temp () in
+               let spec_rows =
+                 List.filter_map
+                   (fun row ->
+                      let (p, rest, binds, body) = split_row row in
+                      match p with
+                      | Ast.PCons (ph, pt) ->
+                          Some (ph :: pt :: rest, binds, body)
+                      | Ast.PWild ->
+                          Some (Ast.PWild :: Ast.PWild :: rest,
+                                binds, body)
+                      | Ast.PVar x ->
+                          Some (Ast.PWild :: Ast.PWild :: rest,
+                                (x, occ) :: binds, body)
+                      | _ -> None)
+                   rows
+               in
+               let used_h =
+                 List.exists
+                   (fun (ps, _, _) -> List.nth ps 0 <> Ast.PWild)
+                   spec_rows
+               and used_t =
+                 List.exists
+                   (fun (ps, _, _) -> List.nth ps 1 <> Ast.PWild)
+                   spec_rows
+               in
+               let sub =
+                 compile_match dest (t_h :: t_t :: occs_rest) spec_rows
+               in
+               let sub =
+                 if used_t then KSeq (KTail (t_t, occ), sub) else sub
+               in
+               if used_h then KSeq (KHead (t_h, occ), sub) else sub
+             end
+             else begin
+               if default_rows = [] then
+                 failwith
+                   "match lowering: list column without a :: or \
+                    default row — typing exhaustiveness invariant \
+                    broken";
+               compile_match dest occs_rest default_rows
+             end
+           in
+           let t_c = new_temp () in
+           let t_b = new_temp () in
+           KLet (t_c, KInt (-1),
+             KLet (t_b, KBinOp (Ast.Eq, occ, t_c),
+               KIf (t_b, then_k, else_k)))
        | Ast.PWild | Ast.PVar _ -> assert false)
 
 let normalize e =

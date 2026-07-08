@@ -1,0 +1,92 @@
+(* Phase D / D6 exit tests: [] and h :: t as patterns on a TList
+   scrutinee (§13.5 D6 note — the list fast path is kept; only the
+   pattern surface is new). Each entry point returns an int per §4.4's
+   public-entry contract and is driven by /tmp/mcaml_out/
+   test_list_match.py, which also asserts the arena-reset
+   post-conditions and greps test_wild_tail for the absence of a
+   cons_tail read.
+
+   Ctor-in-list patterns (Circle(r) :: t) are deliberately absent:
+   untypeable in v1 — B2's monomorphic int lists reject non-int heads
+   at ::, so no such list can be constructed. Revisit in Phase E.
+
+   Expected $ret values:
+     test_dispatch_nil    ->  11
+     test_dispatch_cons   ->  22
+     test_binders         -> 709
+     test_wild_tail       ->   7
+     test_sum_match       ->  15
+     test_list_in_ctor    -> 736
+     test_int_lit_heads   -> 207
+     test_nested_cons     ->  59 *)
+
+type shape = Empty | Box of list
+
+(* Tail-recursive sum via match — subsumes the is_nil/head/tail idiom
+   (test_cons.mcaml's sum_list). The self-call in the cons arm is in
+   tail position, so tco.ml rewrites it into an in-function loop. *)
+fun sum_match (l: list, acc: int) : int =
+  match l with
+  | [] -> acc
+  | h :: t -> sum_match(t, acc + h)
+
+(* []/cons dispatch: nil arm taken. *)
+fun test_dispatch_nil () : int =
+  match [] with
+  | [] -> 11
+  | _ :: _ -> 22
+
+(* []/cons dispatch: cons arm taken. *)
+fun test_dispatch_cons () : int =
+  match 5 :: [] with
+  | [] -> 11
+  | _ :: _ -> 22
+
+(* Binder patterns: h and t both bound; t consumed by a builtin
+   (head/tail stay available alongside match). *)
+fun test_binders () : int =
+  match 7 :: 9 :: [] with
+  | [] -> 0
+  | h :: t -> h * 100 + head(t)
+
+(* Wildcard tail: the decision tree must emit NO cons_tail read for
+   the _ sub-pattern (used-fields filter; harness greps for this). *)
+fun test_wild_tail () : int =
+  match 7 :: 8 :: [] with
+  | [] -> 0
+  | h :: _ -> h
+
+fun test_sum_match () : int =
+  sum_match(1 :: 2 :: 3 :: 4 :: 5 :: [], 0)
+
+(* Nested list-in-ctor: a list pattern under an ADT constructor.
+   Box([]) and Box(h :: t) discriminate on the SAME occurrence — one
+   tag-free nil test after the ctor dispatch. *)
+fun unbox (s: shape) : int =
+  match s with
+  | Empty -> -1
+  | Box([]) -> 0
+  | Box(h :: t) -> h * 100 + sum_match(t, 0)
+
+fun test_list_in_ctor () : int =
+  unbox(Box(7 :: 20 :: 16 :: []))
+
+(* Int-literal head sub-patterns: PInt column nested under a cons. *)
+fun classify (l: list) : int =
+  match l with
+  | [] -> 100
+  | 1 :: _ -> 200
+  | h :: _ -> 300 + h
+
+fun test_int_lit_heads () : int =
+  classify(1 :: 9 :: []) + classify(2 :: []) / 100 + classify([]) / 25
+
+(* Nested cons patterns: two-deep dispatch on one scrutinee. *)
+fun second_or (l: list, dflt: int) : int =
+  match l with
+  | [] -> dflt
+  | _ :: [] -> dflt
+  | _ :: b :: _ -> b
+
+fun test_nested_cons () : int =
+  second_or(3 :: 42 :: 9 :: [], 0) + second_or(8 :: [], 17)

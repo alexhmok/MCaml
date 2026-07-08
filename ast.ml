@@ -19,6 +19,12 @@ type pattern =
   | PVar of string                     (* binds the scrutinee (sub)value *)
   | PInt of int                        (* integer literal pattern *)
   | PCtor of string * pattern list     (* constructor pattern, possibly nested *)
+  (* D6: builtin-list patterns. Dedicated variants, NOT PCtor with magic
+     names — Nil/Cons must stay out of ctor_info so they can never leak
+     into expression typing's ctor fallback and allocate {tag:0} cells
+     behind the -1 sentinel ABI (§13.5 D6 note). *)
+  | PNil                               (* [] — matches the -1 sentinel *)
+  | PCons of pattern * pattern         (* h :: t *)
 type binop = Add | Sub | Mult | Div | Mod
            | FMult | FDiv                 (* Phase N: Q16.16 fixed-point multiply/divide *)
            | Eq | Neq | Lt | Leq | Gt | Geq | And | Or

@@ -62,6 +62,7 @@ let pattern_of_id name =
 %type <Ast.expr list> expr_semi_list
 %type <Ast.expr list> nonempty_expr_semi_list
 %type <Ast.pattern> pattern
+%type <Ast.pattern> atom_pattern
 %type <Ast.pattern list> pattern_comma_list
 %type <(Ast.pattern * Ast.expr) list> match_arms
 %type <Ast.pattern * Ast.expr> match_arm
@@ -213,7 +214,17 @@ match_arm:
      innermost match. */
   | p = pattern ARROW body = expr %prec BELOW_BAR { (p, body) }
 
+/* D6: `::` in pattern position. A layered grammar (atom / cons chain)
+   gives right associativity without touching the expr-level %right CONS
+   declaration — pattern position is disjoint from expr position (only
+   after `with` / `|`), so no conflict with expr `::` and no BELOW_BAR
+   interaction: the CONS token inside a pattern is consumed before ARROW
+   is ever seen. */
 pattern:
+  | p = atom_pattern CONS rest = pattern { PCons(p, rest) }
+  | p = atom_pattern { p }
+
+atom_pattern:
   | i = INT { PInt i }
   | name = ID { pattern_of_id name }
   | name = ID LPAREN ps = pattern_comma_list RPAREN
@@ -222,6 +233,7 @@ pattern:
             "pattern %s(...): only constructors (Capitalized) can take \
              arguments in a pattern" name);
         PCtor(name, ps) }
+  | LBRACK RBRACK { PNil }
   | LPAREN p = pattern RPAREN { p }
 
 pattern_comma_list:

@@ -923,7 +923,43 @@ which is MineTorch's project, not MCaml's.
       Suite 66/66; five canaries byte-identical; all four /tmp
       harnesses green — ICons still 5 cmds, IHead/ITail still 3,
       region budgets unchanged.)
-- [ ] D6. Retire `TList`/`Cons`/`Nil`/`head`/`tail`/`is_nil` special cases; relower lists onto `type 'a list = Nil | Cons of 'a * 'a list` (or keep the fast path for ints as an optimization, decide in D6)
+- [x] D6. Retire `TList`/`Cons`/`Nil`/`head`/`tail`/`is_nil` special cases; relower lists onto `type 'a list = Nil | Cons of 'a * 'a list` (or keep the fast path for ints as an optimization, decide in D6)
+      (Decided AGAINST retirement — option (b) of §8.10, documented in
+      §13.5 before implementation: the TList runtime is committed ABI
+      that full retirement would regress (per-mention {tag:0} nil
+      cells, +3 cmds on is_nil, C5 walker rewrite — a §13 escalation
+      with no win). What landed instead: `[]` and `h :: t` as PATTERNS
+      on a TList scrutinee, via dedicated `PNil`/`PCons` AST variants
+      (NOT ctor_info entries — Nil/Cons stay out of the nominal-ADT
+      namespace so expression typing can never allocate cells behind
+      the -1 sentinel). Parser: layered pattern grammar (atom / cons
+      chain) gives right-assoc `::` in pattern position with ZERO new
+      menhir conflicts and no BELOW_BAR interaction (pattern CONS is
+      consumed before ARROW is seen). Typing: check_pattern arms
+      (PCons = [TInt; TList TInt], v1 monomorphic), specialize_nil/
+      specialize_cons matrices, and a two-ctor complete-signature
+      test in `useful` — witnesses are exact: missing-[] reports
+      `[]`, missing-:: reports `(_ :: _)`, nested gaps report e.g.
+      `(_ :: (_ :: _))` and `(2 :: [])`. knormal compile_match: TList
+      column dispatches on the existing 2-cmd Eq-against--1 HANDLE
+      compare (no tag read, ever — a non-nil handle always points at
+      a tag-1 cell); cons sub-occurrences read through the existing
+      KHead/KTail (3 cmds each) under the same used-fields filter as
+      KFieldGet, so `h :: _` emits NO cons_tail dispatch (pinned by
+      grep in the harness). Zero new IR ops, zero codegen/optimizer/
+      sim changes. head/tail/is_nil builtins stay for straight-line
+      code; match subsumes the is_nil/head/tail traversal idiom.
+      Ctor-in-list patterns are untypeable in v1 (B2: `::` rejects
+      non-int heads) — Phase E's job. Verified: probe CFG dump +
+      command counts BEFORE suite work (nil arm = 2-cmd compare, cons
+      arm = 3-cmd reads, wildcard elision); scripts/test_list_match
+      .mcaml (8 entries: []/cons dispatch, binders, wildcard tail,
+      tail-recursive sum via match, list-in-ctor, int-literal heads,
+      nested cons) + /tmp/mcaml_out/test_list_match.py harness
+      (uncommitted, D9 conventions: $ret + §4.4 post-conditions +
+      wildcard grep + inexhaustive-rejection probe). Suite 66/66 +
+      async; all five prior /tmp harnesses green; five canaries
+      byte-identical; ICons/IHead/ITail budgets untouched.)
 
 > Post-D4/D5 in-game MANUAL_TEST.md check completed 2026-07-08:
 > combined test_adts + test_cons pack loaded clean, all probed entry
