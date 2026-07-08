@@ -1318,8 +1318,91 @@ self-recursion with source-order generalization.
       Phase D 40/40, Phase E 42/42+12 probes, all nine `/tmp` harnesses,
       five canaries byte-identical (verified against
       `canary_hashes_f_baseline.txt`).)
-- [ ] F3. Escape analysis pass over `fn_table` (runs between Phase 2a inline and Phase 2b monomorphize). Produces per-lambda classification `{Known | Escaping of reason}`
-- [ ] F4. Specialization pass: whole-program defunctionalization for `Known` lambdas; clone HOFs per unique closure that flows in. Respects `MCAML_SPECIALIZE_LIMIT` (default K=8) and falls back to apply-dispatch when the budget is hit
+- [x] F3+F4. Escape analysis + specialization. (Session 3, commit
+      `48dc9c3`. **F2 completion, done first as this session's own
+      prerequisite** (the gap the session-3 kickoff itself flagged):
+      knormal's `Closure`/App-through-`closure_env` failwith stubs are
+      replaced with a real, uniform, pre-classification lowering — new
+      `KClosureMake`/`KApply` kexpr forms and `IClosureMake`/`IApply`
+      CFG ops (§13.12 decision 6, full writeup below), threaded through
+      every exhaustive-match consumer (dce, copy_prop, regalloc_cfg,
+      unroll, const_fold, sroa ×2, inline, monomorphize, cost,
+      codegen_cfg's loud F5-deferred stub). A dedicated
+      `Let (x, Closure (fname, caps), e2)` knormal arm seeds
+      `closure_env` for direct-lambda let-bindings (mirrors the
+      existing `Let (x, Ref e1, e2)` arm); a defensive
+      `Hashtbl.mem Typing.fun_sigs f` check in the generic `App` arm
+      turns the one knowingly-out-of-v1-scope case (a let-bound HOF-
+      factory return, e.g. `let g = make_adder(5) in g(10)` — knormal
+      has no per-variable type environment to detect this shape) into
+      a loud compile error instead of a silent wrong `KCall`.
+
+      New module `closure_spec.ml` (F3+F4 together — implemented as one
+      pass, not two, since the classification and the rewrite share the
+      same def-tracing walk; see decision 6) runs between `Inline.run`
+      and `Monomorphize.run` (`main.ml:212-224`). Same-function case:
+      an `IApply` whose closure operand is defined *exactly once* in
+      the owning function (cfg_func is non-SSA; a branch-merged def is
+      conservatively unresolvable — no reaching-definitions analysis
+      needed for a write-once vreg) and traces, through single-def
+      `ICopy` chains, to one `IClosureMake`, rewrites in place to an
+      ordinary `ICall` — no cloning. Cross-function single-hop case: a
+      call argument at a TFun-typed parameter position that resolves
+      the same way, where the callee uses that parameter throughout its
+      own body *only* as the closure-operand of its own `IApply`s (no
+      ref-store/return/self-tail-forward/re-passed-to-another-call —
+      all conservatively disqualifying), clones the callee once per
+      (callee, resolved lambda identities) key, capped by
+      `MCAML_SPECIALIZE_LIMIT` (default 8) clones per source callee.
+      **Bug found and fixed during implementation**: the first version
+      left the original TFun parameter slot's type unchanged in the
+      clone, so the very next fixed-point iteration re-detected the
+      same already-specialized position as fresh and re-cloned it,
+      nesting mangled names until `iter_cap` cut it off — fixed by
+      retiring the resolved position's type to `TInt` in the clone.
+      **Second bug found and fixed**: leaving the original closure
+      argument in place at the redirected call site kept the
+      originating `IClosureMake` artificially live for DCE (an unread
+      but still-passed argument still counts as a use) — fixed by
+      replacing that argument with a fresh dummy `IConst 0` instead of
+      dropping-and-renumbering the whole parameter list. Fully
+      specialized-away originals (zero remaining internal callers) are
+      retired via `is_template <- true`, reusing the existing "never
+      emitted directly" plumbing — justified because a TFun-typed
+      parameter, unlike every other param type, can never be supplied
+      by an external datapack invocation (`tools/README.md`'s
+      entrypoint convention sets scores via `/scoreboard`, which cannot
+      construct a closure cell), so such a function is only a genuine
+      public entry point if something inside the program still calls
+      it.
+
+      Verified end-to-end in `scripts/test_lambdas.mcaml` /
+      `/tmp/mcaml_out/test_lambdas.py`: a same-function immediate
+      invocation and a cross-function HOF (`apply_twice`-style), both
+      with and without captures, all fully specialize (grep confirms
+      zero `apply`/`closure(`/`obj_tag`/`obj_f` anywhere in the
+      compiled output) with correct runtime `$ret` values under sim.py.
+      An ambiguous-merge Escaping probe (`if c then lam1 else lam2`
+      feeding a HOF parameter — two distinct `IClosureMake`s reaching
+      the same vreg, so def-count ≠ 1) correctly fails loudly at the
+      F5-deferred codegen stub rather than silently miscompiling.
+      Full battery green: suite 66/66+async, Phase D 40/40, Phase E
+      42/42+12 probes, all nine `/tmp` harnesses, five canaries
+      byte-identical.
+
+      **What's Known (fully specialized, zero apply-dispatch) after
+      this session**: a lambda passed directly as a call argument or
+      let-bound then called, either within one function or across a
+      single HOF call boundary, with or without captures — reached
+      whether or not `Inline.run` happens to have already collapsed the
+      intervening call. **What still hits the F5-deferred stub
+      (Escaping in v1's conservative sense)**: a closure read back out
+      of a `ref`, returned from a function and then called, forwarded
+      through *two or more* HOF parameter hops, forwarded across a
+      self-tail-recursive back-edge, arriving via ambiguous control-flow
+      merge, or beyond `MCAML_SPECIALIZE_LIMIT` — every one of these
+      fails LOUDLY (compile-time error), never silently.)
+- [ ] F4-followup. Drop-and-renumber the retired parameter slot instead of passing a dummy zero (currently a harmless one-extra-argument-pass per specialized call, not a correctness issue — deferred, not required for the zero-cost claim since the dummy-argument fix already makes the originating IClosureMake DCE-able)
 - [ ] F5. Apply-dispatch runtime for escaping lambdas: a closure objpool (reuse Phase D's objpool), the `mcaml:apply` macro-dispatch function, env-unpack prelude at lifted function entry
 - [ ] F6. Diagnostics: `[closure]` per-lambda report (specialized vs escaping + reason + cost estimate); `MCAML_STRICT_HOT=1` env knob to promote escaping-in-hot-loop to a compile error; `cost.ml` integration so `tick_split`/`tick_guard` budgets account for apply-dispatch cost
 - [ ] F7. Tests: literal lambdas in HOFs specialize; closures captured in ADTs take the apply path; strict-hot mode fires on the right patterns
@@ -3085,7 +3168,148 @@ which case say so explicitly rather than silently skipping F5's own
 kickoff).
 ```
 
+### 8.17 Phase F session 4 kickoff (F5 — apply-dispatch runtime)
+
+```
+Read DYNMEM_PLAN.md §2 for current status (Phases A–E, M/N/Math, G4,
+and Phase F sessions 2–3 (F1–F4) are all closed; F3+F4 landed in commit
+`48dc9c3` — implementation — plus a separate plan-doc commit documenting
+decision 6 and updating §2's Phase F checklist). Read §13.12 in full,
+especially decision 6 (the closure lowering boundary this session's own
+predecessor had to invent: why `IClosureMake` is NOT side-effecting,
+and what that implies about which instances survive to codegen) and
+decision 5 (the `IApply` cost formula, `MCAML_STRICT_HOT`'s home in
+`optimize.ml`/Phase 3, not typing). Read §13.6 (specialize-aggressively/
+fall-back-gracefully) and §13.5 (closure cell layout, tag `-2`, unified
+objpool). Read CLAUDE.md for the pipeline and manual rebuild command
+(add `closure_spec.cmo` between `inline.cmo` and `const_fold.cmo` if not
+already present in your working copy — session 3 wired it into
+`main.ml` between `Inline.run` and `Monomorphize.run`). Verify `git
+status` is clean before starting.
+
+**What F3+F4 leaves for you.** `closure_spec.ml` fully resolves two
+shapes to zero-cost ordinary `ICall`s (same-function immediate
+invocation, and cross-function single-hop through one HOF parameter,
+both with and without captures) — verified in
+`scripts/test_lambdas.mcaml`. Everything else is deliberately left as a
+surviving `IClosureMake`/`IApply` pair that hits a loud
+`codegen_cfg.ml` stub the instant it's actually compiled:
+`(!r_holding_a_closure)(...)`-style ref-then-call patterns (these
+currently fail EARLIER, at knormal's defensive `Typing.fun_sigs`
+membership check, with a related but distinctly-worded message — see
+decision 2's v1 scope note and the F2-completion entry in §2 — not at
+the F5 stub; if F5's design changes what knormal accepts, re ecamine
+that check), lambdas forwarded through two or more HOF parameter hops,
+lambdas forwarded across a self-tail-recursive back-edge, lambdas
+merged from ambiguous control flow (`if c then lam1 else lam2` — the
+`test_lambdas.py` harness's own reject probe exercises exactly this),
+and anything beyond `MCAML_SPECIALIZE_LIMIT` (default 8) clones of one
+source callee. F5's job is to make EVERY ONE of these actually compile
+and run correctly via real apply-dispatch, not to re-litigate which
+ones F3+F4 should have specialized instead (that boundary is settled;
+extending it is a legitimate FUTURE follow-up, not F5's task).
+
+**F5 scope, concretely:**
+1. Closure cell layout (§13.5, decision 4): `{tag: -2, code, env_0,
+   env_1, ...}` in the unified objpool (`mcaml:objpool cells`, the same
+   pool ADTs/tuples/records/cons cells already share). `code` needs a
+   concrete encoding — an integer identifying which lifted lambda
+   helper to dispatch to. Decide (and document, following the exact
+   decision-record protocol every prior sub-decision in this plan
+   used): is `code` a small dense integer assigned per-lambda-helper
+   at compile time (a new global table, lambda helper name → code),
+   or the helper's already-existing name hashed/interned some other
+   way? Whichever you pick, `codegen_cfg.ml`'s `IClosureMake` lowering
+   needs to actually allocate this cell (mirrors `cmd_adt_alloc`'s
+   existing `IAdtAlloc` lowering almost exactly — read
+   `codegen_helpers.ml`'s `cmd_adt_alloc` before writing a new one).
+2. `mcaml:apply` macro-dispatch function: given a closure handle and a
+   fixed argument-count convention, reads the cell's `code` field,
+   dispatches to the corresponding lifted lambda helper. Since
+   Minecraft has no runtime function-pointer/computed-goto primitive,
+   this is necessarily a `execute if score $code matches N run function
+   mcaml:<helperN>` chain (or an `execute store` into a macro token
+   dispatched via `function ... with storage`, mirroring the existing
+   macro-getter pattern in `codegen_helpers.ml` for arrays/cons/ADTs —
+   read that pattern before inventing a new one). Decide whether the
+   dispatch chain is one shared function covering EVERY closure-typed
+   call site program-wide (simplest, but every call site pays the cost
+   of testing against every possible `code` value in the worst case)
+   or synthesized per distinct "closure shape signature" seen at
+   `IApply` sites (narrower chains, more generated files) — this is
+   exactly the kind of design question §13's escalation protocol wants
+   surfaced and decided before implementation, not improvised mid-way.
+3. Env-unpack prelude: a lifted lambda helper (`<parent>__lamN`) today
+   takes its captures as ordinary LEADING parameters (for_lift's
+   existing lifting convention, unchanged since F2) — when invoked via
+   `mcaml:apply` rather than a direct `ICall`, something has to read
+   `env_0, env_1, ...` back OUT of the cell and INTO those leading
+   params before controls transfers. Decide where this unpacking lives:
+   inside `mcaml:apply` itself (one unpack per dispatch, parameterized
+   by captured-count) or as a per-helper thin wrapper function. Cost
+   this against decision 5's `IApply` pricing (`4 + 2 *
+   K_max_captured`) — you likely need to actually COMPUTE
+   `K_max_captured` now (a single whole-program constant: the max
+   captured-variable count across every closure shape that survives to
+   an `IApply` site after F3+F4 has run) rather than the placeholder 0
+   session 3 left in `cost.ml`'s `IApply` arm (grep for "K_max_captured"
+   there — it's flagged as exactly this session's task).
+4. `IClosureMake`/`IApply` lowering in `codegen_cfg.ml`: replace both
+   loud stubs (search for "lands in F5" — there are two, one per op)
+   with real command emission using the mechanisms above.
+
+**Guardrails, extending session 3's own battery:**
+- Baseline BEFORE the first edit: rebuild per CLAUDE.md; the same full
+  battery session 3 ran (suite 66/66+async, Phase D 40/40, Phase E
+  42/42+12, all nine `/tmp` harnesses) plus `scripts/test_lambdas.mcaml`
+  via `/tmp/mcaml_out/test_lambdas.py` (uncommitted — recreate it from
+  this session's description if it's not in your working `/tmp` state)
+  — all green, five canaries byte-identical (this session's own
+  reproducible hash method: `cat <dir>/*.mcfunction | sort | sha256sum`
+  per script; there is no committed canary-hash file to diff against,
+  regenerate and compare against your own pre-edit run).
+- The five canaries must STILL be byte-identical after F5 lands — F5 is
+  new machinery that only fires on Escaping closures, and the canary
+  programs contain none.
+- `scripts/test_lambdas.mcaml`'s four Known-path entries must STILL
+  compile to the exact zero-apply-dispatch output session 3 verified
+  (grep for `apply`/`closure(`/`obj_tag`/`obj_f` — none should appear)
+  — F5 must not regress F3+F4's zero-cost path by, e.g., accidentally
+  routing a Known closure through apply-dispatch.
+- Add NEW test coverage for each Escaping shape F5 makes real:
+  ref-stored-then-called (once F5 also decides whether to lift
+  knormal's current defensive-reject on this pattern — that's a
+  legitimate scope question THIS session should explicitly decide, not
+  silently leave stubbed), multi-hop-forwarded, ambiguous-merge (the
+  existing reject probe should now compile and RUN instead of
+  rejecting — turn it into a positive test), and budget-exceeded (>8
+  distinct closures into one HOF, forcing the fallback path).
+- If any of this forces a §3 decision to bend, or reopens decision 6's
+  "IClosureMake is not side-effecting" tradeoff, STOP and flag it per
+  §13 — don't special-case through it silently.
+
+After the session: update §2 with commit hashes (decision-record commit
+separate from implementation, same discipline as every prior phase),
+leave the tree green, and note in §2 whether F5 closes EVERY Escaping
+shape from session 3's list or whether some (e.g. ref-then-call) are
+deliberately deferred further with their own loud stub. F6
+(diagnostics, `MCAML_STRICT_HOT`) is explicitly optional this session —
+land it only if it falls out naturally, per the original F kickoff's
+own framing; do not scope-creep into it if it doesn't.
+```
+
 ## 9. Rollback and A/B flags
+
+**[LANDED 2026-07-08]** `MCAML_NO_M3A=1` (skip the const_fold/copy_prop/
+local_cse/dce fixed point — both sweeps) and the umbrella `MCAML_O0=1`
+(unoptimized baseline: implies NO_INLINE + NO_M3A + NO_LICM + NO_SR +
+NO_UNROLL + NO_SROA). Every pass kill switch now reads through
+`Cfg.pass_disabled`, so O0 is enforced in one place. O0 deliberately
+does NOT touch monomorphize (array-param programs need it to compile),
+tick_split, or tick_guard (server-protection mechanisms) — disable the
+tick mechanisms separately on BOTH sides of a comparison if needed.
+All three suites (66 + 40 + 42-check) verified green under sim at
+NO_M3A and at O0; default output byte-identical.
 
 Add these environment flags in the same style as the existing
 `MCAML_NO_*` toggles (CLAUDE.md "Build & run" section):
@@ -4037,6 +4261,75 @@ through to this per-function Phase 3 check (a side table keyed by
 function+block+instruction-index vs. embedding the reason string
 directly in `IApply`) is left as an F3/F6 implementation choice, not
 decided here.
+
+**6. Closure lowering boundary (session 3's own prerequisite decision,
+not one of the original five — surfaced by the session-3 kickoff, not
+assumed away).** knormal must lower `Closure` construction and closure
+application UNIFORMLY, before F3 has run: F3 needs whole-`fn_table`
+(post-inline) visibility to classify Known vs Escaping, but knormal
+runs per-function in Phase 1, long before Inline.run or F3 exist for
+that program. So knormal cannot special-case on the classification at
+lowering time — it has to emit ONE shape that works for both outcomes,
+and F3+F4 rewrite away the Known instances afterward.
+
+Investigated first, per the kickoff's own instruction, whether Known
+closures could avoid a real IR-level representation entirely by
+mirroring the EXISTING `"#arr:<aid>"` array pseudo-arg (a compile-time-
+only token riding in an `ICall`'s arg-string position, never a real
+runtime value). Rejected: the array pseudo-arg works because static
+arrays are NEVER first-class runtime values in this language at all —
+no vreg ever holds "the array", only element reads/writes reference a
+compile-time storage id — so a syntactic, per-call-site, single-
+function-scope substitution at knormal time is always sufficient
+(confirmed by reading knormal.ml's `bind_args`, `knormal.ml:823-829`).
+Closures are different by construction (§13.12 decision 2 explicitly
+requires let-binding, returning, and ref-storing a lambda to work) —
+a real runtime int handle is required from the very first lowering,
+because whether a given construction turns out Known or Escaping is a
+WHOLE-PROGRAM, post-inline question that knormal (per-function,
+pre-inline) cannot answer yet. A syntactic pseudo-arg trick therefore
+cannot decide "no real value" soon enough; the uniform representation
+has to be a genuine value-producing op.
+
+Concretely: `IClosureMake of vreg * string * vreg list` (dest, lambda
+helper name, captured vregs) and `IApply of vreg option * vreg * vreg
+list` (dest, closure vreg, args) in `cfg.ml`, decision 5's `IApply`
+finally minted. The one load-bearing follow-on choice: **is
+`IClosureMake` side-effecting (never DCE'd, mirroring `IAdtAlloc`/
+`ICons`'s "allocation is itself an observable event" treatment) or not
+(mirroring `IBinOp`/`ICopy`)?** Marking it side-effecting would have
+been the "safe by analogy" choice, but verified against `dce.ml`
+directly (`is_side_effecting`) that doing so would silently defeat
+§13.6's "Known lambdas cost zero at runtime" claim: if `IClosureMake`
+can never be dropped even when its result becomes unread, a Known
+closure's cell allocation survives to codegen regardless of how
+aggressively F4 specializes away its consumer, because nothing would
+ever be allowed to remove it. Chose NOT side-effecting instead —
+correct because, unlike `IAdtAlloc`'s cell (whose allocation event is
+part of the language's user-visible allocation semantics, coupled to
+the region-truncation byte count), `IClosureMake` commits to no runtime
+representation at all at this IR level: it is a pure value descriptor
+until F5's codegen decides how a SURVIVING instance actually gets
+lowered. A construction whose result is genuinely never read is dead
+code, full stop — ordinary liveness-based DCE already gets this right
+for every other non-side-effecting op, and doing the same here is what
+makes F4's rewrite (`IApply` → `ICall`, dropping the last use of the
+originating `IClosureMake`) turn into REAL zero-cost specialization
+via the very next M3a fixed point, with no bespoke removal logic
+needed in `closure_spec.ml` itself. `IApply` IS marked side-effecting
+(mirrors `ICall`: calling through an unresolved value may run arbitrary
+code regardless of whether its result is read).
+
+This is the one place this session's implementation directly overrode
+a first (wrong) instinct after building it and testing against
+`dce.ml`'s actual mechanics rather than assuming the `IAdtAlloc`
+analogy carried over unchanged — recorded here because a future session
+touching `IClosureMake`'s codegen lowering (F5) needs to know this
+non-side-effecting choice is why LEFTOVER-Escaping instances (that
+DID survive to codegen) are exactly the ones F5 must give a real
+lowering to, and why nothing upstream of codegen may ever start
+treating `IClosureMake` as side-effecting without re-opening this
+tradeoff.
 
 Behaviors that MUST survive (restated from §8.13, now grounded): every
 §13.10/§13.11 decision including the tvar single-int amendment; zero
