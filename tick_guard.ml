@@ -10,21 +10,51 @@
 
    The fix is a per-iteration tick guard inserted at the entry of every
    TCO'd self-recursive function. The recursive function increments
-   [$tick_iters] on entry; when it crosses [MCAML_LOOP_ITER_LIMIT], the
-   counter is reset, the function self-schedules for the next tick via
-   [schedule function mcaml:<self> 1t], and returns early. State
-   ([param_N] slots, [storage mcaml:heap], [storage mcaml:stk]) survives
-   the tick boundary automatically, so the next tick resumes the loop
-   from exactly where it left off.
+   its PER-LOOP counter on entry; when the counter crosses the per-loop
+   limit, the counter is reset, the function self-schedules for the
+   next tick via [schedule function mcaml:<self> 1t], and returns
+   early. State ([param_N] slots, [storage mcaml:heap], [storage
+   mcaml:stk]) survives the tick boundary automatically, so the next
+   tick resumes the loop from exactly where it left off.
+
+   Per-loop counters (not one shared [$tick_iters]) are important for
+   correctness when loops nest: if an inner TCO'd loop and its
+   enclosing outer TCO'd loop share a counter, the inner loop's yield
+   fires on the outer's iterations too, and a mid-inner-iteration yield
+   leaves the outer's accumulator with a partial sum. Stage 9 of
+   MineTorch surfaced this: the MNIST matmul's inner k-loop yielded
+   spuriously under the outer j-loop, corrupting every [h1_pre[j]]
+   cell by a few LSBs. Per-loop counters (one [$tick_iters_<fname>]
+   per guarded function) isolate the yield budget to the loop that
+   actually overflowed.
+
+   The per-loop LIMIT is also computed per-function: each guarded loop
+   has its own per-iteration body cost (from [Cost.estimate_block]),
+   and the limit is [MCAML_TICK_COMMANDS / body_cost] so that executing
+   [limit] iterations of that particular body fits within a single
+   [maxCommandChainLength] worth of commands. A cheap loop (~5 cmd/iter)
+   gets a much higher iteration budget than an expensive one (~100
+   cmd/iter).
+
+   Env vars:
+     MCAML_TICK_COMMANDS=N    per-tick command budget (default 60000,
+                              safely under vanilla 65536 and tunable up
+                              to the gamerule-bumped ceiling of 100M
+                              for nano-GPT-scale targets)
+     MCAML_LOOP_ITER_LIMIT=N  legacy global override — if set, applies
+                              uniformly to every guarded loop regardless
+                              of its per-iter cost (backwards compatible
+                              with older test scripts)
+     MCAML_NO_TICK_GUARD=1    disable tick_guard entirely (A/B testing)
 
    This pass operates at the FILE level (post-codegen, post-tick_split)
    so the guard's commands are not double-counted by the splitter. The
    four prepended commands:
 
-       scoreboard players add $tick_iters vars 1
-       execute if score $tick_iters vars matches <N>.. run scoreboard players set $tick_iters vars 0
-       execute if score $tick_iters vars matches 0 run schedule function mcaml:<self> 1t
-       execute if score $tick_iters vars matches 0 run return 0
+       scoreboard players add $tick_iters_<fname> vars 1
+       execute if score $tick_iters_<fname> vars matches <N>.. run scoreboard players set $tick_iters_<fname> vars 0
+       execute if score $tick_iters_<fname> vars matches 0 run schedule function mcaml:<self> 1t
+       execute if score $tick_iters_<fname> vars matches 0 run return 0
 
    Note the `matches 0` guard on lines 3 and 4 — line 2 resets the counter
    to 0 only when the budget was reached, so subsequent commands keying
@@ -41,37 +71,61 @@
    the wrapper is [<fname>] (runs preheader once) and the body is
    [<fname>__body] (which every self-[TTail] re-enters). The guard must
    live in [<fname>__body] so it fires on every iteration; otherwise the
-   counter would only ever reach 1 and the loop would never split.
+   counter would only ever reach 1 and the loop would never split. *)
 
-   Disable via [MCAML_NO_TICK_GUARD=1] for A/B measurement. *)
+let default_tick_commands = 60000
+let default_iter_limit_fallback = 1024
 
-let default_iter_limit = 1024
+let tick_commands () : int =
+  try
+    let s = Sys.getenv "MCAML_TICK_COMMANDS" in
+    let n = int_of_string s in
+    if n < 1 then 1 else n
+  with Not_found | Failure _ -> default_tick_commands
 
-let iter_limit () : int =
+let legacy_iter_limit_override () : int option =
   try
     let s = Sys.getenv "MCAML_LOOP_ITER_LIMIT" in
     let n = int_of_string s in
-    if n < 1 then 1 else n
-  with Not_found | Failure _ -> default_iter_limit
+    Some (if n < 1 then 1 else n)
+  with Not_found | Failure _ -> None
+
+(* Per-loop iter limit. If the legacy MCAML_LOOP_ITER_LIMIT is set, it
+   wins uniformly. Otherwise compute budget/body_cost, charging a
+   small fixed overhead for the guard itself so the total chain stays
+   under the per-tick budget. Clamped to ≥1 (can't yield before the
+   first iteration runs at all) and to a reasonable ceiling so runaway
+   cost estimates (body_cost=0 edge cases) don't yield an absurdly
+   high limit that wraps or burns the budget. *)
+let guard_overhead = 4  (* the 4 guard commands themselves *)
+let max_limit = 1_000_000_000  (* ~1B, well under int32 *)
+
+let compute_limit ~(body_cost : int) : int =
+  match legacy_iter_limit_override () with
+  | Some n -> n
+  | None ->
+      let budget = tick_commands () in
+      let per_iter = max 1 (body_cost + guard_overhead) in
+      let n = budget / per_iter in
+      max 1 (min max_limit n)
 
 let disabled () : bool =
   try Sys.getenv "MCAML_NO_TICK_GUARD" = "1" with Not_found -> false
 
-(* The four guard commands prepended at the entry of [target_fname]. The
-   `target_fname` is the function name used in [function mcaml:<...>]
-   dispatch from the back-edge — that's the function the schedule must
-   re-invoke a tick later, so its name parameterizes the [schedule]
-   command. *)
+let counter_for (fname : string) : string = "$tick_iters_" ^ fname
+
+(* The four guard commands prepended at the entry of [target_fname]. *)
 let guard_cmds ~(target_fname : string) ~(limit : int) : string list =
+  let ctr = counter_for target_fname in
   [
-    "scoreboard players add $tick_iters vars 1";
+    Printf.sprintf "scoreboard players add %s vars 1" ctr;
     Printf.sprintf
-      "execute if score $tick_iters vars matches %d.. run scoreboard players set $tick_iters vars 0"
-      limit;
+      "execute if score %s vars matches %d.. run scoreboard players set %s vars 0"
+      ctr limit ctr;
     Printf.sprintf
-      "execute if score $tick_iters vars matches 0 run schedule function mcaml:%s 1t"
-      target_fname;
-    "execute if score $tick_iters vars matches 0 run return 0";
+      "execute if score %s vars matches 0 run schedule function mcaml:%s 1t"
+      ctr target_fname;
+    Printf.sprintf "execute if score %s vars matches 0 run return 0" ctr;
   ]
 
 (* Pick the file name to inject the guard into for a guarded function
@@ -91,15 +145,18 @@ let prepend_to (files : (string * string list) list) (target : string)
     (fun (n, cmds) -> if n = target then (n, extra @ cmds) else (n, cmds))
     files
 
-let run ~(guarded : string list) (files : (string * string list) list)
+(* [guarded] is now a list of (function_name, per_iter_body_cost). The
+   per-iter cost comes from [Cost.estimate_block] over the reachable
+   blocks of the CFG; main.ml computes it just before emitting the
+   CFG to files, where it still has the CFG in scope. *)
+let run ~(guarded : (string * int) list) (files : (string * string list) list)
     : (string * string list) list =
   if disabled () || guarded = [] then files
-  else begin
-    let limit = iter_limit () in
+  else
     List.fold_left
-      (fun acc fname ->
+      (fun acc (fname, body_cost) ->
         let target = entry_file_name acc fname in
+        let limit = compute_limit ~body_cost in
         let cmds = guard_cmds ~target_fname:target ~limit in
         prepend_to acc target cmds)
       files guarded
-  end

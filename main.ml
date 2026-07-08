@@ -300,7 +300,10 @@ let () =
        function that is its own self-tail-call target — those need a
        tick guard prepended in Phase 5. *)
     let all_files : (string * string list) list ref = ref [] in
-    let guarded_funs : string list ref = ref [] in
+    (* Each entry is (function_name, per_iter_body_cost_in_commands).
+       Tick_guard uses the cost to compute a per-loop iteration limit
+       so the generated chain stays under MCAML_TICK_COMMANDS per tick. *)
+    let guarded_funs : (string * int) list ref = ref [] in
     (* Only count reachable blocks: the unroller replaces a
        TTail-terminated body with cloned per-iteration blocks and
        redirects the header to the first iteration, but leaves the
@@ -334,7 +337,20 @@ let () =
         then append_reset name files
         else files
       in
-      if has_self_tail cfg then guarded_funs := name :: !guarded_funs;
+      if has_self_tail cfg then begin
+        (* Per-iter cost = the body of the loop as lowered to commands,
+           i.e. the reachable blocks of the CFG plus their terminator.
+           Excludes the LICM preheader (which runs once at entry, not
+           per iteration) and the wrapper's dispatch line. Matches
+           what Tick_guard's [entry_file_name] targets. *)
+        let body_cost =
+          Array.fold_left (fun acc b ->
+            if block_is_reachable cfg b then acc + Cost.estimate_block b
+            else acc)
+            0 cfg.Cfg.blocks
+        in
+        guarded_funs := (name, body_cost) :: !guarded_funs
+      end;
       if dump_costs then begin
         let est = Cost.estimate_func cfg in
         let body_name = name ^ "__body" in
