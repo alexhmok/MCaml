@@ -64,6 +64,15 @@ type instr =
   | ICons           of vreg * vreg * vreg              (* d := cons(h, t), side-effecting *)
   | IHead           of vreg * vreg                     (* d := head(c) *)
   | ITail           of vreg * vreg                     (* d := tail(c) *)
+  (* Phase D / D5 ADT ops. Cells are {tag: <ctor id>, f0, f1, ...} in
+     the unified objpool (§13.5 option a). IAdtAlloc bumps
+     $objpool_next and writes NBT (side-effecting, 3 + #fields cmds —
+     the tag is a codegen-time constant riding in the append literal).
+     ITagGet/IFieldGet read via macro helpers (obj_tag / obj_f<k>,
+     3 cmds each) and mirror IArrGet's hidden $arr_result write. *)
+  | IAdtAlloc       of vreg * int * vreg list          (* d := alloc {tag, f0..fn} *)
+  | ITagGet         of vreg * vreg                     (* d := cells[c].tag *)
+  | IFieldGet       of vreg * vreg * int               (* d := cells[c].f<k> *)
   (* Phase C region brackets. [IRegionEnter k] snapshots $scratch_next/
      $objpool_next into $region_save_<k>_* ; [IRegionExit (k, ret, typ)]
      copies the return value into the parent arena (via a per-[typ]
@@ -178,6 +187,9 @@ let instr_def (i : instr) : vreg option =
   | ICons (d, _, _)         -> Some d
   | IHead (d, _)            -> Some d
   | ITail (d, _)            -> Some d
+  | IAdtAlloc (d, _, _)     -> Some d
+  | ITagGet (d, _)          -> Some d
+  | IFieldGet (d, _, _)     -> Some d
   | IRegionEnter _          -> None
   | IRegionExit _           -> None
 
@@ -205,6 +217,9 @@ let instr_uses (i : instr) : vreg list =
   | ICons (_, h, t)         -> [h; t]
   | IHead (_, c)            -> [c]
   | ITail (_, c)            -> [c]
+  | IAdtAlloc (_, _, args)  -> args
+  | ITagGet (_, c)          -> [c]
+  | IFieldGet (_, c, _)     -> [c]
   | IRegionEnter _          -> []
   | IRegionExit (_, None, _)   -> []
   | IRegionExit (_, Some r, _) -> [r]
@@ -254,6 +269,11 @@ let string_of_instr (i : instr) : string =
   | ICons (d, h, t) -> Printf.sprintf "%s := cons(%s, %s)" d h t
   | IHead (d, c)    -> Printf.sprintf "%s := head(%s)" d c
   | ITail (d, c)    -> Printf.sprintf "%s := tail(%s)" d c
+  | IAdtAlloc (d, tag, args) ->
+      Printf.sprintf "%s := adt_alloc(tag=%d%s)" d tag
+        (String.concat "" (List.map (fun a -> ", " ^ a) args))
+  | ITagGet (d, c)      -> Printf.sprintf "%s := tag(%s)" d c
+  | IFieldGet (d, c, k) -> Printf.sprintf "%s := %s.f%d" d c k
   | IRegionEnter k  -> Printf.sprintf "region_enter[%d]" k
   | IRegionExit (k, None, _) -> Printf.sprintf "region_exit[%d] ()" k
   | IRegionExit (k, Some r, _) -> Printf.sprintf "region_exit[%d] %s" k r

@@ -228,6 +228,11 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
   | ICons (d, _, _) -> (i, kill m d, false)
   | IHead (d, _) -> (i, kill m d, false)
   | ITail (d, _) -> (i, kill m d, false)
+  (* Phase D ADT ops: same treatment — pool index / NBT read, never a
+     statically-knowable int. Kill the dest. *)
+  | IAdtAlloc (d, _, _) -> (i, kill m d, false)
+  | ITagGet (d, _) -> (i, kill m d, false)
+  | IFieldGet (d, _, _) -> (i, kill m d, false)
   (* Phase C region brackets: no vreg def (both pass map unchanged). *)
   | IRegionEnter _ -> (i, m, false)
   | IRegionExit _ -> (i, m, false)

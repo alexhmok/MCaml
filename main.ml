@@ -242,7 +242,11 @@ let () =
              (* Phase B: cons ops also consume dynamic memory (the
                 objpool), so a cons-only program still needs the
                 end-of-invocation arena reset. *)
-             | Cfg.ICons _ | Cfg.IHead _ | Cfg.ITail _ ->
+             | Cfg.ICons _ | Cfg.IHead _ | Cfg.ITail _
+             (* Phase D: ADT cells also live in the objpool, so an
+                ADT-only program still needs the end-of-invocation
+                arena reset. *)
+             | Cfg.IAdtAlloc _ | Cfg.ITagGet _ | Cfg.IFieldGet _ ->
                  any_dyn_heap_use := true
              | _ -> ())
           ) b.Cfg.instrs

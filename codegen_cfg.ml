@@ -76,6 +76,14 @@ type state = {
      flagged field. Dedupe is by filename in main.ml. *)
   mutable emit_cons_head : bool;
   mutable emit_cons_tail : bool;
+  (* Phase D / D5: ADT macro-getter usage. [emit_obj_tag] is set the
+     first time an ITagGet fires; [obj_field_indices] collects the
+     distinct field indices k for which an IFieldGet fired. After the
+     block walk, [emit] appends [obj_tag.mcfunction] and one
+     [obj_f<k>.mcfunction] per index. Dedupe is by filename in main.ml,
+     same as cons_head/cons_tail. *)
+  mutable emit_obj_tag : bool;
+  mutable obj_field_indices : int list;
   (* Phase C: levels (k) for which IRegionExit fired in this function.
      After the block walk, [emit] appends the per-level truncation
      helpers [region_truncate_<k>_scratch.mcfunction] and
@@ -240,6 +248,15 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
   | ITail (d, c) ->
       st.emit_cons_tail <- true;
       push_cmds st prefix (cmd_cons_tail d c)
+  | IAdtAlloc (d, tag, args) ->
+      push_cmds st prefix (cmd_adt_alloc d tag args)
+  | ITagGet (d, c) ->
+      st.emit_obj_tag <- true;
+      push_cmds st prefix (cmd_obj_tag_get d c)
+  | IFieldGet (d, c, k) ->
+      if not (List.mem k st.obj_field_indices) then
+        st.obj_field_indices <- k :: st.obj_field_indices;
+      push_cmds st prefix (cmd_obj_field_get d c k)
   | IRegionEnter k ->
       push_cmds st prefix (cmd_region_enter k)
   | IRegionExit (k, ret, ret_typ) ->
@@ -271,6 +288,15 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
              "codegen_cfg: TArrDyn region returns are not supported in \
               v1 — wrap the array-producing expression with an int-\
               returning reducer or flag to extend the walker set"
+       | Ast.TAdt name ->
+           (* Phase D / D5 settled decision: no generic tag-preserving
+              deep-copy walker yet. Same v1 posture as TArrDyn. *)
+           failwith
+             (Printf.sprintf
+                "codegen_cfg: region returns of ADT values (type %s) \
+                 are not supported in v1 — reduce to a primitive \
+                 inside the region or flag to extend the walker set"
+                name)
        | _ ->
            failwith
              (Printf.sprintf
@@ -358,6 +384,8 @@ let emit (cfg : cfg_func) : (string * string list) list =
     heap_set_pools = [];
     emit_cons_head = false;
     emit_cons_tail = false;
+    emit_obj_tag = false;
+    obj_field_indices = [];
     region_exit_levels = [];
     emit_region_walker_list = false;
   } in
@@ -382,6 +410,15 @@ let emit (cfg : cfg_func) : (string * string list) list =
     st.helpers <- ("cons_head", [cons_head_body]) :: st.helpers;
   if st.emit_cons_tail then
     st.helpers <- ("cons_tail", [cons_tail_body]) :: st.helpers;
+  (* Phase D / D5: ADT macro getters — one obj_tag plus one obj_f<k>
+     per distinct field index this function read. Filenames are global
+     so main.ml's dedupe collapses copies across functions. *)
+  if st.emit_obj_tag then
+    st.helpers <- ("obj_tag", [obj_tag_body]) :: st.helpers;
+  List.iter (fun k ->
+    st.helpers <-
+      (Printf.sprintf "obj_f%d" k, [obj_field_body k]) :: st.helpers
+  ) (List.sort compare st.obj_field_indices);
   (* Phase C: per-level truncation helpers, one scratch and one
      objpool helper per level observed in this function. Filenames
      are global so main.ml's filename dedupe collapses copies from

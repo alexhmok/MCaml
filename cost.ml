@@ -63,6 +63,12 @@ let estimate (i : instr) : int =
   | ICons _                     -> 5
   | IHead _                     -> 3
   | ITail _                     -> 3
+  (* Phase D ADT ops: IAdtAlloc mirrors ICons (append + one store per
+     field + two counter ops = 3 + #fields); ITagGet/IFieldGet are the
+     3-command macro-getter sequence, same as IHead/ITail. *)
+  | IAdtAlloc (_, _, args)      -> 3 + List.length args
+  | ITagGet _                   -> 3
+  | IFieldGet _                 -> 3
   (* Phase C region brackets. Enter is two score ops (save scratch +
      objpool). Exit for primitive return is: call region_truncate_<k>
      helper (1 cmd) + restore two bump counters (2 cmds). Heap returns

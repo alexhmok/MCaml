@@ -157,6 +157,9 @@ let rename_instr (body_defs : (vreg, unit) Hashtbl.t) (prefix : string) (i : ins
   | ICons (d, h, t) -> ICons (r d, r h, r t)
   | IHead (d, c) -> IHead (r d, r c)
   | ITail (d, c) -> ITail (r d, r c)
+  | IAdtAlloc (d, tag, args) -> IAdtAlloc (r d, tag, List.map r args)
+  | ITagGet (d, c) -> ITagGet (r d, r c)
+  | IFieldGet (d, c, k) -> IFieldGet (r d, r c, k)
   | IRegionEnter _ -> i
   | IRegionExit (_, None, _) -> i
   | IRegionExit (k, Some r0, ty) -> IRegionExit (k, Some (r r0), ty)

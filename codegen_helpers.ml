@@ -340,6 +340,62 @@ let cons_tail_body : string =
     "$execute store result score $arr_result %s run data get storage mcaml:objpool cells[$(idx)].t 1"
     obj_name
 
+(* ---- Phase D ADT ops (D5) ---- *)
+
+(* IAdtAlloc — 3 + <#fields> commands inline, mirroring cmd_cons.
+   The ctor tag is a codegen-time constant (D3 decl-order index), so it
+   rides inside the append literal — no separate tag-write command
+   (the D4 precedent that kept ICons at 5). Nullary ctors allocate a
+   bare {tag:k} cell (§13.5 allocate-uniformly): 3 commands, and tag
+   reads stay uniform across every ctor. *)
+let cmd_adt_alloc (d : string) (tag : int) (fields : string list) : string list =
+  let lit =
+    "{tag:" ^ string_of_int tag
+    ^ String.concat ""
+        (List.mapi (fun i _ -> Printf.sprintf ",f%d:0" i) fields)
+    ^ "}"
+  in
+  ("data modify storage mcaml:objpool cells append value " ^ lit)
+  :: List.mapi
+       (fun i v ->
+          Printf.sprintf
+            "execute store result storage mcaml:objpool cells[-1].f%d int 1 run scoreboard players get %s %s"
+            i v obj_name)
+       fields
+  @ [ Printf.sprintf "scoreboard players operation %s %s = $objpool_next %s"
+        d obj_name obj_name;
+      Printf.sprintf "scoreboard players add $objpool_next %s 1" obj_name ]
+
+(* ITagGet / IFieldGet — exactly 3 commands each via the §5.2
+   macro-getter pattern, parameterized by helper file name. *)
+let cmd_obj_get (d : string) (c : string) (helper : string) : string list =
+  [ Printf.sprintf
+      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get %s %s"
+      c obj_name;
+    Printf.sprintf "function mcaml:%s with storage mcaml:tmp args" helper;
+    Printf.sprintf "scoreboard players operation %s %s = $arr_result %s"
+      d obj_name obj_name ]
+
+let cmd_obj_tag_get (d : string) (c : string) : string list =
+  cmd_obj_get d c "obj_tag"
+
+let cmd_obj_field_get (d : string) (c : string) (k : int) : string list =
+  cmd_obj_get d c (Printf.sprintf "obj_f%d" k)
+
+(* Bodies of [obj_tag.mcfunction] / [obj_f<k>.mcfunction]. Single
+   macro-expanded line each, reading the field out of objpool[idx]
+   into [$arr_result]. Field getters are per-index files; both kinds
+   are deduped by filename in main.ml like cons_head/cons_tail. *)
+let obj_tag_body : string =
+  Printf.sprintf
+    "$execute store result score $arr_result %s run data get storage mcaml:objpool cells[$(idx)].tag 1"
+    obj_name
+
+let obj_field_body (k : int) : string =
+  Printf.sprintf
+    "$execute store result score $arr_result %s run data get storage mcaml:objpool cells[$(idx)].f%d 1"
+    obj_name k
+
 (* ---- function calls ---- *)
 
 (* Tail jump (no save/restore): param_i := arg_i for each arg, then

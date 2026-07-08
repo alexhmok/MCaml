@@ -106,6 +106,15 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
     | ITail (d, c0) ->
         let c0' = rw !m c c0 in
         if c0' = c0 then i else ITail (d, c0')
+    | IAdtAlloc (d, tag, args) ->
+        let args' = List.map (rw !m c) args in
+        if args' = args then i else IAdtAlloc (d, tag, args')
+    | ITagGet (d, c0) ->
+        let c0' = rw !m c c0 in
+        if c0' = c0 then i else ITagGet (d, c0')
+    | IFieldGet (d, c0, k) ->
+        let c0' = rw !m c c0 in
+        if c0' = c0 then i else IFieldGet (d, c0', k)
     | IRegionEnter _ -> i
     | IRegionExit (_, None, _) -> i
     | IRegionExit (k, Some r, ty) ->
@@ -159,6 +168,12 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
    | IHead (d, _) ->
        if not (is_reserved d) then m := kill_def !m d
    | ITail (d, _) ->
+       if not (is_reserved d) then m := kill_def !m d
+   | IAdtAlloc (d, _, _) ->
+       if not (is_reserved d) then m := kill_def !m d
+   | ITagGet (d, _) ->
+       if not (is_reserved d) then m := kill_def !m d
+   | IFieldGet (d, _, _) ->
        if not (is_reserved d) then m := kill_def !m d
    | IRegionEnter _ -> ()
    | IRegionExit _ -> ());

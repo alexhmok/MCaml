@@ -200,6 +200,18 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
       let _ = dest in
       add_instr b.cur (ITail (d, c))
 
+  | Knormal.KAdtAlloc (d, tag, args) ->
+      let _ = dest in
+      add_instr b.cur (IAdtAlloc (d, tag, args))
+
+  | Knormal.KTagGet (d, c) ->
+      let _ = dest in
+      add_instr b.cur (ITagGet (d, c))
+
+  | Knormal.KFieldGet (d, c, k) ->
+      let _ = dest in
+      add_instr b.cur (IFieldGet (d, c, k))
+
   | Knormal.KRegion (body, ret_typ, region_dest) ->
       let k = b.region_depth in
       if k > 3 then

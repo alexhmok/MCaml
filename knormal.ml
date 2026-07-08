@@ -61,6 +61,21 @@ type kexpr =
      walker needs to rewrite after truncation. [ret_typ] is filled
      from the shared [typ ref] typing.ml wrote. *)
   | KRegion of kexpr * typ * string option
+  (* --- Phase D ADT primitives (D5) --- *)
+  (* KAdtAlloc(d, tag, fields) — d := handle of a fresh objpool cell
+     {tag: <tag>, f0: fields[0], f1: fields[1], ...}. The tag is a
+     codegen-time constant (D3 decl-order ctor index), so it rides
+     inside the append literal — 3 + <#fields> commands, no separate
+     tag write (the D4 ICons precedent). Nullary ctors allocate a
+     bare {tag: k} cell uniformly (§13.5): 3 cmds per mention, and
+     tag reads stay uniform across every ctor of every type. *)
+  | KAdtAlloc of string * int * string list
+  (* KTagGet(d, c) — d := objpool cells[c].tag, via the obj_tag macro
+     getter (3 cmds, hidden $arr_result write like IArrGet). *)
+  | KTagGet of string * string
+  (* KFieldGet(d, c, k) — d := objpool cells[c].f<k>, via the per-index
+     obj_f<k> macro getter (3 cmds, hidden $arr_result write). *)
+  | KFieldGet of string * string * int
 
 let counter = ref 0
 let new_temp () = incr counter; Printf.sprintf "$t%d" !counter
@@ -157,10 +172,20 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
       let i = if b then 1 else 0 in
       (match dest with Some d -> KLet(d, KInt i, KUnit) | None -> KUnit)
 
+  | Var x when Typing.is_constructor x ->
+      (* Phase D / D5: a bare nullary ctor (`Point`) parses as Var.
+         Allocate-uniformly (§13.5): a bare {tag: k} cell, 3 cmds.
+         Typing already rejected bare mentions of non-nullary ctors,
+         but check defensively — a silent zero-field cell for `Circle`
+         would corrupt every downstream field read. *)
+      let (_, fields, tag) = Hashtbl.find Typing.ctor_info x in
+      if fields <> [] then
+        failwith ("constructor " ^ x ^ " expects arguments (knormal)");
+      (match dest with
+       | Some d -> KLet(d, KUnit, KAdtAlloc(d, tag, []))
+       | None -> KUnit)
+
   | Var x ->
-      (* Phase D stub: a bare nullary ctor (`Point`) parses as Var. *)
-      if Typing.is_constructor x then
-        failwith ("constructor " ^ x ^ ": lowering lands in D5");
       (match dest with Some d -> KLet(d, KVar x, KUnit) | None -> KUnit)
 
   | Str s | Selector s -> 
@@ -517,11 +542,21 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
   | App ("array_make", _) ->
       failwith "array_make must appear as the rhs of a let binding"
 
-  | Match _ ->
-      (* Phase D stub, same convention as B4/C1: the frontend (D1–D3)
-         accepts and types `match`, but decision-tree lowering is D5.
-         Fail fast rather than silently miscompiling. *)
-      failwith "Match: lowering lands in D5"
+  | Match (scrut, arms) ->
+      (* Phase D / D5: decision-tree pattern compilation (Maranget).
+         The scrutinee handle is normalized into one temp, and each
+         occurrence's tag/field is read at most ONCE per decision-tree
+         path (never once per arm) — see [compile_match]. Typing (D3)
+         already proved every match exhaustive and irredundant, so the
+         tree needs no failure leaf: on a complete ctor column the
+         LAST ctor's subtree becomes the untested else-branch
+         (defensive fallthrough — a tag outside the tested set is
+         impossible by construction, and eliding the final test saves
+         two commands per match vs. a trap arm). *)
+      let t_s = new_temp () in
+      let k_s = normalize_to (Some t_s) scrut in
+      let rows = List.map (fun (p, body) -> ([p], [], body)) arms in
+      KLet (t_s, KUnit, KSeq (k_s, compile_match dest [t_s] rows))
 
   | Region (tr, body) ->
       (* Phase C / C3+C5. Normalize the body with the same [dest] so
@@ -669,12 +704,21 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
                KLet(t_neg, KInt (-1),
                  KLet(d, KBinOp(Eq, t_l, t_neg), KUnit)))))
 
+  | App (f, args) when Typing.is_constructor f ->
+      (* Phase D / D5: constructor application. Normalize every field
+         into a temp, then allocate one tagged objpool cell. With no
+         ambient dest the allocation is dropped (pure expression;
+         regions reclaim) but field sub-expressions still evaluate,
+         mirroring the Cons arm. *)
+      let (_, _, tag) = Hashtbl.find Typing.ctor_info f in
+      let temps = List.map (fun _ -> new_temp ()) args in
+      let ks = List.map2 (fun a t -> normalize_to (Some t) a) args temps in
+      let seq body = List.fold_right (fun k acc -> KSeq (k, acc)) ks body in
+      (match dest with
+       | None -> seq KUnit
+       | Some d -> seq (KLet (d, KUnit, KAdtAlloc (d, tag, temps))))
+
   | App (f, args) ->
-      (* Phase D stub: constructor application parses as App. Without
-         this a well-typed ctor-but-no-match program would silently
-         emit a KCall to a nonexistent function. *)
-      if Typing.is_constructor f then
-        failwith ("constructor " ^ f ^ ": lowering lands in D5");
       let rec bind_args args acc = match args with
         | [] ->
             let call = KCall(f, List.rev acc) in
@@ -693,6 +737,222 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
             KSeq(normalize_to (Some tmp) h, bind_args t (tmp :: acc))
       in
       bind_args args []
+
+(* ---- Phase D / D5: pattern-matrix compilation (Maranget) ----------
+
+   A row is (patterns, bindings, body): [patterns] is aligned
+   position-for-position with the [occs] occurrence-vreg list,
+   [bindings] accumulates (binder, occ_vreg) pairs discharged when a
+   PVar is consumed by specialization, and [body] is the arm's source
+   expression, normalized only at the leaf.
+
+   Invariants inherited from typing (D3, full Maranget usefulness):
+   the matrix is exhaustive and irredundant. Consequences used here:
+   - the matrix is never empty at a leaf ([] is a hard internal error);
+   - an int column always has an irrefutable default row;
+   - on a complete ctor column the default matrix may be empty (all
+     rows refutable) — the last ctor's subtree is the else-branch.
+
+   Wildcard/var rows are duplicated into every specialization (standard
+   decision-tree behavior), so an arm body can be normalized more than
+   once. Each normalization mints fresh temps, and duplicated paths are
+   mutually exclusive at runtime, so this is a code-size cost only.
+
+   Tag dispatch emits [t_tag == <k>] as an IConst + IBinOp Eq feeding
+   KIf — scoreboard-only, one storage read per occurrence via KTagGet.
+   The 1-cmd [execute if score ... matches <k>] form is the same
+   future peephole B7 documented for is_nil. *)
+and compile_match (dest : string option) (occs : string list)
+    (rows : (Ast.pattern list * (string * string) list * Ast.expr) list)
+    : kexpr =
+  let is_irrefutable = function
+    | Ast.PWild | Ast.PVar _ -> true
+    | Ast.PInt _ | Ast.PCtor _ -> false
+  in
+  match rows with
+  | [] ->
+      failwith
+        "match lowering: empty pattern matrix — typing exhaustiveness \
+         invariant broken"
+  | (ps, binds, body) :: _ when List.for_all is_irrefutable ps ->
+      (* First row matches unconditionally: discharge its binders
+         against the occurrence vregs and emit the arm body. *)
+      let binds =
+        List.fold_left2
+          (fun acc p o ->
+             match p with Ast.PVar x -> (x, o) :: acc | _ -> acc)
+          binds ps occs
+      in
+      let k_body = normalize_to dest body in
+      List.fold_left
+        (fun acc (x, o) -> KSeq (KLet (x, KVar o, KUnit), acc))
+        k_body binds
+  | (first_ps, _, _) :: _ ->
+      (* Pick the leftmost column where the first row is refutable —
+         guarantees progress (the first row is not all-irrefutable). *)
+      let col =
+        let rec find i = function
+          | [] ->
+              failwith "match lowering: no refutable column (unreachable)"
+          | p :: rest -> if is_irrefutable p then find (i + 1) rest else i
+        in
+        find 0 first_ps
+      in
+      let occ = List.nth occs col in
+      let occs_rest = List.filteri (fun i _ -> i <> col) occs in
+      let split_row (ps, binds, body) =
+        (List.nth ps col, List.filteri (fun i _ -> i <> col) ps, binds, body)
+      in
+      (* Default matrix: rows whose column pattern is irrefutable. *)
+      let default_rows =
+        List.filter_map
+          (fun row ->
+             let (p, rest, binds, body) = split_row row in
+             match p with
+             | Ast.PWild -> Some (rest, binds, body)
+             | Ast.PVar x -> Some (rest, (x, occ) :: binds, body)
+             | _ -> None)
+          rows
+      in
+      let first_refutable =
+        let (p, _, _, _) =
+          split_row
+            (List.find (fun r -> let (p, _, _, _) = split_row r in
+                                  not (is_irrefutable p)) rows)
+        in p
+      in
+      (match first_refutable with
+       | Ast.PInt _ ->
+           (* Int column: compare the occurrence against each literal.
+              Ints never complete their signature, so exhaustiveness
+              guarantees a default row exists. *)
+           let lits =
+             List.fold_left
+               (fun acc row ->
+                  let (p, _, _, _) = split_row row in
+                  match p with
+                  | Ast.PInt k when not (List.mem k acc) -> acc @ [k]
+                  | _ -> acc)
+               [] rows
+           in
+           let specialize_int k =
+             List.filter_map
+               (fun row ->
+                  let (p, rest, binds, body) = split_row row in
+                  match p with
+                  | Ast.PInt i when i = k -> Some (rest, binds, body)
+                  | Ast.PWild -> Some (rest, binds, body)
+                  | Ast.PVar x -> Some (rest, (x, occ) :: binds, body)
+                  | _ -> None)
+               rows
+           in
+           if default_rows = [] then
+             failwith
+               "match lowering: int column without a default row — \
+                typing exhaustiveness invariant broken";
+           let else_k = compile_match dest occs_rest default_rows in
+           List.fold_right
+             (fun lit acc ->
+                let t_c = new_temp () in
+                let t_b = new_temp () in
+                KLet (t_c, KInt lit,
+                  KLet (t_b, KBinOp (Ast.Eq, occ, t_c),
+                    KIf (t_b,
+                         compile_match dest occs_rest (specialize_int lit),
+                         acc))))
+             lits else_k
+       | Ast.PCtor (c0, _) ->
+           (* ADT column: read the tag ONCE, then an Eq-chain over the
+              ctors present. Complete signature → last ctor's subtree
+              is the untested else-branch (defensive fallthrough). *)
+           let heads =
+             List.fold_left
+               (fun acc row ->
+                  let (p, _, _, _) = split_row row in
+                  match p with
+                  | Ast.PCtor (c, _) when not (List.mem c acc) -> acc @ [c]
+                  | _ -> acc)
+               [] rows
+           in
+           let (owner, _, _) = Hashtbl.find Typing.ctor_info c0 in
+           let all_ctors = Hashtbl.find Typing.adt_decls owner in
+           let complete =
+             List.for_all (fun (cn, _) -> List.mem cn heads) all_ctors
+           in
+           let branch_for c =
+             let (_, fields, _) = Hashtbl.find Typing.ctor_info c in
+             let ar = List.length fields in
+             let f_temps = List.init ar (fun _ -> new_temp ()) in
+             let spec_rows =
+               List.filter_map
+                 (fun row ->
+                    let (p, rest, binds, body) = split_row row in
+                    match p with
+                    | Ast.PCtor (c', subs) when c' = c ->
+                        Some (subs @ rest, binds, body)
+                    | Ast.PWild ->
+                        Some (List.init ar (fun _ -> Ast.PWild) @ rest,
+                              binds, body)
+                    | Ast.PVar x ->
+                        Some (List.init ar (fun _ -> Ast.PWild) @ rest,
+                              (x, occ) :: binds, body)
+                    | _ -> None)
+                 rows
+             in
+             (* Read only the fields some sub-pattern inspects or binds
+                — IFieldGet is never DCE'd (hidden $arr_result write),
+                so an unused read would cost 3 dead commands. *)
+             let used = Array.make (max ar 1) false in
+             List.iter
+               (fun (ps, _, _) ->
+                  List.iteri
+                    (fun i p ->
+                       if i < ar && p <> Ast.PWild then used.(i) <- true)
+                    ps)
+               spec_rows;
+             let sub = compile_match dest (f_temps @ occs_rest) spec_rows in
+             let rec add_reads i acc =
+               if i < 0 then acc
+               else
+                 add_reads (i - 1)
+                   (if used.(i)
+                    then KSeq (KFieldGet (List.nth f_temps i, occ, i), acc)
+                    else acc)
+             in
+             add_reads (ar - 1) sub
+           in
+           let tests, else_k =
+             if complete then
+               match List.rev heads with
+               | last :: rev_init -> (List.rev rev_init, branch_for last)
+               | [] -> assert false
+             else begin
+               if default_rows = [] then
+                 failwith
+                   "match lowering: incomplete ctor column without a \
+                    default row — typing exhaustiveness invariant broken";
+               (heads, compile_match dest occs_rest default_rows)
+             end
+           in
+           if tests = [] then
+             (* Single-ctor complete signature: no tag read needed. *)
+             else_k
+           else begin
+             let t_tag = new_temp () in
+             let chain =
+               List.fold_right
+                 (fun c acc ->
+                    let (_, _, tag) = Hashtbl.find Typing.ctor_info c in
+                    let t_c = new_temp () in
+                    let t_b = new_temp () in
+                    KLet (t_c, KInt tag,
+                      KLet (t_b, KBinOp (Ast.Eq, t_tag, t_c),
+                        KIf (t_b, branch_for c, acc))))
+                 tests else_k
+             in
+             KLet (t_tag, KUnit, KSeq (KTagGet (t_tag, occ), chain))
+           end
+       | Ast.PWild | Ast.PVar _ -> assert false)
 
 let normalize e =
   Hashtbl.clear arr_env;

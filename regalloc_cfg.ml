@@ -233,6 +233,9 @@ let alloc (cfg : Cfg.cfg_func) : unit =
     | ICons (d, h, t) -> ICons (rw d, rw h, rw t)
     | IHead (d, c) -> IHead (rw d, rw c)
     | ITail (d, c) -> ITail (rw d, rw c)
+    | IAdtAlloc (d, tag, args) -> IAdtAlloc (rw d, tag, List.map rw args)
+    | ITagGet (d, c) -> ITagGet (rw d, rw c)
+    | IFieldGet (d, c, k) -> IFieldGet (rw d, rw c, k)
     | IRegionEnter _ as x -> x
     | IRegionExit (k, None, ty) -> IRegionExit (k, None, ty)
     | IRegionExit (k, Some r, ty) -> IRegionExit (k, Some (rw r), ty)

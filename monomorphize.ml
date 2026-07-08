@@ -141,6 +141,9 @@ let specialize_cfg
     | ICons (d, h, t) -> ICons (v d, v h, v t)
     | IHead (d, c) -> IHead (v d, v c)
     | ITail (d, c) -> ITail (v d, v c)
+    | IAdtAlloc (d, tag, args) -> IAdtAlloc (v d, tag, List.map v args)
+    | ITagGet (d, c) -> ITagGet (v d, v c)
+    | IFieldGet (d, c, k) -> IFieldGet (v d, v c, k)
     | IRegionEnter _ as x -> x
     | IRegionExit (k, None, ty) -> IRegionExit (k, None, ty)
     | IRegionExit (k, Some r, ty) -> IRegionExit (k, Some (v r), ty)

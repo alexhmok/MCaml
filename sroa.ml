@@ -137,6 +137,11 @@ let collect (cfg : cfg_func) : (aid, info) Hashtbl.t =
        | ICons (_, h, t) -> note_use_vreg h; note_use_vreg t
        | IHead (_, c) -> note_use_vreg c
        | ITail (_, c) -> note_use_vreg c
+       (* Phase D ADT ops: operands are field values / cell handles
+          (ints), never aid sentinels. Same treatment as ICons. *)
+       | IAdtAlloc (_, _, args) -> List.iter note_use_vreg args
+       | ITagGet (_, c) -> note_use_vreg c
+       | IFieldGet (_, c, _) -> note_use_vreg c
        (* Phase C region brackets: no aid ops. IRegionExit's return
           vreg (if Some) is a list/arr handle, never an aid. *)
        | IRegionEnter _ -> ()
@@ -214,6 +219,7 @@ let aids_touched_by (other_cfg : cfg_func) : (aid, unit) Hashtbl.t =
           they're untracked by the escape analysis. *)
        | IHeapAllocConst _ | IHeapAlloc _ | IHeapGet _ | IHeapSet _ -> ()
        | ICons _ | IHead _ | ITail _ -> ()
+       | IAdtAlloc _ | ITagGet _ | IFieldGet _ -> ()
        | IRegionEnter _ | IRegionExit _ -> ()
        | IConst _ | ICommand _ -> ())
     ) b.instrs

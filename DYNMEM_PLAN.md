@@ -869,7 +869,60 @@ which is MineTorch's project, not MCaml's.
       CFG-dump/file inspection. The /tmp harnesses were regenerated
       pool-name-agnostic (they detect conspool vs objpool from the
       compiled output) so they now survive this kind of migration.)
-- [ ] D5. Pattern compiler: decision-tree lowering to nested `if` / scoreboard matches in knormal
+- [x] D5. Pattern compiler: decision-tree lowering to nested `if` / scoreboard matches in knormal
+      (Full Maranget decision-tree compilation in `knormal.ml`
+      (`compile_match`, mutually recursive with `normalize_to`): rows
+      carry (patterns, discharged-binder list, arm body); the leftmost
+      first-row-refutable column is switched on. ADT columns read the
+      scrutinee tag ONCE via `KTagGet` into a temp and dispatch with an
+      IConst+IBinOp-Eq chain feeding KIf — scoreboard-only, never one
+      storage read per arm. The 1-cmd `execute if score ... matches
+      <tag>` direct form is the same future peephole B7 documented for
+      is_nil. **Totality handling (documented choice)**: typing (D3)
+      guarantees exhaustive+irredundant matches, so the tree has no
+      failure leaf — on a complete ctor column the LAST ctor's subtree
+      is the untested else-branch (defensive fallthrough to the last
+      arm; chosen over a `say` trap because eliding the final test
+      SAVES two commands per match and a wrong tag is impossible by
+      construction). Single-ctor complete signatures dispatch with zero
+      tag reads. Int columns compare the occurrence against each
+      literal with the (exhaustiveness-guaranteed) default row as the
+      else-branch. Field reads (`KFieldGet`) are emitted once per
+      branch and only for fields some sub-pattern inspects or binds
+      (they're never DCE'd, so an unused read would be 3 dead cmds).
+      Wildcard rows duplicate into specializations (standard decision-
+      tree code-size cost; paths are mutually exclusive at runtime).
+      Ctor expressions: `App(Ctor, args)`/`Var Ctor` lower to
+      `KAdtAlloc(d, tag, temps)`; with no ambient dest the allocation
+      is dropped but field sub-expressions still evaluate (Cons arm
+      precedent). Nullary ctors allocate uniformly ({tag:k} cell,
+      3 cmds — see §13.5).
+      New IR: `IAdtAlloc of vreg * int * vreg list` (3 + #fields cmds,
+      tag rides in the append literal per the D4 precedent),
+      `ITagGet`/`IFieldGet` (EXACTLY 3 cmds each via obj_tag /
+      obj_f<k> macro getters, hidden $arr_result write like IArrGet).
+      B4/C3 checklist applied: side-effecting in dce; operand-rewrite
+      arms in copy_prop (uses + dest-kill), inline, monomorphize,
+      unroll, regalloc_cfg; kill-dest in const_fold; note_use in sroa
+      (both walks); cost 3+n/3/3; instr_def/instr_uses/string_of_instr
+      in cfg.ml; local_cse rides the instr_def fallback; liveness is
+      generic. main.ml's any_dyn_heap_use gate counts all three so an
+      ADT-only program still gets the §4.4 arena reset. Region returns
+      of TAdt fail loudly at codegen (dedicated arm next to TArrDyn's).
+      Helper files: `obj_tag.mcfunction` + per-index
+      `obj_f<k>.mcfunction`, deduped by filename in main.ml like
+      cons_head/cons_tail. sim.py needed ZERO changes (paths are
+      namespace-generic).
+      Probes verified by CFG dump + command count + sim.py: 3-ctor
+      match (tag read once, Rect fallthrough untested, $ret=42, pool
+      reset to 0); nested ctor-in-ctor + nullary-only enum +
+      int-literal patterns (651 across 6 call sites); ADT built in one
+      function, matched in another, match inside a for loop, and a
+      TCO'd self-tail-call inside a match arm (31). Inexhaustive-match
+      rejection re-probed at typing ("unmatched value: Point").
+      Suite 66/66; five canaries byte-identical; all four /tmp
+      harnesses green — ICons still 5 cmds, IHead/ITail still 3,
+      region budgets unchanged.)
 - [ ] D6. Retire `TList`/`Cons`/`Nil`/`head`/`tail`/`is_nil` special cases; relower lists onto `type 'a list = Nil | Cons of 'a * 'a list` (or keep the fast path for ints as an optimization, decide in D6)
 - [ ] D7. Tuples as single-constructor ADTs (sugar): `(a, b)` → `Pair(a, b)` at parse time
 - [ ] D8. Records as named-field single-constructor ADTs: `{ x = 1; y = 2 }` → `Point(1, 2)` at parse time
@@ -1835,6 +1888,17 @@ Phase D decides how ADTs are laid out in the pool. Two options:
 cost turned out to be zero — the tag is a codegen-time constant and rides
 inside the `append value {tag:1,h:0,t:0}` literal, so `ICons` stayed at
 5 commands. See §2 D4 and §5.1.
+
+**[D5 nullary-ctor representation]**: allocate-uniformly. A nullary ctor
+mention allocates a bare `{tag: k}` cell (no `f<i>` fields) — 3 commands
+per mention (append + handle copy + counter bump), exactly `IAdtAlloc`
+with zero fields. The rejected alternative (immediate small-int encoding,
+no cell) would break tag-read uniformity: every match would first need an
+is-it-a-handle test before `ITagGet`, costing more than it saves for any
+type with at least one non-nullary ctor. Revisit only if a nullary-only
+enum in a hot loop shows up in profiling (that case degenerates to ints
+and could skip the pool entirely — a typing-level optimization, not a
+cell-layout change).
 
 Closures reuse this pool in F5. Closure cells are `{tag: $CLOSURE, code, env_field_0, env_field_1, ...}`.
 
