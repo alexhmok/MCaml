@@ -110,6 +110,11 @@ definition:
     { Val(name, e) }
   | FUN name = ID LPAREN params = param_list RPAREN COLON ret_type = typ EQUAL body = seq_expr
     { Fun(name, params, ret_type, body) }
+  /* E4: return annotation is optional — omitted mints an unbound
+     unification variable that typing pins from the body (and defaults
+     to int at the knormal boundary if nothing constrains it). */
+  | FUN name = ID LPAREN params = param_list RPAREN EQUAL body = seq_expr
+    { Fun(name, params, TVar (ref None), body) }
   | TYPE name = ID EQUAL opt_bar ctors = ctor_list
     { TypeDecl(name, ctors) }
   /* D8: record declaration. Fields in decl order; registration and
@@ -151,6 +156,8 @@ nonempty_param_list:
 
 param:
   | name = ID COLON t = typ { (name, t) }
+  /* E4: unannotated param — fresh unification variable (§13.10). */
+  | name = ID { (name, TVar (ref None)) }
 
 /* D7: `int * int` is a tuple type. One TIMES-free atom collapses to
    itself; two or more become TTuple. */

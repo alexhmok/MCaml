@@ -166,17 +166,40 @@ let () =
       Knormal.register_global_array name aid length
     ) globals;
 
-    (* Phase 1: lower every Fun to a cfg_func. *)
+    (* Phase 1a (E4): type every user-written Fun in source order —
+       check bodies against declared/omitted return types and
+       generalize signatures. Synthetic __for helpers are skipped as
+       before (they reference enclosing locals); the tvar refs their
+       params share with the enclosing def get constrained through
+       their call sites during this pass. *)
+    List.iter (function
+      | Fun (name, params, ret, body)
+        when not (For_lift.is_synthetic_name name) ->
+          Typing.type_fun_def name params ret body
+      | _ -> ()
+    ) program;
+
+    (* Phase 1b (E6): zonk every def — residual tvars are bound to TInt
+       (§13.10 decision 5) — so knormal and everything below see fully
+       resolved, concrete typs. All typing (including for_lift's oracle)
+       is complete by this point, so the destructive default cannot
+       constrain anything retroactively. *)
+    let program =
+      List.map (function
+        | Fun (name, params, ret, body) ->
+            Fun (name,
+                 List.map (fun (n, t) -> (n, Typing.zonk_default t)) params,
+                 Typing.zonk_default ret, body)
+        | d -> d) program
+    in
+
+    (* Phase 1c: lower every Fun to a cfg_func. *)
     let fn_table : (string, Cfg.cfg_func) Hashtbl.t = Hashtbl.create 16 in
     let fn_order : string list ref = ref [] in
     List.iter (fun def ->
       match def with
       | Val _ | TypeDecl _ | RecordDecl _ -> ()
-      | Fun (name, params, _, body) ->
-          if not (For_lift.is_synthetic_name name) then begin
-            let type_env = List.map (fun (n, t) -> (n, t)) params in
-            let _ = Typing.infer type_env body in ()
-          end;
+      | Fun (name, _, _, _) ->
           (match Codegen.compile_def_to_cfg def with
            | None -> ()
            | Some cfg ->

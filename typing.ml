@@ -1411,3 +1411,20 @@ let rec infer env e =
    call above binds to the scheme-env version. *)
 let infer (env : (string * typ) list) (e : expr) : typ =
   infer (List.map (fun (n, t) -> (n, mono t)) env) e
+
+(* E4: per-def driver entry point (main.ml pass 1). Types the body
+   under the param env, checks the declared return type — an
+   annotation is a unification constraint, so an omitted return (a
+   parser-minted TVar) just binds, while a wrong annotation is now a
+   type error (§13.10 decision 6, a documented strengthening over the
+   pre-E decorative return type) — then generalizes the signature into
+   fun_schemes for later call sites. *)
+let type_fun_def (name : string) (params : (string * typ) list)
+    (ret : typ) (body : expr) : unit =
+  let tbody = infer params body in
+  (try unify ret tbody
+   with Unify_fail _ ->
+     raise (Error (Printf.sprintf
+       "fun %s: declared return type %s does not match body type %s"
+       name (string_of_typ ret) (string_of_typ tbody))));
+  generalize_fun name (List.map snd params) ret
