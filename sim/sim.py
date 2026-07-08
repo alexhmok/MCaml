@@ -34,16 +34,21 @@ def load(name: str) -> list[str]:
     return [l.strip() for l in lines if l.strip()]
 
 
-def _trunc_div(a: int, b: int) -> int:
+def _floor_div(a: int, b: int) -> int:
+    """Vanilla scoreboard /= is Math.floorDiv (confirmed in-game
+    2026-07-07 on 1.21.x via mc_test_suite t05), not Java's truncating
+    int division. Python // is already floor."""
     if b == 0:
         return 0
-    return int(a / b)
+    return a // b
 
 
-def _trunc_mod(a: int, b: int) -> int:
+def _floor_mod(a: int, b: int) -> int:
+    """Vanilla scoreboard %= is Math.floorMod (confirmed in-game via
+    mc_test_suite t08): result takes the divisor's sign."""
     if b == 0:
         return 0
-    return a - _trunc_div(a, b) * b
+    return a - _floor_div(a, b) * b
 
 
 def _storage_root(world: World, sid: str) -> dict:
@@ -250,9 +255,9 @@ def _exec_plain(world: World, cmd: str, depth: int, macros: dict | None = None) 
         elif op == '*=':
             result = d_val * s_val
         elif op == '/=':
-            result = _trunc_div(d_val, s_val)
+            result = _floor_div(d_val, s_val)
         elif op == '%=':
-            result = _trunc_mod(d_val, s_val)
+            result = _floor_mod(d_val, s_val)
         elif op == '<':
             result = min(d_val, s_val)
         elif op == '>':

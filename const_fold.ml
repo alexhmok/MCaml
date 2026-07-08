@@ -15,6 +15,19 @@ open Cfg
 
 module M = Map.Make(String)
 
+(* Vanilla scoreboard /= and %= are floorDiv/floorMod (confirmed
+   in-game 2026-07-07 on 1.21.x via mc_test_suite t05/t08), NOT
+   OCaml's truncating / and mod. Every fold of a division — including
+   the Q16.16 pre-shift/scale-up steps below — must floor, or folded
+   and runtime code paths diverge on negative operands. sim.py models
+   the same floor semantics. *)
+let floor_div (a : int) (b : int) : int =
+  let q = a / b in
+  if a mod b <> 0 && (a < 0) <> (b < 0) then q - 1 else q
+
+let floor_mod (a : int) (b : int) : int =
+  a - (floor_div a b) * b
+
 (* Copy of regalloc_cfg.is_reserved — reserved vregs cross CFG boundaries
    invisibly and must never be rewritten or tracked as constants. *)
 let is_reserved (n : vreg) : bool =
@@ -78,12 +91,12 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
                    (* Do not fold div-by-zero; let runtime handle it. *)
                    (i, kill m d, false)
                  else
-                   fold (ka / kb)
+                   fold (floor_div ka kb)
              | Mod  ->
                  if kb = 0 then
                    (i, kill m d, false)
                  else
-                   fold (ka mod kb)
+                   fold (floor_mod ka kb)
              (* Phase N / N9: Q16.16 fold arms. Must match the runtime
                 lowering EXACTLY including precision loss — folded and
                 unfolded code paths must produce byte-identical
@@ -92,9 +105,10 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
                 overflow since the runtime would wrap differently from
                 OCaml's 63-bit native int. *)
              | FMult ->
-                 (* Matches codegen_helpers N6 pre-shift: (a/256)*(b/256). *)
-                 let a' = ka / 256 in
-                 let b' = kb / 256 in
+                 (* Matches codegen_helpers N6 pre-shift: (a/256)*(b/256).
+                    The pre-shifts lower to scoreboard /=, so they floor. *)
+                 let a' = floor_div ka 256 in
+                 let b' = floor_div kb 256 in
                  let product = a' * b' in
                  if product > 2147483647 || product < -2147483648 then
                    (i, kill m d, false)
@@ -111,7 +125,7 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
                    if first > 2147483647 || first < -2147483648 then
                      (i, kill m d, false)
                    else
-                     let divided = first / kb in
+                     let divided = floor_div first kb in
                      let result = divided * 256 in
                      if result > 2147483647 || result < -2147483648 then
                        (i, kill m d, false)

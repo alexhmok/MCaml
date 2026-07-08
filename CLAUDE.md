@@ -138,6 +138,7 @@ the project root to keep generated files out of the source tree.
 - Array storage: `storage mcaml:heap <aid>` where `<aid>` is a compile-time string like `arr3`.
 - Frame stack for non-tail calls: `storage mcaml:stk frames` — an NBT list; each frame is a compound `{r0: …, r1: …, …}`.
 - Macro getter path: `storage mcaml:tmp args.idx` is the index passed to `function mcaml:<aid>_get with storage mcaml:tmp args`.
+- Integer `/` and `%` are **floor** semantics (floorDiv/floorMod, `-7 / 2 = -4`, `-7 % 3 = 2`), matching vanilla scoreboard `/=`/`%=` as measured in-game 2026-07-07 — NOT OCaml's truncating operators. `const_fold.ml` (including the FMult/FDiv internal divisions) and `sim.py` implement the same; `scripts/mc_test_suite.mcaml` t04/t05, t07/t08, t61/t62 pin fold/runtime parity.
 - Booleans are integers 0/1; `if` compares against `matches 1`.
 - Comparison binops use `execute store success score … if score …`; `Neq` uses `unless score … =`.
 - `And`/`Or` compile to scoreboard `<` (min) / `>` (max) — correct for 0/1 operands.
