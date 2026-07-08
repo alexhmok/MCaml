@@ -796,7 +796,39 @@ which is MineTorch's project, not MCaml's.
       decl + match parses through alpha/for_lift and reaches the D3
       typing placeholder; decl-only program compiles clean. Suite
       66/66; all five canaries byte-identical.)
-- [ ] D3. Typing: nominal-type environment; pattern typing; exhaustiveness + redundancy check
+- [x] D3. Typing: nominal-type environment; pattern typing; exhaustiveness + redundancy check
+      (typing.ml gains `adt_decls` (type → ctor list, decl order) and
+      `ctor_info` (ctor → owning type, field types, **tag** = decl-
+      order index, ready for D4 cells / D5 `matches <tag>` dispatch).
+      `register_type_decl` validates: lowercase type names, Capitalized
+      ctors, one GLOBAL ctor namespace (OCaml-module-style), and field
+      representability — TInt/TFloat/TBool/TList/TAdt allowed; TArrDyn
+      rejected in v1 (it's a base+len vreg PAIR per §3.4, not one cell
+      field); TRef/TUnit/TArrStatic/TMat/selector/pos rejected. TAdt
+      fields must be already-declared or self (source-order, no forward
+      refs between decls). main.ml registers decls after alpha and
+      BEFORE for_lift, whose walk consults Typing.infer.
+      Ctor expressions: guarded `App` arm (arity + field types →
+      TAdt) and a Var fallback for bare nullary ctors — no new AST
+      node needed; Capitalized-vs-lowercase keeps ctors and fun names
+      disjoint (alpha validates fun names lowercase). knormal gets
+      ctor stubs on both paths so a well-typed ctor-but-no-match
+      program can't silently emit a KCall to a nonexistent function.
+      Match typing: scrutinee inferred, patterns checked against it
+      (bindings shadow via assoc-prepend), all arm bodies must agree
+      with arm 1. Exhaustiveness + redundancy use the full Maranget
+      usefulness algorithm (specialize/default matrices, complete-
+      signature test per column type, witness reconstruction) — exact
+      on nested patterns, not a top-level approximation: probe
+      `Leaf(n) | Node(Leaf(a), Leaf(b))` reports witness
+      `Node(Node(_, _), Leaf(_))`; int scrutinees never complete
+      their signature and the witness synthesizes an uncovered
+      literal (`6` for arms 1|5). Redundant arms are hard Errors.
+      Duplicate binders (`P(w, w)`) are caught in alpha.ml's
+      rename_pattern — after renaming they'd be invisible to typing.
+      16-probe battery green (stubs, witnesses, arity/type/cross-type/
+      unknown-ctor/dup-ctor errors, greedy-BAR semantics, ADT-typed
+      fun params). Suite 66/66; all five canaries byte-identical.)
 - [ ] D4. Runtime: generalize `conspool` into a single `objpool` with tag-discriminated cells (see §13 decision D.a). Alternative: keep conspool for lists and add a sibling pool per ADT — decide in D4 before touching codegen
 - [ ] D5. Pattern compiler: decision-tree lowering to nested `if` / scoreboard matches in knormal
 - [ ] D6. Retire `TList`/`Cons`/`Nil`/`head`/`tail`/`is_nil` special cases; relower lists onto `type 'a list = Nil | Cons of 'a * 'a list` (or keep the fast path for ints as an optimization, decide in D6)

@@ -157,7 +157,10 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
       let i = if b then 1 else 0 in
       (match dest with Some d -> KLet(d, KInt i, KUnit) | None -> KUnit)
 
-  | Var x -> 
+  | Var x ->
+      (* Phase D stub: a bare nullary ctor (`Point`) parses as Var. *)
+      if Typing.is_constructor x then
+        failwith ("constructor " ^ x ^ ": lowering lands in D5");
       (match dest with Some d -> KLet(d, KVar x, KUnit) | None -> KUnit)
 
   | Str s | Selector s -> 
@@ -667,6 +670,11 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
                  KLet(d, KBinOp(Eq, t_l, t_neg), KUnit)))))
 
   | App (f, args) ->
+      (* Phase D stub: constructor application parses as App. Without
+         this a well-typed ctor-but-no-match program would silently
+         emit a KCall to a nonexistent function. *)
+      if Typing.is_constructor f then
+        failwith ("constructor " ^ f ^ ": lowering lands in D5");
       let rec bind_args args acc = match args with
         | [] ->
             let call = KCall(f, List.rev acc) in

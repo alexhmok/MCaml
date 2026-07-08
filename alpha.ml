@@ -102,6 +102,10 @@ let rec g env e =
   | Match (e, arms) ->
       let e' = g env e in
       let arms' = List.map (fun (p, body) ->
+        (* Duplicate binders (`Square(w, w)`) must be caught HERE:
+           renaming gives every PVar a fresh name, so after alpha the
+           duplication is invisible to typing. *)
+        check_dup_binders p;
         let (p', env') = rename_pattern env p in
         (p', g env' body)) arms in
       Match (e', arms')
@@ -109,6 +113,25 @@ let rec g env e =
       let i' = new_name i in
       let env' = M.add i i' env in
       For (i', g env lo, g env hi, g env' body)
+
+and check_dup_binders p =
+  let rec binders p acc =
+    match p with
+    | PWild | PInt _ -> acc
+    | PVar x -> x :: acc
+    | PCtor (_, ps) -> List.fold_left (fun a q -> binders q a) acc ps
+  in
+  let names = List.sort compare (binders p []) in
+  let rec dup = function
+    | a :: b :: _ when a = b -> Some a
+    | _ :: rest -> dup rest
+    | [] -> None
+  in
+  match dup names with
+  | Some x ->
+      failwith (Printf.sprintf
+        "pattern binds variable '%s' more than once" x)
+  | None -> ()
 
 and rename_pattern env p =
   match p with

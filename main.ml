@@ -88,6 +88,16 @@ let () =
     (* Alpha-rename once up front so for_lift sees globally-unique binders. *)
     let program = List.map (Alpha.h Alpha.M.empty) program in
 
+    (* Phase D: register type declarations in source order BEFORE
+       for_lift runs — for_lift's walk consults Typing.infer for Let
+       RHS types, which needs the ctor environment populated. Source
+       order means a type must be declared before first use (no
+       forward references between type declarations in v1). *)
+    List.iter (function
+      | TypeDecl (name, ctors) -> Typing.register_type_decl name ctors
+      | _ -> ()
+    ) program;
+
     (* Hoist every `for` loop into its own top-level tail-recursive helper. *)
     let program = For_lift.run program in
 

@@ -20,6 +20,251 @@ let global_vals : (string, typ) Hashtbl.t = Hashtbl.create 4
 let register_global_val (name : string) (ty : typ) : unit =
   Hashtbl.replace global_vals name ty
 
+(* ---- Phase D: nominal ADT environment ------------------------------- *)
+
+(* type name -> constructor list, in declaration order *)
+let adt_decls : (string, constructor list) Hashtbl.t = Hashtbl.create 8
+
+(* ctor name -> (owning type, field types, tag).
+   Tags are declaration-order indices 0..n-1; D5's decision trees
+   dispatch on them with `execute if score ... matches <tag>` and D4's
+   cell layout stores them in the `tag` field. Constructors share ONE
+   global namespace (like OCaml within a module) so an unqualified
+   ctor in a pattern resolves without a type ascription. *)
+let ctor_info : (string, string * typ list * int) Hashtbl.t = Hashtbl.create 16
+
+let is_constructor (name : string) : bool = Hashtbl.mem ctor_info name
+
+(* ADT ctor fields must be single-scoreboard-int values (§12.1 uniform
+   representation): scalars and handles. TArrDyn is a (base, len) vreg
+   PAIR per §3.4 so it doesn't fit one cell field — rejected in v1. *)
+let check_field_type (decl : string) (cname : string) (ft : typ) : unit =
+  match ft with
+  | TInt | TFloat | TBool -> ()
+  | TList _ -> ()   (* single int handle *)
+  | TAdt n ->
+      if not (Hashtbl.mem adt_decls n) then
+        raise (Error (Printf.sprintf
+          "type %s, constructor %s: unknown type '%s' in field — declare \
+           it before this type (v1 has no forward references between \
+           type declarations)" decl cname n))
+  | TArrDyn _ ->
+      raise (Error (Printf.sprintf
+        "type %s, constructor %s: darr fields are not supported in v1 \
+         (a dynamic array is a base+len pair, not a single handle)"
+        decl cname))
+  | TUnit | TSelector | TPos ->
+      raise (Error (Printf.sprintf
+        "type %s, constructor %s: field type is not representable as an \
+         ADT field" decl cname))
+  | TArrStatic _ | TMat _ ->
+      raise (Error (Printf.sprintf
+        "type %s, constructor %s: static arrays/matrices are compile-time \
+         storage, not first-class values — use a darr-free encoding or \
+         a list" decl cname))
+  | TRef _ ->
+      raise (Error (Printf.sprintf
+        "type %s, constructor %s: ref fields would break purity — \
+         rejected" decl cname))
+
+let register_type_decl (name : string) (ctors : constructor list) : unit =
+  if Hashtbl.mem adt_decls name then
+    raise (Error ("duplicate type declaration: " ^ name));
+  if String.length name = 0
+     || not ((name.[0] >= 'a' && name.[0] <= 'z') || name.[0] = '_') then
+    raise (Error (Printf.sprintf
+      "type name '%s' must start with a lowercase letter" name));
+  (* Register the name before validating fields so self-recursive
+     fields (`type t = Leaf | Node of t * t`) resolve. On any
+     validation error compilation aborts, so partial state is moot. *)
+  Hashtbl.replace adt_decls name ctors;
+  List.iteri (fun tag (cname, fields) ->
+    if String.length cname = 0
+       || not (cname.[0] >= 'A' && cname.[0] <= 'Z') then
+      raise (Error (Printf.sprintf
+        "type %s: constructor '%s' must be Capitalized (this is how \
+         patterns tell constructors from variables)" name cname));
+    if Hashtbl.mem ctor_info cname then
+      raise (Error (Printf.sprintf
+        "constructor %s is already declared by type %s — constructors \
+         share one global namespace" cname
+        (let (owner, _, _) = Hashtbl.find ctor_info cname in owner)));
+    List.iter (check_field_type name cname) fields;
+    Hashtbl.replace ctor_info cname (name, fields, tag)
+  ) ctors
+
+(* ---- Phase D: pattern typing + Maranget usefulness ------------------ *)
+
+let rec string_of_pattern (p : pattern) : string =
+  match p with
+  | PWild -> "_"
+  | PVar x -> x
+  | PInt i -> string_of_int i
+  | PCtor (c, []) -> c
+  | PCtor (c, ps) ->
+      c ^ "(" ^ String.concat ", " (List.map string_of_pattern ps) ^ ")"
+
+(* Validate a pattern against the scrutinee type; return its binders.
+   Duplicate binders inside one pattern are caught in alpha.ml
+   (rename_pattern), because alpha's renaming makes them invisible
+   here. *)
+let rec check_pattern (t : typ) (p : pattern) : (string * typ) list =
+  match p with
+  | PWild -> []
+  | PVar x -> [(x, t)]
+  | PInt _ ->
+      if t <> TInt then
+        raise (Error (Printf.sprintf
+          "int literal pattern %s requires an int scrutinee"
+          (string_of_pattern p)));
+      []
+  | PCtor (c, ps) ->
+      (match Hashtbl.find_opt ctor_info c with
+       | None ->
+           raise (Error ("Unknown constructor in pattern: " ^ c))
+       | Some (adt, fields, _) ->
+           (match t with
+            | TAdt name when name = adt ->
+                if List.length ps <> List.length fields then
+                  raise (Error (Printf.sprintf
+                    "constructor %s expects %d argument(s) but the \
+                     pattern has %d" c (List.length fields)
+                    (List.length ps)));
+                List.concat (List.map2 check_pattern fields ps)
+            | TAdt name ->
+                raise (Error (Printf.sprintf
+                  "constructor %s belongs to type %s but the scrutinee \
+                   has type %s" c adt name))
+            | _ ->
+                raise (Error (Printf.sprintf
+                  "constructor pattern %s requires a scrutinee of type %s"
+                  c adt))))
+
+let wilds n = List.init n (fun _ -> PWild)
+
+let rec split_at n l =
+  if n = 0 then ([], l)
+  else
+    match l with
+    | [] -> raise (Error "internal: split_at underflow in match analysis")
+    | x :: rest -> let (a, b) = split_at (n - 1) rest in (x :: a, b)
+
+(* Matrix specializations (Maranget 2007, "Warnings for pattern
+   matching"). A matrix row is a pattern vector; specialization peels
+   the first column. *)
+let specialize_ctor (c : string) (ar : int) (matrix : pattern list list) =
+  List.filter_map (fun row ->
+    match row with
+    | PCtor (c', ps) :: rest -> if c' = c then Some (ps @ rest) else None
+    | (PWild | PVar _) :: rest -> Some (wilds ar @ rest)
+    | PInt _ :: _ -> None
+    | [] -> None) matrix
+
+let specialize_int (i : int) (matrix : pattern list list) =
+  List.filter_map (fun row ->
+    match row with
+    | PInt j :: rest -> if i = j then Some rest else None
+    | (PWild | PVar _) :: rest -> Some rest
+    | PCtor _ :: _ -> None
+    | [] -> None) matrix
+
+let default_matrix (matrix : pattern list list) =
+  List.filter_map (fun row ->
+    match row with
+    | (PWild | PVar _) :: rest -> Some rest
+    | _ -> None) matrix
+
+(* Usefulness with witness: is there a value vector that [q] matches
+   but no row of [matrix] does? Returns an example as a pattern vector
+   (PWild = don't-care). Exhaustiveness = usefulness of the all-wild
+   vector; redundancy of arm k = non-usefulness of its pattern w.r.t.
+   arms 0..k-1. [tys] tracks per-column types for the complete-
+   signature test. All ctor names in play were validated by
+   check_pattern, so ctor_info lookups here cannot miss. *)
+let rec useful (tys : typ list) (matrix : pattern list list)
+    (q : pattern list) : pattern list option =
+  match tys, q with
+  | [], [] -> if matrix = [] then Some [] else None
+  | ty :: trest, qh :: qrest ->
+      (match qh with
+       | PCtor (c, ps) ->
+           let (_, fields, _) = Hashtbl.find ctor_info c in
+           let ar = List.length fields in
+           (match useful (fields @ trest)
+                    (specialize_ctor c ar matrix) (ps @ qrest) with
+            | Some w ->
+                let (wf, wr) = split_at ar w in
+                Some (PCtor (c, wf) :: wr)
+            | None -> None)
+       | PInt i ->
+           (match useful trest (specialize_int i matrix) qrest with
+            | Some w -> Some (PInt i :: w)
+            | None -> None)
+       | PWild | PVar _ ->
+           let head_ctor_names =
+             List.filter_map (fun row ->
+               match row with
+               | PCtor (c, _) :: _ -> Some c
+               | _ -> None) matrix
+           in
+           let try_ctor (cname, fields) =
+             let ar = List.length fields in
+             match useful (fields @ trest)
+                     (specialize_ctor cname ar matrix)
+                     (wilds ar @ qrest) with
+             | Some w ->
+                 let (wf, wr) = split_at ar w in
+                 Some (PCtor (cname, wf) :: wr)
+             | None -> None
+           in
+           (match ty with
+            | TAdt name when Hashtbl.mem adt_decls name ->
+                let ctors = Hashtbl.find adt_decls name in
+                let complete =
+                  List.for_all
+                    (fun (cn, _) -> List.mem cn head_ctor_names) ctors
+                in
+                if complete then
+                  (* every ctor appears: q is useful iff it is useful
+                     under at least one specialization *)
+                  List.fold_left (fun acc c ->
+                    match acc with Some _ -> acc | None -> try_ctor c)
+                    None ctors
+                else
+                  (match useful trest (default_matrix matrix) qrest with
+                   | Some w ->
+                       (* name a missing ctor so the error is actionable *)
+                       (match List.find_opt
+                                (fun (cn, _) ->
+                                  not (List.mem cn head_ctor_names))
+                                ctors with
+                        | Some (cn, fields) ->
+                            Some (PCtor (cn, wilds (List.length fields)) :: w)
+                        | None -> Some (PWild :: w))
+                   | None -> None)
+            | TInt ->
+                (* the int signature is never complete *)
+                (match useful trest (default_matrix matrix) qrest with
+                 | Some w ->
+                     let ints =
+                       List.filter_map (fun row ->
+                         match row with
+                         | PInt i :: _ -> Some i
+                         | _ -> None) matrix
+                     in
+                     let head =
+                       if ints = [] then PWild
+                       else PInt (1 + List.fold_left max (List.hd ints) ints)
+                     in
+                     Some (head :: w)
+                 | None -> None)
+            | _ ->
+                (* column type admits only wild/var patterns *)
+                (match useful trest (default_matrix matrix) qrest with
+                 | Some w -> Some (PWild :: w)
+                 | None -> None)))
+  | _ -> raise (Error "internal: column/pattern arity mismatch in match analysis")
+
 let build_sigs (prog : program) : unit =
   Hashtbl.clear fun_sigs;
   List.iter (fun d ->
@@ -45,7 +290,16 @@ let rec infer env e =
          (* Phase G: fall back to global val env before erroring. *)
          (match Hashtbl.find_opt global_vals x with
           | Some ty -> ty
-          | None -> raise (Error ("Undefined variable: " ^ x))))
+          | None ->
+              (* Phase D: a bare Capitalized name is a nullary ctor
+                 (the parser emits Var for it — no dedicated node). *)
+              (match Hashtbl.find_opt ctor_info x with
+               | Some (adt, [], _) -> TAdt adt
+               | Some (_, fields, _) ->
+                   raise (Error (Printf.sprintf
+                     "constructor %s expects %d argument(s): write %s(...)"
+                     x (List.length fields) x))
+               | None -> raise (Error ("Undefined variable: " ^ x)))))
   | Selector _ -> TSelector
   | Coord _ -> TPos
   | Command _ -> TUnit
@@ -171,6 +425,22 @@ let rec infer env e =
   | App ("tail", [arg]) ->
       let _ = infer env arg in
       TList TInt
+
+  (* Phase D: constructor application. Ctors are Capitalized and
+     top-level fun names are validated lowercase (alpha.ml), so this
+     guard can't shadow a real function. *)
+  | App (f, args) when Hashtbl.mem ctor_info f ->
+      let (adt, fields, _) = Hashtbl.find ctor_info f in
+      if List.length args <> List.length fields then
+        raise (Error (Printf.sprintf
+          "constructor %s expects %d argument(s), got %d"
+          f (List.length fields) (List.length args)));
+      List.iter2 (fun a ft ->
+        let ta = infer env a in
+        if ta <> ft then
+          raise (Error (Printf.sprintf
+            "constructor %s: argument type mismatch" f))) args fields;
+      TAdt adt
 
   | App (f, args) ->
       (match Hashtbl.find_opt fun_sigs f with
@@ -310,10 +580,53 @@ let rec infer env e =
       tr := ty;
       ty
 
-  | Match _ ->
-      (* Phase D / D1 placeholder: full pattern typing + exhaustiveness
-         lands in D3. Unreachable until the D2 parser emits Match. *)
-      raise (Error "match: typing lands in D3")
+  | Match (scrut, arms) ->
+      let tscrut = infer env scrut in
+      (match tscrut with
+       | TAdt name when not (Hashtbl.mem adt_decls name) ->
+           raise (Error (Printf.sprintf
+             "match on a value of undeclared type %s" name))
+       | _ -> ());
+      (* 1. Pattern well-formedness + arm body types (binders shadow
+         the outer env — assoc-list prepend). *)
+      let arm_tys =
+        List.map (fun (p, body) ->
+          let binds = check_pattern tscrut p in
+          infer (binds @ env) body) arms
+      in
+      let t0 = List.hd arm_tys in
+      List.iteri (fun i t ->
+        if t <> t0 then
+          raise (Error (Printf.sprintf
+            "match arms must all have the same type (arm %d disagrees \
+             with arm 1)" (i + 1)))) arm_tys;
+      (* 2. Redundancy: arm k must match some value arms 0..k-1 miss. *)
+      let rows = List.map (fun (p, _) -> [p]) arms in
+      let _ =
+        List.fold_left (fun (i, prev) row ->
+          (match row with
+           | [p] ->
+               (match useful [tscrut] (List.rev prev) row with
+                | Some _ -> ()
+                | None ->
+                    raise (Error (Printf.sprintf
+                      "match arm %d (%s) is unreachable — the arms \
+                       before it already match everything it matches"
+                      (i + 1) (string_of_pattern p))))
+           | _ -> ());
+          (i + 1, row :: prev)) (0, []) rows
+      in
+      (* 3. Exhaustiveness: a wildcard useful against all arms means
+         some value falls through — report a concrete witness. *)
+      (match useful [tscrut] rows [PWild] with
+       | Some (w :: _) ->
+           raise (Error (Printf.sprintf
+             "match is not exhaustive — example of an unmatched value: %s"
+             (string_of_pattern w)))
+       | Some [] ->
+           raise (Error "match is not exhaustive")
+       | None -> ());
+      t0
 
   | For (i, lo, hi, body) ->
       if infer env lo <> TInt then raise (Error "for: lo must be int");
