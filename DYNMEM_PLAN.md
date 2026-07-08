@@ -966,8 +966,71 @@ which is MineTorch's project, not MCaml's.
 > points matched sim ($ret 42/309/22/15/24) — objpool init, tagged
 > cells, and the obj_tag/obj_f<k> macro getters verified in real
 > Minecraft.
-- [ ] D7. Tuples as single-constructor ADTs (sugar): `(a, b)` → `Pair(a, b)` at parse time
-- [ ] D8. Records as named-field single-constructor ADTs: `{ x = 1; y = 2 }` → `Point(1, 2)` at parse time
+- [x] D7. Tuples as single-constructor ADTs (sugar): `(a, b)` → `Pair(a, b)` at parse time
+      (NOT the parse-time ctor desugar the task line predates — decided
+      in §13.5 (commit `08a8b62`) as STRUCTURAL, per the D6 "dedicated
+      variants, not namespace entries" precedent: `TTuple of typ list`,
+      `Tuple of expr list`, `PTuple of pattern list`. Type surface is
+      OCaml's `int * int`: the typ grammar layers into star-separated
+      `typ_atom`s while `ctor_typs` keeps top-level TIMES as the field
+      separator, so `of int * t` stays two fields and a tuple-typed
+      ctor field is written `of (int * int) * t` (typ_atom gains
+      `LPAREN typ RPAREN`). Zero new menhir conflicts. Runtime: one
+      `{tag:0, f0...}` objpool cell via the existing KAdtAlloc with tag
+      0 — 3+n cmds (5 for a pair, verified); components read via
+      KFieldGet (3 cmds) under the D5 used-fields filter (`(a, _)`
+      emits no obj_f1, pinned by harness grep); a TTuple match column
+      is an always-complete single-ctor signature → ZERO obj_tag
+      dispatches (pinned by grep). Maranget: specialize_tuple + TTuple
+      arms in check_pattern/useful; witnesses render as tuple syntax
+      (`(1, _)`, `(Rect(_, _), _)`). Elements follow the D3 ctor-field
+      representability rules (TUnit/TArrDyn/TRef/TArrStatic rejected);
+      tuple params/returns ride the scalar handle convention with zero
+      knormal/cfg_build/codegen edits. Destructuring-let
+      `let (a, b) = e in ...` landed as parse-time sugar for a one-arm
+      match — typing's exhaustiveness check rejects refutable patterns
+      there (`let (0, b) = ...` errors with witness `(1, _)`). Zero new
+      IR ops; zero codegen/optimizer/sim edits (one cosmetic arm in
+      codegen_cfg's region-return failwith message). Implementation
+      commit `14dabd0`.)
+- [x] D8. Records as named-field single-constructor ADTs: `{ x = 1; y = 2 }` → `Point(1, 2)` at parse time
+      (Decl-level nominal, but per the D6 lesson NO ctor is synthesized
+      into ctor_info (a user-spellable name could collide or leak into
+      expression typing's ctor fallback). Dedicated AST — `RecordDecl`,
+      `Record of (string * expr) list`, `PRecord`, `Field of expr *
+      string` — plus typing-side tables `record_decls` (type → decl-
+      order fields) and `record_fields` (field → owner/index/type).
+      ONE GLOBAL FIELD NAMESPACE mirroring D3's ctor namespace: a field
+      name belongs to at most one record type, so literals and `r.x`
+      resolve with zero annotations (cross-decl reuse is a decl-time
+      error). Record values type as `TAdt name`, reusing the TAdt arms
+      for param passing, ctor-field/tuple-element representability, and
+      the D5 region-return rejection; adt_decls/record_decls stay
+      disjoint. Literals require the EXACT field set (unknown/dup/
+      missing = typing errors), evaluate in SOURCE order, and allocate
+      `{tag:0, f0...}` in DECL order via KAdtAlloc tag 0 (knormal owns
+      the rewrite — the parser owns no field tables, and infer stays
+      analysis-only). Patterns may omit fields (missing = PWild); the
+      Maranget column normalizes rows to decl-order vectors and then
+      dispatches exactly like a tuple: single-ctor complete signature,
+      zero obj_tag reads, used-fields filter (omitted/`_` fields emit
+      no obj_f<k> read — pinned by grep). Witnesses render in record
+      syntax (`{x = 1; y = _}`). Field access `r.x` lands via a new
+      DOT lexer token (longest-match keeps `0.5` a FLOAT; selector dots
+      live inside the selector token) → 3-cmd KFieldGet; `{`/`}` lexer
+      rules land and the pre-existing menhir unused-token warnings drop
+      from 3 to 1 (only the IN precedence note remains). Zero new IR
+      ops; zero codegen/optimizer/sim edits. Implementation commit
+      `6a653db`. Tests: `scripts/test_tuples_records.mcaml` (14 int-
+      returning entries per §4.4: tuple round-trip/swap-through-helper/
+      destructuring-let/wildcard/nested, tuple-in-ctor + ctor-in-tuple,
+      record access/permuted literal/permuted pattern/omitted field/
+      cross-function/record-in-ctor, tuple+record match in a for loop)
+      + `/tmp/mcaml_out/test_tuples_records.py` (D9 conventions,
+      uncommitted: $ret + §4.4 post-conditions + zero-obj_tag and
+      no-unused-obj_f grep pins + inexhaustive/redundant rejection
+      probes). All 21 harness checks green; suite 66/66 + async; five
+      canaries byte-identical; all six prior /tmp harnesses green.)
 - [x] D9. Tests: `scripts/test_adts.mcaml` covering variants, nested patterns, exhaustiveness errors, wildcard patterns
       (`scripts/test_adts.mcaml` has 8 int-returning entry points per
       §4.4's public-entry contract: test_ctor_fields (0/1/2-field

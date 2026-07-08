@@ -1,0 +1,93 @@
+(* D7+D8 exit tests: tuples and records as single-ctor ADT sugar.
+   Every entry point returns int per the §4.4 public-entry contract.
+   Validated by /tmp/mcaml_out/test_tuples_records.py, which also greps
+   the emitted files: tuple/record matches emit ZERO obj_tag dispatches,
+   and omitted/wildcard fields emit NO obj_f<k> read. *)
+
+type point = { x : int; y : int }
+type box = Box of (int * int) | Nothing
+type col = Red | Green of int
+type entity = Player of point | Marker
+
+(* --- tuples ---------------------------------------------------------- *)
+
+(* build + match round-trip; all three fields read *)
+fun test_tuple_roundtrip() : int =
+  let t = (3, 4, 10) in
+  match t with (a, b, c) -> a + b + c
+
+(* tuple as fun param AND return (handle convention both ways) *)
+fun swap(p : int * int) : int * int =
+  match p with (a, b) -> (b, a)
+
+fun test_tuple_swap() : int =
+  let (x, y) = swap((5, 16)) in
+  x - y
+
+(* destructuring let is sugar for a one-arm match *)
+fun test_destructuring_let() : int =
+  let (a, b) = (6, 7) in
+  a * b
+
+(* wildcard component: the harness greps that NO obj_f0 read is emitted *)
+fun test_tuple_wild() : int =
+  match (7, 35) with (_, b) -> b
+
+(* nested tuple: inner cell is a handle field of the outer cell *)
+fun test_nested_tuple() : int =
+  match ((2, 3), 4) with ((a, b), c) -> a + b + c
+
+(* tuple as a ctor field — `of (int * int)` parses as ONE field *)
+fun test_tuple_in_ctor() : int =
+  match Box((11, 22)) with
+  | Box(p) -> (match p with (a, b) -> b - a)
+  | Nothing -> 0
+
+(* ctor inside a tuple: tag dispatch happens under the tuple unfold *)
+fun test_ctor_in_tuple() : int =
+  match (Green(8), 5) with
+  | (Green(n), m) -> n * m
+  | (Red, m) -> m
+
+(* --- records --------------------------------------------------------- *)
+
+(* literal + field access *)
+fun test_record_access() : int =
+  let p = { x = 9; y = 16 } in
+  p.x + p.y
+
+(* permuted literal: source-order eval, decl-order storage *)
+fun test_record_permuted() : int =
+  let p = { y = 13; x = 3 } in
+  p.y - p.x
+
+(* permuted pattern fields *)
+fun test_record_pattern() : int =
+  match { x = 6; y = 30 } with { y = b; x = a } -> a + b
+
+(* omitted field = implicit wildcard: harness greps NO obj_f0 read *)
+fun test_record_pattern_omit() : int =
+  match { x = 99; y = 27 } with { y = b } -> b
+
+(* record as fun param AND return *)
+fun shift(p : point, d : int) : point =
+  { x = p.x + d; y = p.y }
+
+fun test_record_cross_fn() : int =
+  let q = shift({ x = 1; y = 20 }, 5) in
+  q.x + q.y
+
+(* record as a ctor field *)
+fun test_record_in_ctor() : int =
+  match Player({ x = 15; y = 8 }) with
+  | Player(p) -> p.x - p.y
+  | Marker -> 0
+
+(* --- both, under a loop (arena growth + §4.4 reset) ------------------ *)
+
+fun test_mix_in_loop() : int =
+  let acc = ref 0 in
+  for i = 0 to 7 do
+    acc := !acc + (match ({ x = i; y = 2 }, i) with (p, n) -> p.x + p.y * n - i)
+  done;
+  !acc
