@@ -1,0 +1,123 @@
+(* Phase D exit tests for ADTs and pattern matching (D5/D9).
+   Each test_* fun is a parameterless entry point invoked from the sim
+   harness in /tmp/mcaml_out/test_adts.py.
+
+   An ADT value is a single int handle (the objpool index of its
+   {tag, f0, f1, ...} cell), so it flows through param_N / $ret like
+   any other int — same convention as lists. Every entry point returns
+   a primitive per §4.4's public-entry contract.
+
+   Expected $ret values:
+     test_ctor_fields        ->  42   (0/1/2-field ctors, complete-sig dispatch)
+     test_nullary_enum       ->  20   (nullary-only enum, uniform {tag:k} cells)
+     test_nested_patterns    -> 309   (ctor-in-ctor decision tree)
+     test_wildcard_binders   ->  57   (PWild vs PVar in ctor fields)
+     test_int_literals       -> 433   (PInt arms + variable default:
+                                       111 + 222 + 100)
+     test_cross_function     ->  31   (ADT built in caller, matched in helper;
+                                       TCO'd self-call inside a match arm)
+     test_helper_returns_adt ->  25   (ADT handle returned from a helper)
+     test_match_in_for_loop  ->  22   (match dispatch per loop iteration) *)
+
+type shape = Point | Circle of int | Rect of int * int
+type color = Red | Green | Blue
+type tree = Leaf of int | Node of tree * tree
+type op = Stop | Add of int | Double
+
+(* Match in a helper body; scrutinee arrives as a handle param. *)
+fun area_ish (s: shape) : int =
+  match s with
+  | Point -> 1
+  | Circle(r) -> r * r
+  | Rect(w, h) -> w * h
+
+fun color_code (c: color) : int =
+  match c with
+  | Red -> 10
+  | Green -> 20
+  | Blue -> 30
+
+(* Nested patterns: the decision tree specializes the outer Node column,
+   then the inner columns; the Leaf(n) row and the two inner-shape rows
+   exercise wildcard expansion of ctor sub-columns. *)
+fun tree_probe (t: tree) : int =
+  match t with
+  | Leaf(n) -> n
+  | Node(Leaf(a), Leaf(b)) -> a + b
+  | Node(Node(_, _), _) -> 100
+  | Node(Leaf(_), Node(_, _)) -> 200
+
+(* Helper that returns a fresh ADT value, exercising the handle-return
+   convention across a function boundary. *)
+fun mk_rect (w: int, h: int) : shape =
+  Rect(w, h)
+
+(* TCO'd self-call inside a match arm: tco.ml rewrites it to a KLoop
+   through the decision tree's KIf chain. *)
+fun count_stops (o: op, n: int, acc: int) : int =
+  match o with
+  | Stop -> (if n = 0 then acc else count_stops(Stop, n - 1, acc + 1))
+  | Add(_) -> acc
+  | Double -> acc
+
+fun apply_op (o: op, acc: int) : int =
+  match o with
+  | Stop -> acc
+  | Add(n) -> acc + n
+  | Double -> acc * 2
+
+fun mk_op (k: int) : op =
+  if k = 0 then Stop
+  else (if k = 1 then Add(k * 10) else Double)
+
+fun test_ctor_fields () : int =
+  area_ish(Point) + area_ish(Circle(4)) + area_ish(Rect(5, 5))
+
+fun test_nullary_enum () : int =
+  color_code(Green)
+
+fun test_nested_patterns () : int =
+  let t1 = Node(Leaf(4), Leaf(5)) in
+  let t2 = Node(Node(Leaf(1), Leaf(2)), Leaf(3)) in
+  let t3 = Node(Leaf(1), Node(Leaf(2), Leaf(3))) in
+  tree_probe(t1) + tree_probe(t2) + tree_probe(t3)
+
+(* PVar binders bind fields; PWild reads nothing (no obj_f read is
+   emitted for a field only wildcards mention). *)
+fun test_wildcard_binders () : int =
+  let s = Rect(50, 7) in
+  match s with
+  | Point -> 0
+  | Circle(_) -> 0
+  | Rect(w, _) -> w + 7
+
+(* Int scrutinee: PInt arms with a variable default binder. *)
+fun test_int_literals () : int =
+  let a = (match 0 with | 0 -> 111 | 7 -> 222 | x -> x * 2) in
+  let b = (match 7 with | 0 -> 111 | 7 -> 222 | x -> x * 2) in
+  let c = (match 50 with | 0 -> 111 | 7 -> 222 | x -> x * 2) in
+  a + b + c
+
+fun test_cross_function () : int =
+  let r = ref 3 in
+  for i = 0 to 3 do
+    r := apply_op(mk_op(i), !r)
+  done;
+  !r + count_stops(Stop, 5, 0)
+
+fun test_helper_returns_adt () : int =
+  let s = mk_rect(5, 5) in
+  area_ish(s)
+
+(* for hi is exclusive: i ranges over {0..4}. Evens build Circle(i),
+   odds build Point: 0 + 1 + 4 + 1 + 16 = 22. *)
+fun test_match_in_for_loop () : int =
+  let acc = ref 0 in
+  for i = 0 to 5 do
+    let s = (if i % 2 = 0 then Circle(i) else Point) in
+    acc := !acc + (match s with
+                   | Point -> 1
+                   | Circle(r) -> r * r
+                   | Rect(_, _) -> 0)
+  done;
+  !acc

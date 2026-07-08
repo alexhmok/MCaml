@@ -926,7 +926,29 @@ which is MineTorch's project, not MCaml's.
 - [ ] D6. Retire `TList`/`Cons`/`Nil`/`head`/`tail`/`is_nil` special cases; relower lists onto `type 'a list = Nil | Cons of 'a * 'a list` (or keep the fast path for ints as an optimization, decide in D6)
 - [ ] D7. Tuples as single-constructor ADTs (sugar): `(a, b)` → `Pair(a, b)` at parse time
 - [ ] D8. Records as named-field single-constructor ADTs: `{ x = 1; y = 2 }` → `Point(1, 2)` at parse time
-- [ ] D9. Tests: `scripts/test_adts.mcaml` covering variants, nested patterns, exhaustiveness errors, wildcard patterns
+- [x] D9. Tests: `scripts/test_adts.mcaml` covering variants, nested patterns, exhaustiveness errors, wildcard patterns
+      (`scripts/test_adts.mcaml` has 8 int-returning entry points per
+      §4.4's public-entry contract: test_ctor_fields (0/1/2-field
+      ctors through a helper, complete-signature dispatch),
+      test_nullary_enum (nullary-only enum, uniform {tag:k} cells),
+      test_nested_patterns (ctor-in-ctor decision tree, the D3
+      witness-battery shapes now executed), test_wildcard_binders
+      (PVar binds a field, PWild emits NO obj_f read — verified by
+      grep on the emitted file), test_int_literals (PInt arms +
+      variable default binder), test_cross_function (ADT built in one
+      function, matched in another; TCO'd self-call inside a match
+      arm), test_helper_returns_adt (handle-return convention), and
+      test_match_in_for_loop (match dispatch per iteration over a
+      for_lift-synthesized loop).
+      Harness `/tmp/mcaml_out/test_adts.py` (not committed — same
+      convention as the A/B/C/N harnesses): compiles, runs each entry
+      in a fresh World, asserts on $ret AND the §4.4 post-conditions
+      ($objpool_next == 0, objpool cells == [] after the arena
+      reset). All 8 green on first run; sim.py unchanged.
+      Exhaustiveness/redundancy REJECTION stays a typing-time behavior
+      pinned by D3's probe battery — re-probed this session
+      ("match is not exhaustive — example of an unmatched value:
+      Point"); the .py harness only runs well-typed programs.)
 
 ### Phase E — Hindley-Milner inference + let-polymorphism
 - [ ] E1. `ast.ml`: extend `typ` with `TVar of tvar ref` and `TScheme of tvar list * typ`
