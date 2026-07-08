@@ -924,6 +924,12 @@ which is MineTorch's project, not MCaml's.
       harnesses green — ICons still 5 cmds, IHead/ITail still 3,
       region budgets unchanged.)
 - [ ] D6. Retire `TList`/`Cons`/`Nil`/`head`/`tail`/`is_nil` special cases; relower lists onto `type 'a list = Nil | Cons of 'a * 'a list` (or keep the fast path for ints as an optimization, decide in D6)
+
+> Post-D4/D5 in-game MANUAL_TEST.md check completed 2026-07-08:
+> combined test_adts + test_cons pack loaded clean, all probed entry
+> points matched sim ($ret 42/309/22/15/24) — objpool init, tagged
+> cells, and the obj_tag/obj_f<k> macro getters verified in real
+> Minecraft.
 - [ ] D7. Tuples as single-constructor ADTs (sugar): `(a, b)` → `Pair(a, b)` at parse time
 - [ ] D8. Records as named-field single-constructor ADTs: `{ x = 1; y = 2 }` → `Point(1, 2)` at parse time
 - [x] D9. Tests: `scripts/test_adts.mcaml` covering variants, nested patterns, exhaustiveness errors, wildcard patterns
@@ -1764,6 +1770,99 @@ helper-file naming) and outline the planned file edits.
 Session 4 is then D6 (retire the TList special case onto the ADT
 machinery, or explicitly decide to keep the int-list fast path) —
 do not start it in this session.
+```
+
+### 8.10 Phase D session 4 kickoff (D6 — list/ADT unification decision)
+
+```
+Read /Users/alexmok/MCaml/DYNMEM_PLAN.md — §2 for current status, §3 and
+§13.5 for settled design decisions, §§4–5 for the runtime ABI, §13 for
+escalation triggers. Read CLAUDE.md for the pipeline layout and the
+manual rebuild command. D5 landed in 3805e57, D9 in c2a4799, and the
+post-D4/D5 in-game MANUAL_TEST check is done (see §2 note); verify §2
+agrees and `git status` is clean before starting.
+
+This session is D6 ALONE: decide the fate of the TList special case,
+then implement the decision. D7/D8 are OUT of scope even if the
+decision makes them look easy.
+
+Make the DECISION FIRST, document it in §13.5 before writing code
+(same protocol as D5's nullary-ctor note). The options, with the cost
+facts that matter:
+
+  (a) Full retirement — Nil/Cons become ordinary ctors of a declared
+      `type list = Nil | Cons of int * list`; `::`/`[]`/`head`/`tail`/
+      `is_nil` desugar to ctor applications and matches. ICons→IAdtAlloc
+      and IHead/ITail→IFieldGet are budget-neutral (5=3+2 and 3=3), BUT
+      nil stops being the free -1 sentinel: every `[]` mention allocates
+      a {tag:0} cell (3 cmds + pool growth per mention, including one
+      per loop iteration in list-building loops) and `is_nil` goes from
+      a 2-cmd compare to a 3-cmd tag read + 2-cmd compare. The C5
+      region walkers and their nil-terminated traversal must be
+      rewritten (they currently terminate on -1 with no cell read).
+      This option regresses committed budgets — treat that as the §13
+      escalation it is unless you find a nil-avoidance scheme.
+
+  (b) Keep the fast path, EXTEND the pattern compiler to lists — the
+      likely winner; evaluate it first. Runtime stays exactly B4–B8:
+      -1 nil sentinel, {tag:1,h,t} cells, ICons 5 / IHead 3 / ITail 3,
+      is_nil unchanged, region walkers untouched. What's added is
+      surface: `[]` and `h :: t` become valid PATTERNS on a TList
+      scrutinee. The decision tree tests nil with the existing
+      Eq-against--1 compare on the HANDLE (no tag read — a non-nil
+      list handle always points at a tag-1 cell, so the nil test alone
+      discriminates the two-ctor signature), and the cons case reads
+      sub-occurrences through the existing IHead/ITail (they ARE the
+      field getters, already 3 cmds). Work: lexer/parser pattern arms
+      for NIL and CONS (watch D2's BELOW_BAR precedence trick — `::`
+      in pattern position must not conflict with expr `::`), typing
+      arms in check_pattern + a two-ctor complete-signature case in
+      the Maranget usefulness matrices for TList, and a TList column
+      kind in knormal's compile_match. head/tail/is_nil builtins stay
+      for straight-line code; document that match subsumes them.
+
+  (c) Keep everything as-is, no list patterns — pure documentation
+      decision. Cheapest, but leaves `match` unable to see lists,
+      which undercuts D5's value for the most list-shaped code in the
+      language. Pick this only if (b) hits a concrete blocker.
+
+Settled constraints that survive whatever you pick:
+- Nil sentinel -1 (§4.2) and the §5.1–5.2 command budgets are
+  committed ABI unless §13 escalation says otherwise.
+- The C5 stash/rebuild walkers hardcode tag:1 and the h/t field names;
+  any cell-layout change must update them in the same commit.
+- Tags are per-type; the builtin list type's Cons is tag 1 (D4), and
+  if lists gain a nominal decl the Nil/Cons tags must not disturb the
+  {tag:1} cells the walkers and cmd_cons emit.
+- Exhaustiveness/redundancy for list patterns must go through the same
+  D3 Maranget machinery — no side-channel approximation.
+
+Guardrails:
+- Baseline BEFORE the first edit: rebuild per CLAUDE.md, suite green
+  (66 checks), hash the five canaries; all five /tmp harnesses green
+  (test_dyn_array, test_cons, test_regions, test_fixed_point,
+  test_adts — regenerate per §2 conventions if /tmp was cleared).
+- The five canaries stay byte-identical.
+- Cons/region command sequences must not change under option (b);
+  under option (a) any change is a flagged escalation, not a silent
+  landing.
+- New list-pattern lowering verified by CFG dump + command count on a
+  probe (nil arm = the 2-cmd compare, cons arm = 3-cmd IHead/ITail
+  reads) BEFORE extending the test suite.
+- Extend scripts/test_adts.mcaml (or a new scripts/test_list_match
+  .mcaml + harness) with list-pattern entries: []/cons dispatch,
+  binder patterns h :: t, nested list-in-ctor and ctor-in-list
+  patterns, a tail-recursive sum via match (replacing the is_nil/
+  head/tail idiom), and an inexhaustive list match rejected at typing.
+
+After the task: update §2 and §13.5, commit with the task ID (D6;
+split the decision-doc commit from the implementation commit if the
+diff is large). If you hit any §13 escalation trigger, stop and tell
+me. Before writing code, confirm the chosen option and outline the
+planned file edits.
+
+Session 5 is then D7+D8 (tuples and records as single-ctor ADT sugar,
+both parse-time desugarings) — do not start them in this session.
 ```
 
 ## 9. Rollback and A/B flags
