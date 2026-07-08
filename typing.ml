@@ -481,16 +481,17 @@ let rec check_pattern (t : typ) (p : pattern) : (string * typ) list =
         (string_of_pattern p));
       []
   | PNil ->
-      (* Phase E: unification-based — a tvar scrutinee is pinned to a
-         list here. Still v1 monomorphic int lists until E4b. *)
-      unify_msg t (TList TInt) "pattern [] requires a list scrutinee";
+      (* E4b: element-generic — a tvar scrutinee pins to a fresh list. *)
+      unify_msg t (TList (fresh_tvar ()))
+        "pattern [] requires a list scrutinee";
       []
   | PCons (ph, pt) ->
-      (* D6: v1 monomorphic int lists (B2) — head is int, tail is list.
-         A ctor sub-pattern in head position is therefore untypeable
-         until E4b, matching the fact that `::` can't build one. *)
-      unify_msg t (TList TInt) "pattern _ :: _ requires a list scrutinee";
-      check_pattern TInt ph @ check_pattern (TList TInt) pt
+      (* E4b: 'a list — the head sub-pattern checks against the
+         element type, so ctor-in-list patterns (`Circle(r) :: t`) are
+         now typeable (the D6 scope note coming due). *)
+      let elem = fresh_tvar () in
+      unify_msg t (TList elem) "pattern _ :: _ requires a list scrutinee";
+      check_pattern elem ph @ check_pattern (TList elem) pt
   | PRecord fields ->
       (match resolve t with
        | TVar _ ->
@@ -761,7 +762,13 @@ let rec useful (tys : typ list) (matrix : pattern list list)
             | Some w -> Some (PNil :: w)
             | None -> None)
        | PCons (ph, pt) ->
-           (match useful (TInt :: TList TInt :: trest)
+           (* E4b: sub-columns carry the scrutinee's element type. A
+              defensive TInt covers the can't-happen unresolved case
+              (check_pattern pinned the column before matrices run). *)
+           let elem =
+             match resolve ty with TList e -> e | _ -> TInt
+           in
+           (match useful (elem :: TList elem :: trest)
                     (specialize_cons matrix) (ph :: pt :: qrest) with
             | Some w ->
                 let (wf, wr) = split_at 2 w in
@@ -841,9 +848,10 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                             Some (PCtor (cn, wilds (List.length fields)) :: w)
                         | None -> Some (PWild :: w))
                    | None -> None)
-            | TList _ ->
+            | TList elem ->
                 (* D6: the list signature is complete iff both a []
-                   and a :: head appear in the column. *)
+                   and a :: head appear in the column. E4b: cons
+                   sub-columns carry the element type. *)
                 let has_nil =
                   List.exists (fun row ->
                     match row with PNil :: _ -> true | _ -> false) matrix
@@ -856,7 +864,7 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                   (match useful trest (specialize_nil matrix) qrest with
                    | Some w -> Some (PNil :: w)
                    | None ->
-                       (match useful (TInt :: TList TInt :: trest)
+                       (match useful (elem :: TList elem :: trest)
                                 (specialize_cons matrix)
                                 (PWild :: PWild :: qrest) with
                         | Some w ->
@@ -1031,14 +1039,14 @@ let rec infer env e =
       let _ = infer env e1 in
       infer env e2
 
-  (* Phase B builtins: is_nil returns TBool so it can be used directly
-     as an `if` condition; head returns TInt (the element); tail returns
-     TList TInt (the rest of the list). All three accept any arg type
-     since v1 is monomorphic int lists and the runtime only sees int
-     handles — validating the arg type would just block the let-binding
-     pattern `let l = 1 :: [] in head(l)` where l infers as TList TInt. *)
+  (* Phase B builtins, E4b-generic: is_nil : 'a list -> bool,
+     head : 'a list -> 'a, tail : 'a list -> 'a list. The pre-E4b
+     accept-anything laxity is gone — unification makes the let-binding
+     pattern `let l = 1 :: [] in head(l)` type directly, which was the
+     only reason for it. *)
   | App ("is_nil", [arg]) ->
-      let _ = infer env arg in
+      unify_msg (infer env arg) (TList (fresh_tvar ()))
+        "is_nil: arg must be a list";
       TBool
 
   (* Phase N / N5: Q16.16 fixed-point multiply/divide/negate builtins.
@@ -1110,11 +1118,13 @@ let rec infer env e =
         "array_set: value type does not match element type";
       TUnit
   | App ("head", [arg]) ->
-      let _ = infer env arg in
-      TInt
+      let elem = fresh_tvar () in
+      unify_msg (infer env arg) (TList elem) "head: arg must be a list";
+      elem
   | App ("tail", [arg]) ->
-      let _ = infer env arg in
-      TList TInt
+      let elem = fresh_tvar () in
+      unify_msg (infer env arg) (TList elem) "tail: arg must be a list";
+      TList elem
 
   (* Phase D: constructor application. Ctors are Capitalized and
      top-level fun names are validated lowercase (alpha.ml), so this
@@ -1321,17 +1331,24 @@ let rec infer env e =
                   ".%s requires a value of record type %s" f owner))))
 
   | Nil ->
-      (* v1: monomorphic int lists. Nil defaults to TList TInt; the Cons
-         rule below rejects anything else. *)
-      TList TInt
+      (* E4b: 'a list — every [] mention gets a fresh element tvar,
+         pinned by unification (or defaulted to TInt at the knormal
+         boundary if nothing constrains it — which preserves the old
+         `[]` behavior exactly). Runtime unchanged: nil is the -1
+         sentinel regardless of element type. *)
+      TList (fresh_tvar ())
 
   | Cons (h, t) ->
       let th = infer env h in
       let tt = infer env t in
-      unify_msg th TInt
-        "::: v1 only supports int lists (head must be int)";
-      unify_msg tt (TList TInt) ":: tail must be a list of int";
-      TList TInt
+      let elem = fresh_tvar () in
+      unify_msg tt (TList elem) ":: tail must be a list";
+      (try unify th elem
+       with Unify_fail _ ->
+         raise (Error (Printf.sprintf
+           ":: head type %s does not match the list element type %s"
+           (string_of_typ th) (string_of_typ elem))));
+      TList elem
 
   | Region (tr, e) ->
       (* Infer the body's type and write it into the shared ref so
