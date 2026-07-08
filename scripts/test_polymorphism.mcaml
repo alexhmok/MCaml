@@ -1,0 +1,74 @@
+(* Phase E / E8: HM inference + let-polymorphism exit tests.
+   Every entry returns int per the §4.4 public-entry contract.
+   Polymorphic helpers are declared BEFORE their uses — §13.10
+   decision 7: forward calls see a monotype, so polymorphic USE
+   requires decl-before-use (same source-order rule as type decls).
+   Companion harness: /tmp/mcaml_out/test_polymorphism.py (D9
+   conventions, uncommitted) — also probes the rejection paths
+   (value restriction, annotation mismatch, occurs check, unify-fail
+   diagnostics) from inline sources. *)
+
+type shape = Circle of int | Rect of int * int
+
+(* The polymorphic core: id : 'a -> 'a, swap : ('a * 'b) -> ('b * 'a),
+   len : 'a list -> int. All first-order (map/fold need Phase F).
+   None carries an annotation — signatures are fully inferred, then
+   generalized. Each compiles ONCE (§13.1 uniform representation):
+   the harness greps the build dir to pin zero per-type clones. *)
+fun id(x) = x
+
+fun swap(p) = match p with (a, b) -> (b, a)
+
+fun len(l) = match l with [] -> 0 | _ :: t -> 1 + len(t)
+
+(* Monomorphic-by-use list sum: h + ... pins the element type. *)
+fun sum(l) = match l with [] -> 0 | h :: t -> h + sum(t)
+
+(* id at int *)
+fun test_id_int() = id(41) + 1
+
+(* id at bool — the same compiled id.mcfunction *)
+fun test_id_bool() = if id(true) then 7 else 0
+
+(* id at list: identity on the handle; traversal still works *)
+fun test_id_list() = sum(id(1 :: 2 :: 3 :: []))
+
+(* id at tuple, destructured *)
+fun test_id_tuple() =
+  let (a, b) = id((30, 12)) in a + b
+
+(* id at a user ADT *)
+fun test_id_adt() =
+  match id(Circle(5)) with Circle(r) -> r | Rect(w, h) -> w + h
+
+(* len at three element types in one program: int, bool, and the
+   fresh-tvar [] (which defaults to int at the knormal boundary) *)
+fun test_len_poly() =
+  len(1 :: 2 :: 3 :: []) * 100 + len(true :: []) * 10 + len([])
+
+(* swap at (bool * int) and at (int * int) in one program *)
+fun test_swap() =
+  let (n, flag) = swap((true, 5)) in
+  let (p, q) = swap((1, 2)) in
+  (if flag then n * 2 else 0) * 4 + p + q * 100
+
+(* un-annotated params inferred from use (both pinned to int by `*`) *)
+fun scale(a, b) = a * b + a
+fun test_infer_from_use() = scale(6, 6)
+
+(* E3 let-generalization proper: n = [] is a syntactic value, so it
+   generalizes to forall 'a. 'a list and is used at int AND bool
+   element types in one body. Without generalization the second use
+   would fail to unify. *)
+fun test_let_generalize() =
+  let n = [] in
+  len(1 :: n) + len(true :: n) * 10
+
+(* ctor-in-list patterns (E4b, the D6 scope note): dispatch on the
+   head's constructor through the list column *)
+fun first_area(l) =
+  match l with
+  | [] -> 0
+  | Circle(r) :: _ -> r * r
+  | Rect(w, h) :: _ -> w * h
+fun test_ctor_in_list() = first_area(Rect(6, 7) :: Circle(3) :: [])
