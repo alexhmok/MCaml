@@ -54,11 +54,190 @@ let record_fields : (string, string * int * typ) Hashtbl.t =
 
 let is_record_type (name : string) : bool = Hashtbl.mem record_decls name
 
+(* ---- Phase E: Hindley-Milner unification engine (§13.10) ------------- *)
+
+(* Destructive tvars: TVar (ref None) = unbound, TVar (ref (Some t)) =
+   linked. [resolve] follows the link spine with path compression; it
+   returns a typ whose HEAD constructor is never a bound TVar (an
+   unbound TVar can still appear, and bound TVars may survive deeper
+   inside — use [zonk_default] when a fully-concrete typ is required). *)
+let rec resolve (t : typ) : typ =
+  match t with
+  | TVar r ->
+      (match !r with
+       | Some t' ->
+           let t'' = resolve t' in
+           r := Some t'';
+           t''
+       | None -> t)
+  | _ -> t
+
+let fresh_tvar () : typ = TVar (ref None)
+
+(* Stable display names for unbound tvars ('a, 'b, ... then 't26, ...)
+   keyed by ref identity, so one error message naming two types renders
+   a shared tvar consistently. Compilation aborts on the first Error,
+   so the table never grows meaningfully. *)
+let tvar_names : (typ option ref * string) list ref = ref []
+
+let tvar_name (r : typ option ref) : string =
+  match List.find_opt (fun (r', _) -> r' == r) !tvar_names with
+  | Some (_, n) -> n
+  | None ->
+      let i = List.length !tvar_names in
+      let n =
+        if i < 26 then Printf.sprintf "'%c" (Char.chr (Char.code 'a' + i))
+        else Printf.sprintf "'t%d" i
+      in
+      tvar_names := (r, n) :: !tvar_names;
+      n
+
+let rec string_of_typ (t : typ) : string =
+  match resolve t with
+  | TInt -> "int"
+  | TFloat -> "float"
+  | TBool -> "bool"
+  | TUnit -> "unit"
+  | TSelector -> "selector"
+  | TPos -> "pos"
+  | TArrStatic (t, n) -> Printf.sprintf "arr[%s, %d]" (string_of_typ t) n
+  | TMat (t, m, n) -> Printf.sprintf "mat[%s, %d, %d]" (string_of_typ t) m n
+  | TArrDyn t -> Printf.sprintf "darr[%s]" (string_of_typ t)
+  | TRef t -> "ref " ^ string_of_typ t
+  | TList t -> string_of_typ t ^ " list"
+  | TTuple ts ->
+      "(" ^ String.concat " * " (List.map string_of_typ ts) ^ ")"
+  | TAdt n -> n
+  | TVar r -> tvar_name r
+
+let rec occurs (r : typ option ref) (t : typ) : bool =
+  match resolve t with
+  | TVar r' -> r == r'
+  | TList t | TArrDyn t | TRef t | TArrStatic (t, _) | TMat (t, _, _) ->
+      occurs r t
+  | TTuple ts -> List.exists (occurs r) ts
+  | TInt | TFloat | TBool | TUnit | TSelector | TPos | TAdt _ -> false
+
+exception Unify_fail of typ * typ
+
+(* §13.10 amendment (discovered in E2): a tvar may only bind to a type
+   whose runtime value is ONE scoreboard int — TInt/TFloat/TBool and the
+   handle types TList/TTuple/TAdt (or another tvar). Binding to TArrDyn
+   (a base+len vreg PAIR), TArrStatic/TMat (compile-time storage, and
+   the monomorphize template trigger), TRef (global slot, second-class),
+   or TUnit/TSelector/TPos would let a polymorphic function silently
+   miscompile — e.g. a generalized `fun pair_up(x) = (x, 0)` applied to
+   a darr would drop the length vreg. Non-uniform params keep requiring
+   explicit annotations, exactly as they do today. *)
+let tvar_bindable (t : typ) : string option =
+  match t with
+  | TInt | TFloat | TBool | TList _ | TTuple _ | TAdt _ | TVar _ -> None
+  | TArrDyn _ -> Some "darr"
+  | TArrStatic _ -> Some "static array"
+  | TMat _ -> Some "matrix"
+  | TRef _ -> Some "ref"
+  | TUnit -> Some "unit"
+  | TSelector -> Some "selector"
+  | TPos -> Some "pos"
+
+let rec unify (t1 : typ) (t2 : typ) : unit =
+  let t1 = resolve t1 and t2 = resolve t2 in
+  match t1, t2 with
+  | TVar r1, TVar r2 when r1 == r2 -> ()
+  | TVar r, t | t, TVar r ->
+      if occurs r t then
+        raise (Error (Printf.sprintf
+          "occurs check failed: the type variable %s occurs inside %s — \
+           cannot construct an infinite type (a value cannot contain \
+           itself, e.g. `x :: x`)"
+          (tvar_name r) (string_of_typ t)));
+      (match tvar_bindable t with
+       | Some kind ->
+           raise (Error (Printf.sprintf
+             "cannot infer a polymorphic type for a %s value — type \
+              variables range over single-scoreboard-int values \
+              (int/float/bool/list/tuple/ADT); annotate the parameter \
+              explicitly" kind))
+       | None -> ());
+      r := Some t
+  | TInt, TInt | TFloat, TFloat | TBool, TBool | TUnit, TUnit
+  | TSelector, TSelector | TPos, TPos -> ()
+  | TList a, TList b -> unify a b
+  | TArrDyn a, TArrDyn b -> unify a b
+  | TRef a, TRef b -> unify a b
+  | TArrStatic (a, n), TArrStatic (b, m) when n = m -> unify a b
+  | TMat (a, r1, c1), TMat (b, r2, c2) when r1 = r2 && c1 = c2 -> unify a b
+  | TTuple xs, TTuple ys when List.length xs = List.length ys ->
+      List.iter2 unify xs ys
+  | TAdt a, TAdt b when a = b -> ()
+  | _ -> raise (Unify_fail (t1, t2))
+
+(* Unify with a legacy error message: every type check that predates
+   Phase E keeps its exact error string by routing through this. *)
+let unify_msg (t1 : typ) (t2 : typ) (msg : string) : unit =
+  try unify t1 t2 with Unify_fail _ -> raise (Error msg)
+
+(* Unify on a new (Phase E) path: the default diagnostic names both
+   types (E8 quality requirement). *)
+let unify_types (t1 : typ) (t2 : typ) : unit =
+  try unify t1 t2
+  with Unify_fail (a, b) ->
+    raise (Error (Printf.sprintf "cannot unify %s with %s"
+                    (string_of_typ a) (string_of_typ b)))
+
+(* Fully resolve a typ, binding any still-unbound tvar to TInt
+   (§13.10 decision 5 — sound under §13.1 uniform representation).
+   This is the knormal-boundary zonk (E6) and the Region typ-ref
+   writer; the result contains no TVar at any depth. *)
+let rec zonk_default (t : typ) : typ =
+  match resolve t with
+  | TVar r -> r := Some TInt; TInt
+  | TList t -> TList (zonk_default t)
+  | TArrDyn t -> TArrDyn (zonk_default t)
+  | TRef t -> TRef (zonk_default t)
+  | TArrStatic (t, n) -> TArrStatic (zonk_default t, n)
+  | TMat (t, m, n) -> TMat (zonk_default t, m, n)
+  | TTuple ts -> TTuple (List.map zonk_default ts)
+  | (TInt | TFloat | TBool | TUnit | TSelector | TPos | TAdt _) as t -> t
+
+(* ---- Schemes (§13.10 decision 2: env-side, typ stays scheme-free) --- *)
+
+type scheme = { qvars : typ option ref list; sbody : typ }
+
+let mono (t : typ) : scheme = { qvars = []; sbody = t }
+
+let instantiate (s : scheme) : typ =
+  match s.qvars with
+  | [] -> s.sbody
+  | qs ->
+      let mapping = List.map (fun q -> (q, fresh_tvar ())) qs in
+      let rec copy (t : typ) : typ =
+        match resolve t with
+        | TVar r ->
+            (match List.find_opt (fun (q, _) -> q == r) mapping with
+             | Some (_, f) -> f
+             | None -> TVar r)
+        | TList t -> TList (copy t)
+        | TArrDyn t -> TArrDyn (copy t)
+        | TRef t -> TRef (copy t)
+        | TArrStatic (t, n) -> TArrStatic (copy t, n)
+        | TMat (t, m, n) -> TMat (copy t, m, n)
+        | TTuple ts -> TTuple (List.map copy ts)
+        | (TInt | TFloat | TBool | TUnit | TSelector | TPos | TAdt _)
+          as t -> t
+      in
+      copy s.sbody
+
 (* ADT ctor fields must be single-scoreboard-int values (§12.1 uniform
    representation): scalars and handles. TArrDyn is a (base, len) vreg
    PAIR per §3.4 so it doesn't fit one cell field — rejected in v1. *)
 let rec check_field_type (decl : string) (cname : string) (ft : typ) : unit =
-  match ft with
+  match resolve ft with
+  | TVar _ -> ()
+      (* Phase E: an unbound tvar can only ever resolve to a single-int
+         type (unify's tvar_bindable restriction), all of which are
+         representable cell fields — so accepting it here is sound.
+         Decl-time fields are always annotation-concrete anyway. *)
   | TInt | TFloat | TBool -> ()
   | TList _ -> ()   (* single int handle *)
   | TTuple ts ->
@@ -123,7 +302,8 @@ let register_type_decl (name : string) (ctors : constructor list) : unit =
    register_type_decl, plus the global-field-namespace check. *)
 let check_record_field_type (decl : string) (fname : string) (ft : typ)
     : unit =
-  match ft with
+  match resolve ft with
+  | TVar _ -> ()   (* Phase E: see check_field_type's TVar note *)
   | TInt | TFloat | TBool | TList _ -> ()
   | TTuple ts -> List.iter (check_field_type decl fname) ts
   | TAdt n ->
@@ -211,25 +391,39 @@ let rec check_pattern (t : typ) (p : pattern) : (string * typ) list =
   | PWild -> []
   | PVar x -> [(x, t)]
   | PInt _ ->
-      if t <> TInt then
-        raise (Error (Printf.sprintf
-          "int literal pattern %s requires an int scrutinee"
-          (string_of_pattern p)));
+      unify_msg t TInt (Printf.sprintf
+        "int literal pattern %s requires an int scrutinee"
+        (string_of_pattern p));
       []
   | PNil ->
-      (match t with
-       | TList TInt -> []
-       | _ -> raise (Error "pattern [] requires a list scrutinee"))
+      (* Phase E: unification-based — a tvar scrutinee is pinned to a
+         list here. Still v1 monomorphic int lists until E4b. *)
+      unify_msg t (TList TInt) "pattern [] requires a list scrutinee";
+      []
   | PCons (ph, pt) ->
       (* D6: v1 monomorphic int lists (B2) — head is int, tail is list.
          A ctor sub-pattern in head position is therefore untypeable
-         until Phase E, matching the fact that `::` can't build one. *)
-      (match t with
-       | TList TInt ->
-           check_pattern TInt ph @ check_pattern (TList TInt) pt
-       | _ -> raise (Error "pattern _ :: _ requires a list scrutinee"))
+         until E4b, matching the fact that `::` can't build one. *)
+      unify_msg t (TList TInt) "pattern _ :: _ requires a list scrutinee";
+      check_pattern TInt ph @ check_pattern (TList TInt) pt
   | PRecord fields ->
-      (match t with
+      (match resolve t with
+       | TVar _ ->
+           (* Phase E: an unannotated scrutinee — resolve the owner
+              record type from the first field name (one global field
+              namespace, same rule as the Record literal arm), pin the
+              scrutinee, and re-dispatch on the now-concrete type. *)
+           (match fields with
+            | [] -> raise (Error "record pattern requires a record scrutinee")
+            | (f0, _) :: _ ->
+                (match Hashtbl.find_opt record_fields f0 with
+                 | Some (owner, _, _) ->
+                     unify_msg t (TAdt owner)
+                       "record pattern requires a record scrutinee";
+                     check_pattern (TAdt owner) p
+                 | None ->
+                     raise (Error (Printf.sprintf
+                       "unknown record field %s" f0))))
        | TAdt name when Hashtbl.mem record_decls name ->
            let decl = Hashtbl.find record_decls name in
            (* dup fields within the pattern *)
@@ -254,12 +448,19 @@ let rec check_pattern (t : typ) (p : pattern) : (string * typ) list =
        | _ ->
            raise (Error "record pattern requires a record scrutinee"))
   | PTuple ps ->
-      (match t with
+      (match resolve t with
        | TTuple ts ->
            if List.length ts <> List.length ps then
              raise (Error (Printf.sprintf
                "tuple pattern has %d component(s) but the scrutinee is \
                 a %d-tuple" (List.length ps) (List.length ts)));
+           List.concat (List.map2 check_pattern ts ps)
+       | TVar _ ->
+           (* Phase E: pin an unannotated scrutinee to a tuple of the
+              pattern's arity with fresh element tvars. *)
+           let ts = List.map (fun _ -> fresh_tvar ()) ps in
+           unify_msg t (TTuple ts)
+             "tuple pattern requires a tuple scrutinee";
            List.concat (List.map2 check_pattern ts ps)
        | _ ->
            raise (Error "tuple pattern requires a tuple scrutinee"))
@@ -268,14 +469,14 @@ let rec check_pattern (t : typ) (p : pattern) : (string * typ) list =
        | None ->
            raise (Error ("Unknown constructor in pattern: " ^ c))
        | Some (adt, fields, _) ->
-           (match t with
-            | TAdt name when name = adt ->
-                if List.length ps <> List.length fields then
-                  raise (Error (Printf.sprintf
-                    "constructor %s expects %d argument(s) but the \
-                     pattern has %d" c (List.length fields)
-                    (List.length ps)));
-                List.concat (List.map2 check_pattern fields ps)
+           (match resolve t with
+            | TVar _ ->
+                (* Phase E: the ctor names its owning type — pin the
+                   scrutinee. *)
+                unify_msg t (TAdt adt) (Printf.sprintf
+                  "constructor pattern %s requires a scrutinee of type %s"
+                  c adt)
+            | TAdt name when name = adt -> ()
             | TAdt name ->
                 raise (Error (Printf.sprintf
                   "constructor %s belongs to type %s but the scrutinee \
@@ -283,13 +484,24 @@ let rec check_pattern (t : typ) (p : pattern) : (string * typ) list =
             | _ ->
                 raise (Error (Printf.sprintf
                   "constructor pattern %s requires a scrutinee of type %s"
-                  c adt))))
+                  c adt)));
+           if List.length ps <> List.length fields then
+             raise (Error (Printf.sprintf
+               "constructor %s expects %d argument(s) but the \
+                pattern has %d" c (List.length fields)
+               (List.length ps)));
+           List.concat (List.map2 check_pattern fields ps))
 
 (* D7: tuple elements live in objpool cell fields, so they follow the
    same representability rules as ctor fields, with tuple-specific
    messages. *)
 let rec check_tuple_elem (ty : typ) : unit =
-  match ty with
+  match resolve ty with
+  | TVar _ -> ()
+      (* Phase E: unify's tvar_bindable restriction guarantees this can
+         only resolve to a single-int type — every one a representable
+         cell field. This is what keeps a tuple-polymorphic swap
+         (E8) typeable without a representability hole. *)
   | TInt | TFloat | TBool -> ()
   | TList _ -> ()
   | TTuple ts -> List.iter check_tuple_elem ts
@@ -425,7 +637,7 @@ let rec useful (tys : typ list) (matrix : pattern list list)
             | None -> None)
        | PTuple ps ->
            let ts =
-             match ty with
+             match resolve ty with
              | TTuple ts -> ts
              | _ ->
                  raise (Error
@@ -441,7 +653,7 @@ let rec useful (tys : typ list) (matrix : pattern list list)
             | None -> None)
        | PRecord qfields ->
            let decl =
-             match ty with
+             match resolve ty with
              | TAdt n when Hashtbl.mem record_decls n ->
                  Hashtbl.find record_decls n
              | _ ->
@@ -489,7 +701,12 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                  Some (PCtor (cname, wf) :: wr)
              | None -> None
            in
-           (match ty with
+           (* Phase E: resolve before dispatching on the column type. A
+              still-unbound tvar column can only carry wild/var patterns
+              (anything stronger would have bound it in check_pattern),
+              so it falls to the final catch-all arm — witnesses never
+              contain tvars. *)
+           (match resolve ty with
             | TAdt name when Hashtbl.mem record_decls name ->
                 (* D8: record column — a single always-present "ctor",
                    same shape as the TTuple arm below. *)
@@ -628,6 +845,11 @@ let build_sigs (prog : program) : unit =
     | Val _ | TypeDecl _ | RecordDecl _ -> ()
   ) prog
 
+(* Phase E: [infer] is unification-based. The env maps name -> scheme
+   (§13.10 decision 2); a public wrapper below restores the historical
+   (string * typ) list signature for main.ml / for_lift call sites.
+   Every pre-Phase-E type check routes through [unify_msg] with its
+   original error string. *)
 let rec infer env e =
   match e with
   | Int _ -> TInt
@@ -639,8 +861,9 @@ let rec infer env e =
   | Bool _ -> TBool
   | Str _ -> TUnit (* Strings are special, treated as Unit for logic *)
   | Var x ->
-      (try List.assoc x env
-       with Not_found ->
+      (match List.assoc_opt x env with
+       | Some s -> instantiate s
+       | None ->
          (* Phase G: fall back to global val env before erroring. *)
          (match Hashtbl.find_opt global_vals x with
           | Some ty -> ty
@@ -661,31 +884,60 @@ let rec infer env e =
   | BinOp (op, e1, e2) ->
       let t1 = infer env e1 in
       let t2 = infer env e2 in
-      (match op, t1, t2 with
-       | (Add|Sub|Mult|Div|Mod), TInt, TInt -> TInt
-       (* Phase N / N5: Add and Sub on Q16.16 are scalar-identical to
-          int add/sub because (x*65536 + y*65536) = (x+y)*65536.
-          Mult/Div on TFloat are rejected — users must call fmul/fdiv
-          which lower to FMult/FDiv (different codegen). *)
-       | (Add|Sub), TFloat, TFloat -> TFloat
-       | (Mult|Div), TFloat, TFloat ->
-           raise (Error "use fmul/fdiv for Q16.16 multiply/divide; \
-                         `*` and `/` on float would emit int semantics \
-                         and silently lose the fractional part")
-       | (Eq|Neq|Lt|Gt|Leq|Geq), TInt, TInt -> TBool
-       | (Eq|Neq|Lt|Gt|Leq|Geq), TFloat, TFloat -> TBool
-       | (And|Or), TBool, TBool -> TBool
-       | _ -> raise (Error "Type mismatch in binary operation"))
+      (match op with
+       | Add | Sub | Mult | Div | Mod ->
+           unify_msg t1 t2 "Type mismatch in binary operation";
+           (match resolve t1 with
+            | TInt -> TInt
+            (* Phase N / N5: Add and Sub on Q16.16 are scalar-identical
+               to int add/sub because (x*65536 + y*65536) = (x+y)*65536.
+               Mult/Div on TFloat are rejected — users must call
+               fmul/fdiv which lower to FMult/FDiv (different codegen).
+               Mod on TFloat falls through to the generic rejection,
+               exactly as before Phase E. *)
+            | TFloat ->
+                (match op with
+                 | Add | Sub -> TFloat
+                 | Mult | Div ->
+                     raise (Error "use fmul/fdiv for Q16.16 multiply/divide; \
+                                   `*` and `/` on float would emit int semantics \
+                                   and silently lose the fractional part")
+                 | _ -> raise (Error "Type mismatch in binary operation"))
+            | TVar _ ->
+                (* §13.10 decision 5: two unconstrained operands default
+                   to int eagerly (OCaml-compatible `+`). *)
+                unify_msg t1 TInt "Type mismatch in binary operation";
+                TInt
+            | _ -> raise (Error "Type mismatch in binary operation"))
+       | Eq | Neq | Lt | Gt | Leq | Geq ->
+           unify_msg t1 t2 "Type mismatch in binary operation";
+           (match resolve t1 with
+            | TInt | TFloat -> TBool
+            | TVar _ ->
+                unify_msg t1 TInt "Type mismatch in binary operation";
+                TBool
+            | _ -> raise (Error "Type mismatch in binary operation"))
+       | And | Or ->
+           unify_msg t1 TBool "Type mismatch in binary operation";
+           unify_msg t2 TBool "Type mismatch in binary operation";
+           TBool
+       | FMult | FDiv ->
+           (* Internal ops minted by knormal from fmul/fdiv Apps — the
+              surface parser never produces them, so reaching this arm
+              was and stays the generic rejection (pre-E catch-all). *)
+           raise (Error "Type mismatch in binary operation"))
 
   | Let (x, e1, e2) ->
       let t1 = infer env e1 in
-      infer ((x, t1) :: env) e2
+      (* E3 (let-generalization) lands here; until then every let is
+         monomorphic, which is exactly the pre-Phase-E behavior. *)
+      infer ((x, mono t1) :: env) e2
 
   | If (cond, e1, e2) ->
-      if infer env cond <> TBool then raise (Error "If condition must be Bool");
+      unify_msg (infer env cond) TBool "If condition must be Bool";
       let t1 = infer env e1 in
       let t2 = infer env e2 in
-      if t1 <> t2 then raise (Error "If branches must have same type");
+      unify_msg t1 t2 "If branches must have same type";
       t1
 
   | Seq (e1, e2) ->
@@ -711,21 +963,21 @@ let rec infer env e =
      and Sub are one scoreboard op each; FMult and FDiv are multi-
      command inlined sequences (see N6/N7). *)
   | App ("fmul", [a; b]) ->
-      if infer env a <> TFloat then raise (Error "fmul: first arg must be float");
-      if infer env b <> TFloat then raise (Error "fmul: second arg must be float");
+      unify_msg (infer env a) TFloat "fmul: first arg must be float";
+      unify_msg (infer env b) TFloat "fmul: second arg must be float";
       TFloat
   | App ("fdiv", [a; b]) ->
-      if infer env a <> TFloat then raise (Error "fdiv: first arg must be float");
-      if infer env b <> TFloat then raise (Error "fdiv: second arg must be float");
+      unify_msg (infer env a) TFloat "fdiv: first arg must be float";
+      unify_msg (infer env b) TFloat "fdiv: second arg must be float";
       TFloat
   | App ("neg_f", [a]) ->
-      if infer env a <> TFloat then raise (Error "neg_f: arg must be float");
+      unify_msg (infer env a) TFloat "neg_f: arg must be float";
       TFloat
   | App ("to_float", [a]) ->
-      if infer env a <> TInt then raise (Error "to_float: arg must be int");
+      unify_msg (infer env a) TInt "to_float: arg must be int";
       TFloat
   | App ("to_int", [a]) ->
-      if infer env a <> TFloat then raise (Error "to_int: arg must be float");
+      unify_msg (infer env a) TFloat "to_int: arg must be float";
       TInt
   (* Phase N §12.1: TFloat and TInt share the same 32-bit runtime
      representation, so bit-level reinterpretation is free. These
@@ -733,10 +985,10 @@ let rec infer env e =
      by lib/math.mcaml to compute fractional-raw = x_bits mod 65536
      etc. on a Q16.16 value. *)
   | App ("raw_of_float", [a]) ->
-      if infer env a <> TFloat then raise (Error "raw_of_float: arg must be float");
+      unify_msg (infer env a) TFloat "raw_of_float: arg must be float";
       TInt
   | App ("float_of_raw", [a]) ->
-      if infer env a <> TInt then raise (Error "float_of_raw: arg must be int");
+      unify_msg (infer env a) TInt "float_of_raw: arg must be int";
       TFloat
 
   (* Phase A dyn-array builtins. [array_make] materializes a fresh
@@ -744,34 +996,31 @@ let rec infer env e =
      already-known TArrDyn arg. The element type is carried on the
      TArrDyn constructor so future non-int widths come for free. *)
   | App ("array_make", [n; v]) ->
-      if infer env n <> TInt then
-        raise (Error "array_make: length must be int");
+      unify_msg (infer env n) TInt "array_make: length must be int";
       let tv = infer env v in
-      if tv <> TInt then
-        raise (Error "array_make: init value must be int");
+      unify_msg tv TInt "array_make: init value must be int";
       TArrDyn tv
   | App ("array_get", [a; i]) ->
-      let ta = infer env a in
+      (* Note: no TVar arm here — unify's tvar_bindable restriction
+         means an unannotated param can never become a darr, so the
+         first arg must already be annotation-concrete (the `darr`
+         keyword), exactly as before Phase E. *)
       let elt =
-        match ta with
+        match resolve (infer env a) with
         | TArrDyn t -> t
         | _ -> raise (Error "array_get: first arg must be a dynamic array")
       in
-      if infer env i <> TInt then
-        raise (Error "array_get: index must be int");
+      unify_msg (infer env i) TInt "array_get: index must be int";
       elt
   | App ("array_set", [a; i; v]) ->
-      let ta = infer env a in
       let elt =
-        match ta with
+        match resolve (infer env a) with
         | TArrDyn t -> t
         | _ -> raise (Error "array_set: first arg must be a dynamic array")
       in
-      if infer env i <> TInt then
-        raise (Error "array_set: index must be int");
-      let tv = infer env v in
-      if tv <> elt then
-        raise (Error "array_set: value type does not match element type");
+      unify_msg (infer env i) TInt "array_set: index must be int";
+      unify_msg (infer env v) elt
+        "array_set: value type does not match element type";
       TUnit
   | App ("head", [arg]) ->
       let _ = infer env arg in
@@ -790,10 +1039,8 @@ let rec infer env e =
           "constructor %s expects %d argument(s), got %d"
           f (List.length fields) (List.length args)));
       List.iter2 (fun a ft ->
-        let ta = infer env a in
-        if ta <> ft then
-          raise (Error (Printf.sprintf
-            "constructor %s: argument type mismatch" f))) args fields;
+        unify_msg (infer env a) ft (Printf.sprintf
+          "constructor %s: argument type mismatch" f)) args fields;
       TAdt adt
 
   | App (f, args) ->
@@ -805,9 +1052,8 @@ let rec infer env e =
                "App %s: expected %d args, got %d" f
                (List.length param_types) (List.length arg_types)));
            List.iter2 (fun at pt ->
-             if at <> pt then
-               raise (Error (Printf.sprintf
-                 "App %s: arg type mismatch" f))
+             unify_msg at pt (Printf.sprintf
+               "App %s: arg type mismatch" f)
            ) arg_types param_types;
            ret_type
        | None ->
@@ -819,7 +1065,10 @@ let rec infer env e =
       (match elems with
        | [] -> TArrStatic (TInt, 0)
        | _ ->
-           let ts = List.map (infer env) elems in
+           (* Static array literals stay equality-checked on resolved
+              types: their element types are always literal-concrete
+              (ints, floats, nested rows), never tvars. *)
+           let ts = List.map (fun e -> resolve (infer env e)) elems in
            if List.for_all (fun t -> t = TInt) ts then
              TArrStatic (TInt, List.length elems)
            (* Phase Math: accept uniform float element arrays. Runtime
@@ -841,55 +1090,48 @@ let rec infer env e =
                raise (Error "Array elements must all be int or all be arrays of int with matching length"))
 
   | Index1 (e, i) ->
-      let te = infer env e in
+      (* No TVar arm: a static array type can't be inferred (its length
+         is compile-time data), so the base must be annotation-concrete
+         — same posture as array_get above. *)
       let t =
-        match te with
+        match resolve (infer env e) with
         | TArrStatic (t, _) -> t
         | _ -> raise (Error "a[i] requires an array")
       in
-      let ti = infer env i in
-      if ti <> TInt then raise (Error "array index must be int");
+      unify_msg (infer env i) TInt "array index must be int";
       t
 
   | Index2 (e, i, j) ->
-      let te = infer env e in
       let t =
-        match te with
+        match resolve (infer env e) with
         | TMat (t, _, _) -> t
         | _ -> raise (Error "m[i, j] requires a matrix")
       in
-      let ti = infer env i in
-      let tj = infer env j in
-      if ti <> TInt then raise (Error "array index must be int");
-      if tj <> TInt then raise (Error "array index must be int");
+      unify_msg (infer env i) TInt "array index must be int";
+      unify_msg (infer env j) TInt "array index must be int";
       t
 
   | IndexSet1 (base, idx, v) ->
-      let tb = infer env base in
       let t =
-        match tb with
+        match resolve (infer env base) with
         | TArrStatic (t, _) -> t
         | _ -> raise (Error "a[i] := v requires an array")
       in
-      let ti = infer env idx in
-      if ti <> TInt then raise (Error "array index must be int");
-      let tv = infer env v in
-      if tv <> t then raise (Error "a[i] := v: value type does not match element type");
+      unify_msg (infer env idx) TInt "array index must be int";
+      unify_msg (infer env v) t
+        "a[i] := v: value type does not match element type";
       TUnit
 
   | IndexSet2 (base, i, j, v) ->
-      let tb = infer env base in
       let t =
-        match tb with
+        match resolve (infer env base) with
         | TMat (t, _, _) -> t
         | _ -> raise (Error "m[i, j] := v requires a matrix")
       in
-      let ti = infer env i in
-      let tj = infer env j in
-      if ti <> TInt then raise (Error "array index must be int");
-      if tj <> TInt then raise (Error "array index must be int");
-      let tv = infer env v in
-      if tv <> t then raise (Error "m[i, j] := v: value type does not match element type");
+      unify_msg (infer env i) TInt "array index must be int";
+      unify_msg (infer env j) TInt "array index must be int";
+      unify_msg (infer env v) t
+        "m[i, j] := v: value type does not match element type";
       TUnit
 
   | Unit -> TUnit
@@ -899,16 +1141,19 @@ let rec infer env e =
       TRef t
 
   | Deref e ->
-      (match infer env e with
+      (* No TVar arm: tvar_bindable rejects TRef, so a ref must be
+         annotation- or literal-concrete — refs stay second-class. *)
+      (match resolve (infer env e) with
        | TRef t -> t
        | _ -> raise (Error "! requires a ref"))
 
   | RefSet (r, v) ->
       let tr = infer env r in
       let tv = infer env v in
-      (match tr with
-       | TRef t when t = tv -> TUnit
-       | TRef _ -> raise (Error "ref := value type mismatch")
+      (match resolve tr with
+       | TRef t ->
+           unify_msg t tv "ref := value type mismatch";
+           TUnit
        | _ -> raise (Error ":= requires a ref on the left"))
 
   | Tuple es ->
@@ -940,10 +1185,8 @@ let rec infer env e =
                   raise (Error (Printf.sprintf
                     "record type %s has no field %s" owner f))
               | Some ft ->
-                  let te = infer env e in
-                  if te <> ft then
-                    raise (Error (Printf.sprintf
-                      "record type %s: field %s type mismatch" owner f)));
+                  unify_msg (infer env e) ft (Printf.sprintf
+                    "record type %s: field %s type mismatch" owner f));
              if List.length (List.filter (fun (f', _) -> f' = f) fields)
                 > 1 then
                raise (Error (Printf.sprintf
@@ -961,12 +1204,17 @@ let rec infer env e =
        | None ->
            raise (Error (Printf.sprintf "unknown record field %s" f))
        | Some (owner, _, ft) ->
-           (match infer env e with
+           (match resolve (infer env e) with
             | TAdt n when n = owner -> ft
             | TAdt n when Hashtbl.mem record_decls n ->
                 raise (Error (Printf.sprintf
                   "field %s belongs to record type %s but the value \
                    has type %s" f owner n))
+            | TVar _ as tv ->
+                (* Phase E: the field names its owner — pin the value. *)
+                unify_msg tv (TAdt owner) (Printf.sprintf
+                  ".%s requires a value of record type %s" f owner);
+                ft
             | _ ->
                 raise (Error (Printf.sprintf
                   ".%s requires a value of record type %s" f owner))))
@@ -979,24 +1227,27 @@ let rec infer env e =
   | Cons (h, t) ->
       let th = infer env h in
       let tt = infer env t in
-      if th <> TInt then
-        raise (Error "::: v1 only supports int lists (head must be int)");
-      (match tt with
-       | TList TInt -> TList TInt
-       | _ -> raise (Error ":: tail must be a list of int"))
+      unify_msg th TInt
+        "::: v1 only supports int lists (head must be int)";
+      unify_msg tt (TList TInt) ":: tail must be a list of int";
+      TList TInt
 
   | Region (tr, e) ->
       (* Infer the body's type and write it into the shared ref so
          knormal can read it at normalize time. §C2: v1 accepts every
          representable return type and relies on C5's per-type deep-
-         copy walker to make it correct — no escape check here. *)
+         copy walker to make it correct — no escape check here.
+         Phase E: knormal dispatches on this ref's CONTENTS, so it gets
+         the fully-zonked form (residual tvars default to TInt per
+         §13.10 decision 5 — `region (fun () -> [])` walks as an int
+         list, which is exactly the C5 walker's domain). *)
       let ty = infer env e in
-      tr := ty;
+      tr := zonk_default ty;
       ty
 
   | Match (scrut, arms) ->
       let tscrut = infer env scrut in
-      (match tscrut with
+      (match resolve tscrut with
        | TAdt name
          when not (Hashtbl.mem adt_decls name)
               && not (Hashtbl.mem record_decls name) ->
@@ -1004,18 +1255,19 @@ let rec infer env e =
              "match on a value of undeclared type %s" name))
        | _ -> ());
       (* 1. Pattern well-formedness + arm body types (binders shadow
-         the outer env — assoc-list prepend). *)
+         the outer env — assoc-list prepend). Pattern binders are
+         monomorphic (they are lambda-bound, not let-bound). *)
       let arm_tys =
         List.map (fun (p, body) ->
           let binds = check_pattern tscrut p in
-          infer (binds @ env) body) arms
+          infer (List.map (fun (n, t) -> (n, mono t)) binds @ env) body)
+          arms
       in
       let t0 = List.hd arm_tys in
       List.iteri (fun i t ->
-        if t <> t0 then
-          raise (Error (Printf.sprintf
-            "match arms must all have the same type (arm %d disagrees \
-             with arm 1)" (i + 1)))) arm_tys;
+        unify_msg t0 t (Printf.sprintf
+          "match arms must all have the same type (arm %d disagrees \
+           with arm 1)" (i + 1))) arm_tys;
       (* 2. Redundancy: arm k must match some value arms 0..k-1 miss. *)
       let rows = List.map (fun (p, _) -> [p]) arms in
       let _ =
@@ -1045,9 +1297,16 @@ let rec infer env e =
       t0
 
   | For (i, lo, hi, body) ->
-      if infer env lo <> TInt then raise (Error "for: lo must be int");
-      if infer env hi <> TInt then raise (Error "for: hi must be int");
-      let env' = (i, TInt) :: env in
+      unify_msg (infer env lo) TInt "for: lo must be int";
+      unify_msg (infer env hi) TInt "for: hi must be int";
+      let env' = (i, mono TInt) :: env in
       let _ = infer env' body in
       (* body may type as anything; for-loops are statements, result is unit *)
       TUnit
+
+(* Public wrapper: the historical signature. main.ml and for_lift pass
+   (string * typ) list envs; schemes are internal to this module
+   (§13.10 decision 2). The shadowing is deliberate — every recursive
+   call above binds to the scheme-env version. *)
+let infer (env : (string * typ) list) (e : expr) : typ =
+  infer (List.map (fun (n, t) -> (n, mono t)) env) e

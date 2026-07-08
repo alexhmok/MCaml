@@ -7,6 +7,7 @@ type typ = TInt | TFloat | TBool | TUnit | TSelector | TPos
          | TList of typ               (* cons list: element type; handle at runtime *)
          | TAdt of string             (* Phase D: nominal user-declared ADT; runtime value is an objpool handle (or a small-int for nullary-only enums — D4 decides) *)
          | TTuple of typ list         (* D7: structural tuple; runtime value is an objpool handle to a {tag:0, f0...} cell *)
+         | TVar of typ option ref     (* Phase E: unification variable — None = unbound, Some t = destructively linked (§13.10 decision 1). Only typing.ml (and the parser, for omitted annotations) ever mints one; main.ml zonks every def before knormal so no pass below typing sees a TVar. Schemes live in typing.ml's env, NOT here (decision 2). *)
 
 (* Phase D: one constructor of a declared ADT: name + field types.
    Constructor names must be Capitalized (validated at registration in
