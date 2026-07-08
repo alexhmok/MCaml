@@ -120,6 +120,13 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
     | IRegionExit (k, Some r, ty) ->
         let r' = rw !m c r in
         if r' = r then i else IRegionExit (k, Some r', ty)
+    | IClosureMake (d, fname, caps) ->
+        let caps' = List.map (rw !m c) caps in
+        if caps' = caps then i else IClosureMake (d, fname, caps')
+    | IApply (d_opt, cl, args) ->
+        let cl' = rw !m c cl in
+        let args' = List.map (rw !m c) args in
+        if cl' = cl && args' = args then i else IApply (d_opt, cl', args')
   in
   (* Now update the map based on the def of the (rewritten) instruction. *)
   (match i' with
@@ -176,7 +183,12 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
    | IFieldGet (d, _, _) ->
        if not (is_reserved d) then m := kill_def !m d
    | IRegionEnter _ -> ()
-   | IRegionExit _ -> ());
+   | IRegionExit _ -> ()
+   | IClosureMake (d, _, _) ->
+       if not (is_reserved d) then m := kill_def !m d
+   | IApply (None, _, _) -> ()
+   | IApply (Some d, _, _) ->
+       if not (is_reserved d) then m := kill_def !m d);
   (i', !c)
 
 (* Rewrite uses within a terminator. *)

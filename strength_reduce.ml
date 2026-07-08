@@ -498,8 +498,7 @@ let collect_latches (cfg : cfg_func) : block list =
   ) cfg.blocks;
   !acc
 
-let no_sr =
-  try Sys.getenv "MCAML_NO_SR" = "1" with Not_found -> false
+let no_sr = Cfg.pass_disabled "MCAML_NO_SR"
 
 let carrier_name (n : int) : vreg = Printf.sprintf "$ref_sr_%d" n
 

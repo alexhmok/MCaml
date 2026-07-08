@@ -58,7 +58,18 @@ let is_side_effecting (i : instr) : bool =
      slots, IRegionExit truncates NBT pools and restores counters. Both
      are the entire region mechanism — DCE may not touch either. *)
   | IRegionEnter _ | IRegionExit _ -> true
-  | IConst _ | ICopy _ | IBinOp _ -> false
+  (* Phase F closure ops. IApply calls through a runtime value that may
+     run arbitrary code regardless of whether its result is read — same
+     posture as ICall, never DCE'd. IClosureMake commits to no runtime
+     representation at this IR level (real allocation, if any, is
+     decided by F5's codegen for whatever survives to see it) — a
+     construction whose result is never read really is dead code, so it
+     is safe to drop like IBinOp/ICopy. This is what makes a Known
+     lambda's specialization (closure_spec.ml rewrites its consuming
+     IApply to an ordinary ICall, dropping the last use) actually
+     zero-cost: the abandoned IClosureMake gets removed here for free. *)
+  | IApply _ -> true
+  | IConst _ | ICopy _ | IBinOp _ | IClosureMake _ -> false
 
 let run (cfg : cfg_func) : bool =
   let liveness = Liveness.analyze cfg in

@@ -76,6 +76,22 @@ type kexpr =
   (* KFieldGet(d, c, k) — d := objpool cells[c].f<k>, via the per-index
      obj_f<k> macro getter (3 cmds, hidden $arr_result write). *)
   | KFieldGet of string * string * int
+  (* --- Phase F closure primitives (F2 completion) ---
+     A closure value must lower uniformly at knormal time, before F3's
+     whole-program escape analysis has run to decide Known vs Escaping
+     (see cfg.ml's IClosureMake/IApply doc comment for the full
+     rationale). *)
+  (* KClosureMake(d, lam_fname, captures) — d := make_closure(lam_fname,
+     captures). Not an eager allocation; see IClosureMake. *)
+  | KClosureMake of string * string * string list
+  (* KApply(d, closure_temp, args) — d := (closure_temp)(args), a call
+     through a runtime closure value. Only ever emitted when the callee
+     is a closure_env-tracked local (never a global function name). [d]
+     is optional (mirrors IApply / Cfg's dest-optional convention,
+     unlike KCall's implicit "$ret" idiom) because the apply itself may
+     have effects and must run regardless of whether its result is
+     used. *)
+  | KApply of string option * string * string list
 
 let counter = ref 0
 let new_temp () = incr counter; Printf.sprintf "$t%d" !counter
@@ -263,6 +279,23 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
 
   | Ref _ ->
       failwith "ref literal must be bound with let: let r = ref e in ..."
+
+  (* Phase F (F2 completion): let-binding a direct lambda literal. Seeds
+     closure_env so later uses of [x] within this function (a call
+     `x(...)`) are recognized as closure application (KApply) rather
+     than falling through to the generic App arm's global KCall. This
+     is a purely syntactic trigger — mirrors normalize_fun's existing
+     TFun-param seeding — and deliberately does NOT cover the case
+     where [e1] is an ordinary function call whose return happens to be
+     TFun-typed (a HOF-factory pattern): knormal has no per-variable
+     type environment to detect that shape, so it is scoped out for v1
+     and caught defensively (loud failure, not a silent miscompile) by
+     the fun_sigs membership check in the generic App arm below. *)
+  | Let (x, Closure (fname, captured_exprs), e2) ->
+      Hashtbl.replace closure_env x ();
+      let k1 = normalize_to (Some x) (Closure (fname, captured_exprs)) in
+      let k2 = normalize_to dest e2 in
+      KSeq (k1, k2)
 
   | Deref (Var r) ->
       let slot =
@@ -592,16 +625,21 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
       failwith "internal: raw Lambda reached knormal — for_lift should \
                 have converted it to Closure; this is a compiler bug"
 
-  (* Phase F: closure construction. Allocating the real {tag:-2, code,
-     env_0, ...} objpool cell needs escape analysis to pick a lowering
-     strategy (specialize vs. apply-dispatch) and lands in F3/F4/F5 —
-     loud stub for now, same posture Phase D's D1 used for Match before
-     D5 landed. *)
-  | Closure (fname, _) ->
-      failwith (Printf.sprintf
-        "closure construction (helper %s): allocating a first-class \
-         function value is not yet lowered (lands in F3/F4/F5 — escape \
-         analysis + specialization/apply-dispatch)" fname)
+  (* Phase F (F2 completion): closure construction. Lowers uniformly to
+     KClosureMake regardless of the eventual Known/Escaping
+     classification — F3/F4 (closure_spec.ml) rewrite away every Known
+     use post-inline; whatever's left (Escaping, or budget-exceeded)
+     reaches codegen_cfg's loud F5-deferred stub. Mirrors the Cons
+     arm: every captured expr is normalized into a temp regardless of
+     dest (so nested side effects still evaluate), the allocation
+     itself is dropped when dest is None (pure expression). *)
+  | Closure (fname, captured_exprs) ->
+      let temps = List.map (fun _ -> new_temp ()) captured_exprs in
+      let ks = List.map2 (fun e t -> normalize_to (Some t) e) captured_exprs temps in
+      let seq body = List.fold_right (fun k acc -> KSeq (k, acc)) ks body in
+      (match dest with
+       | None -> seq KUnit
+       | Some d -> seq (KLet (d, KUnit, KClosureMake (d, fname, temps))))
 
   | Nil ->
       (* Empty list sentinel: -1, per §4.2. *)
@@ -803,15 +841,40 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
        | None -> seq KUnit
        | Some d -> seq (KLet (d, KUnit, KAdtAlloc (d, tag, temps))))
 
-  (* Phase F: calling a closure handle held in a local var/param. Real
-     dispatch (read the cell's code field, jump to it) needs escape
-     analysis to pick a lowering strategy and lands in F3/F4/F5 — loud
-     stub for now, same posture Phase D's D1 used for Match before D5. *)
-  | App (f, _) when Hashtbl.mem closure_env f ->
+  (* Phase F (F2 completion): calling a closure handle held in a local
+     var/param. Lowers uniformly to KApply regardless of the eventual
+     Known/Escaping classification — closure_spec.ml (F3/F4) rewrites
+     Known-classified sites into an ordinary KCall-shaped ICall against
+     a (possibly specialized) callee; whatever's left reaches
+     codegen_cfg's loud F5-deferred stub. The apply always runs
+     (mirrors App's own None-dest case below) since dispatching through
+     a closure may have effects even when the result is unused. *)
+  | App (f, args) when Hashtbl.mem closure_env f ->
+      let rec bind_args args acc = match args with
+        | [] -> KApply (dest, f, List.rev acc)
+        | h :: t ->
+            let tmp = new_temp () in
+            KSeq (normalize_to (Some tmp) h, bind_args t (tmp :: acc))
+      in
+      bind_args args []
+
+  | App (f, _args) when not (Hashtbl.mem Typing.fun_sigs f) ->
+      (* Defensive: [f] is neither a registered top-level function/
+         lambda-helper nor a closure_env-tracked local — the only way
+         to reach this arm is a local TFun-typed binding that
+         closure_env didn't seed (e.g. `let g = make_adder(5) in
+         g(10)` — a HOF-factory-return then call, which typing accepts
+         via §13.12 decision 1's value-application arm but which v1's
+         knormal cannot resolve without a per-variable type
+         environment). Fail loudly rather than silently emitting a
+         bogus KCall against a nonexistent global function named after
+         a local vreg. *)
       failwith (Printf.sprintf
-        "closure application through '%s': calling a first-class \
-         function value is not yet lowered (lands in F3/F4/F5 — escape \
-         analysis + specialization/apply-dispatch)" f)
+        "closure application through '%s': calling a closure value \
+         obtained from something other than a direct lambda literal or \
+         a function parameter (e.g. a HOF-factory return) is not yet \
+         lowered in v1 — bind the lambda directly with `let %s = fun ...`"
+        f f)
 
   | App (f, args) ->
       let rec bind_args args acc = match args with

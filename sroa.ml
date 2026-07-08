@@ -31,8 +31,7 @@ open Cfg
 let limit =
   try int_of_string (Sys.getenv "MCAML_SROA_LIMIT") with _ -> 16
 
-let no_sroa =
-  try Sys.getenv "MCAML_NO_SROA" = "1" with Not_found -> false
+let no_sroa = Cfg.pass_disabled "MCAML_NO_SROA"
 
 (* True if [v] is a pseudo-array vreg shape "#arr:<aid>" — used by
    monomorphize.ml to thread arrays through call args. After Phase 2b
@@ -147,6 +146,11 @@ let collect (cfg : cfg_func) : (aid, info) Hashtbl.t =
        | IRegionEnter _ -> ()
        | IRegionExit (_, None, _) -> ()
        | IRegionExit (_, Some r, _) -> note_use_vreg r
+       (* Phase F closure ops: captures/closure-vreg/args are ordinary
+          int-valued vregs (list/handle-shaped), never aid sentinels —
+          same treatment as ICons/IAdtAlloc. *)
+       | IClosureMake (_, _, caps) -> List.iter note_use_vreg caps
+       | IApply (_, cl, args) -> note_use_vreg cl; List.iter note_use_vreg args
        | IConst _ | ICommand _ -> ());
     ) b.instrs
   ) cfg.blocks;
@@ -221,6 +225,7 @@ let aids_touched_by (other_cfg : cfg_func) : (aid, unit) Hashtbl.t =
        | ICons _ | IHead _ | ITail _ -> ()
        | IAdtAlloc _ | ITagGet _ | IFieldGet _ -> ()
        | IRegionEnter _ | IRegionExit _ -> ()
+       | IClosureMake _ | IApply _ -> ()
        | IConst _ | ICommand _ -> ())
     ) b.instrs
   ) other_cfg.blocks;

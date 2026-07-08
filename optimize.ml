@@ -15,11 +15,18 @@
 
 let max_iterations = 10
 
+(* MCAML_NO_M3A=1 (or MCAML_O0=1) skips the scalar-cleanup fixed point
+   entirely — both sweeps. The four passes are semantics-preserving
+   cleanups, so skipping them yields correct but unoptimized output;
+   note SROA loses the unroll→const_fold static-index bridge when
+   they're off, so it may fire less even if left enabled. *)
+let no_m3a = Cfg.pass_disabled "MCAML_NO_M3A"
+
 (* M3a fixed point: const_fold/copy_prop/local_cse/dce. *)
 let m3a_fixedpoint (cfg : Cfg.cfg_func) : unit =
   let i = ref 0 in
   let continue = ref true in
-  while !continue && !i < max_iterations do
+  while not no_m3a && !continue && !i < max_iterations do
     incr i;
     let c1 = Const_fold.run cfg in
     let c2 = Copy_prop.run cfg in
@@ -42,7 +49,7 @@ let m3a_fixedpoint (cfg : Cfg.cfg_func) : unit =
    [MCAML_NO_SROA=1] for A/B measurement. The function table is
    threaded in for the unroller, which needs to inspect callers to
    resolve constant lo/hi at the call site. *)
-let no_licm = try Sys.getenv "MCAML_NO_LICM" = "1" with Not_found -> false
+let no_licm = Cfg.pass_disabled "MCAML_NO_LICM"
 
 let loop_pass ?fn_table (cfg : Cfg.cfg_func) : unit =
   if not no_licm then ignore (Licm.run cfg);

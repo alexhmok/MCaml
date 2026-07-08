@@ -147,6 +147,10 @@ let specialize_cfg
     | IRegionEnter _ as x -> x
     | IRegionExit (k, None, ty) -> IRegionExit (k, None, ty)
     | IRegionExit (k, Some r, ty) -> IRegionExit (k, Some (v r), ty)
+    | IClosureMake (d, fname, caps) -> IClosureMake (v d, fname, List.map v caps)
+    | IApply (dopt, cl, args) ->
+        IApply ((match dopt with Some d -> Some (v d) | None -> None),
+                v cl, List.map v args)
   in
   let rewrite_term (t : terminator) : terminator =
     let v = rewrite_param_vreg in

@@ -114,6 +114,8 @@ let rewrite_instr (rw : vreg -> vreg) (i : instr) : instr =
   | IRegionEnter _ as x     -> x
   | IRegionExit (k, None, ty) -> IRegionExit (k, None, ty)
   | IRegionExit (k, Some r, ty) -> IRegionExit (k, Some (rw r), ty)
+  | IClosureMake (d, fname, caps) -> IClosureMake (rw d, fname, List.map rw caps)
+  | IApply (d_opt, cl, args) -> IApply (Option.map rw d_opt, rw cl, List.map rw args)
 
 let rewrite_guards (rw : vreg -> vreg) (gs : (vreg * polarity) list) =
   List.map (fun (v, p) -> (rw v, p)) gs

@@ -1,0 +1,33 @@
+(* test_lambdas.mcaml — Phase F session 3 (F3+F4) exit test.
+
+   Covers the two v1-specialized shapes (zero apply-dispatch, zero
+   closure cell ever allocated) and is validated against sim.py by
+   /tmp/mcaml_out/test_lambdas.py (uncommitted, same convention as the
+   dyn-array/cons/region/ADT harnesses): a same-function immediate
+   invocation, a cross-function HOF (closure_spec.ml clones the callee),
+   and both with and without captures. The Escaping (ambiguous-merge)
+   case that must fail loudly at compile time is exercised separately
+   by the harness via an inline source probe, not here — this file must
+   compile and run cleanly end to end. *)
+
+fun apply_twice(f: int -> int, x: int) : int =
+  f(f(x))
+
+fun add_k(k: int, f: int -> int, x: int) : int =
+  f(x) + k
+
+fun test_same_function() : int =
+  let f = fun (y: int) -> y + 1 in
+  f(3)
+
+fun test_captures() : int =
+  let k = 10 in
+  let f = fun (y: int) -> y + k in
+  f(3)
+
+fun test_cross_function() : int =
+  apply_twice(fun (y: int) -> y + 1, 5)
+
+fun test_cross_function_captures() : int =
+  let cap = 100 in
+  add_k(7, fun (y: int) -> y + cap, 3)

@@ -236,6 +236,11 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
   (* Phase C region brackets: no vreg def (both pass map unchanged). *)
   | IRegionEnter _ -> (i, m, false)
   | IRegionExit _ -> (i, m, false)
+  (* Phase F closure ops: neither a closure handle nor an apply result is
+     ever a statically-knowable int. Kill the dest like ICons/IAdtAlloc. *)
+  | IClosureMake (d, _, _) -> (i, kill m d, false)
+  | IApply (None, _, _) -> (i, m, false)
+  | IApply (Some d, _, _) -> (i, kill m d, false)
 
 let run (cfg : cfg_func) : bool =
   let changed = ref false in

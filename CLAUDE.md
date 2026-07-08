@@ -102,10 +102,15 @@ MCAML_OUT=build ./mcaml < …                  # env var alternative
 ./mcaml < …                                  # no flag → files land in cwd (legacy)
 MCAML_DUMP_CFG=1 ./mcaml < …                 # stderr shows post-regalloc CFG + emitted commands
 MCAML_NO_INLINE=1 ./mcaml < …                # skip Phase 2 (leaf inliner) for A/B
+MCAML_NO_M3A=1 ./mcaml < …                   # M3a: skip const_fold/copy_prop/local_cse/dce fixed point (both sweeps)
 MCAML_NO_LICM=1 ./mcaml < …                  # M4: skip LICM hoisting
 MCAML_NO_SR=1 ./mcaml < …                    # SR: skip strength-reduction rewrite
 MCAML_NO_UNROLL=1 ./mcaml < …                # M4: skip loop unrolling
 MCAML_NO_SROA=1 ./mcaml < …                  # M4: skip array→scalar promotion
+MCAML_O0=1 ./mcaml < …                       # unoptimized baseline: implies ALL six MCAML_NO_* pass flags above.
+                                             # Monomorphize (required for array params), tick_split, and tick_guard
+                                             # still run — those are correctness mechanisms, not optimizations.
+                                             # Implemented as Cfg.pass_disabled, which every pass flag reads through.
 MCAML_DUMP_LOOPS=1 ./mcaml < …               # stderr dumps idom + detected loops
 MCAML_DUMP_IV=1 ./mcaml < …                  # SR §1 stage 1: basic induction variables per function
 MCAML_UNROLL_LIMIT=N ./mcaml < …             # max unroll trip count (default 16)

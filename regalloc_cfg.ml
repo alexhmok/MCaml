@@ -239,6 +239,10 @@ let alloc (cfg : Cfg.cfg_func) : unit =
     | IRegionEnter _ as x -> x
     | IRegionExit (k, None, ty) -> IRegionExit (k, None, ty)
     | IRegionExit (k, Some r, ty) -> IRegionExit (k, Some (rw r), ty)
+    | IClosureMake (d, fname, caps) -> IClosureMake (rw d, fname, List.map rw caps)
+    | IApply (d_opt, cl, args) ->
+        IApply ((match d_opt with Some d -> Some (rw d) | None -> None),
+                rw cl, List.map rw args)
   in
   let rewrite_term (t : Cfg.terminator) : Cfg.terminator =
     match t with

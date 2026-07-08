@@ -51,8 +51,7 @@ open Cfg
 let limit =
   try int_of_string (Sys.getenv "MCAML_UNROLL_LIMIT") with _ -> 16
 
-let no_unroll =
-  try Sys.getenv "MCAML_NO_UNROLL" = "1" with Not_found -> false
+let no_unroll = Cfg.pass_disabled "MCAML_NO_UNROLL"
 
 (* Walk a block forward and return the most recent IConst value bound
    to [v], if [v]'s most recent definition in the block is an IConst
@@ -163,6 +162,8 @@ let rename_instr (body_defs : (vreg, unit) Hashtbl.t) (prefix : string) (i : ins
   | IRegionEnter _ -> i
   | IRegionExit (_, None, _) -> i
   | IRegionExit (k, Some r0, ty) -> IRegionExit (k, Some (r r0), ty)
+  | IClosureMake (d, fname, caps) -> IClosureMake (r d, fname, List.map r caps)
+  | IApply (dopt, cl, args) -> IApply (Option.map r dopt, r cl, List.map r args)
 
 (* Detect a v1 unrollable shape. Returns
    [Some (header, body, exit, loop_var)] on success. The loop_var is the

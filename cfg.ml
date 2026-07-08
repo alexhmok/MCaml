@@ -20,6 +20,22 @@
      codegen (which prefixes every emitted command with execute if/unless
      clauses for each guard chain entry). *)
 
+(* A/B optimization toggles. Every optimization pass reads its
+   MCAML_NO_<NAME>=1 kill switch through [pass_disabled] so that the
+   umbrella flag MCAML_O0=1 disables all of them at once — the
+   unoptimized-baseline mode for measuring how much the optimizer
+   saves. O0 covers optimization passes ONLY: monomorphize (required
+   for array-param programs to compile at all), tick_split and
+   tick_guard (server-protection mechanisms, not optimizations) run
+   regardless and keep their own independent flags. The helper lives
+   here because cfg.ml is the one module every pass already depends
+   on; it is not otherwise CFG-related. *)
+let o0 =
+  try Sys.getenv "MCAML_O0" = "1" with Not_found -> false
+
+let pass_disabled (env_name : string) : bool =
+  o0 || (try Sys.getenv env_name = "1" with Not_found -> false)
+
 type label = int
 type vreg  = string
 type aid   = string
@@ -87,6 +103,30 @@ type instr =
      IArrSet/ICons. *)
   | IRegionEnter    of int                                       (* level k *)
   | IRegionExit     of int * vreg option * Ast.typ               (* k, return vreg, return type *)
+  (* Phase F closure ops (F2 completion / F3-F4). A closure value must be
+     lowerable UNIFORMLY at knormal/cfg_build time, before F3's whole-
+     program escape analysis has run — knormal cannot yet know whether a
+     given lambda will end up Known or Escaping. [IClosureMake] is
+     therefore a plain, non-side-effecting value-producing op (like
+     IBinOp/ICopy), NOT an eager objpool allocation: it commits to no
+     runtime representation of its own. [IApply] is the uniform call-
+     through-a-runtime-value op (decision 5's already-named op).
+     Closure_spec.ml (F3+F4) rewrites every *Known*-classified
+     (d, lam_fname, IApply) triple in place into an ordinary ICall against
+     [lam_fname] (same-function) or a specialized clone (cross-function
+     single hop), which drops the last use of the originating
+     [IClosureMake] — because that op is NOT side-effecting, the ordinary
+     M3a DCE fixed point that runs right after in Phase 3 deletes it for
+     free, which is what makes a Known lambda's defunctionalization
+     genuinely zero-cost (no cell ever allocated) rather than merely
+     dead-but-still-emitted. Any [IClosureMake]/[IApply] pair that
+     SURVIVES to codegen is therefore provably Escaping (or budget-
+     exceeded), and hits a loud "lands in F5" stub in codegen_cfg.ml —
+     same posture B4 used for ICons before B6, C1 used for Region before
+     C3. [IApply] itself IS side-effecting (dce.ml): calling through an
+     unresolved closure value may run arbitrary code, exactly like ICall. *)
+  | IClosureMake    of vreg * string * vreg list      (* d := make_closure(lam_fname, captures) *)
+  | IApply          of vreg option * vreg * vreg list (* dest, closure_vreg, args *)
 
 type terminator =
   | TRet
@@ -192,6 +232,8 @@ let instr_def (i : instr) : vreg option =
   | IFieldGet (d, _, _)     -> Some d
   | IRegionEnter _          -> None
   | IRegionExit _           -> None
+  | IClosureMake (d, _, _)  -> Some d
+  | IApply (d_opt, _, _)    -> d_opt
 
 (* Vregs read by an instruction. Does NOT include guard-chain pinning —
    that's applied by liveness as an augmentation, not an instruction
@@ -223,6 +265,8 @@ let instr_uses (i : instr) : vreg list =
   | IRegionEnter _          -> []
   | IRegionExit (_, None, _)   -> []
   | IRegionExit (_, Some r, _) -> [r]
+  | IClosureMake (_, _, caps) -> caps
+  | IApply (_, c, args)       -> c :: args
 
 (* ---- debug dump ---- *)
 
@@ -277,6 +321,13 @@ let string_of_instr (i : instr) : string =
   | IRegionEnter k  -> Printf.sprintf "region_enter[%d]" k
   | IRegionExit (k, None, _) -> Printf.sprintf "region_exit[%d] ()" k
   | IRegionExit (k, Some r, _) -> Printf.sprintf "region_exit[%d] %s" k r
+  | IClosureMake (d, fname, caps) ->
+      Printf.sprintf "%s := closure(%s%s)" d fname
+        (String.concat "" (List.map (fun c -> ", " ^ c) caps))
+  | IApply (Some d, c, args) ->
+      Printf.sprintf "%s := apply %s(%s)" d c (String.concat ", " args)
+  | IApply (None, c, args) ->
+      Printf.sprintf "apply %s(%s)" c (String.concat ", " args)
 
 let string_of_term (t : terminator) : string =
   match t with

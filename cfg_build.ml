@@ -240,6 +240,14 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
       if not (block_is_sealed b.cur) then
         add_instr b.cur (IRegionExit (k, region_dest, ret_typ))
 
+  | Knormal.KClosureMake (d, fname, caps) ->
+      let _ = dest in
+      add_instr b.cur (IClosureMake (d, fname, caps))
+
+  | Knormal.KApply (d_opt, closure_v, args) ->
+      let _ = dest in
+      add_instr b.cur (IApply (d_opt, closure_v, args))
+
 (* ---- finalization: reverse instrs, populate preds ---- *)
 
 let finalize_all (blocks : block array) : unit =

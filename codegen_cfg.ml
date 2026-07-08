@@ -240,6 +240,19 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
       failwith
         "codegen_cfg: runtime-n Array.make (IHeapAlloc vreg-form) not \
          yet implemented — use Array.make(<int-literal>, 0)"
+  | IClosureMake (_, fname, _) ->
+      failwith
+        (Printf.sprintf
+           "codegen_cfg: closure construction (helper %s) reached codegen \
+            still unresolved — this closure is Escaping (or exceeded \
+            MCAML_SPECIALIZE_LIMIT); the objpool cell + mcaml:apply \
+            dispatch runtime lands in F5" fname)
+  | IApply (_, _, _) ->
+      failwith
+        "codegen_cfg: apply-dispatch through a runtime closure value is \
+         not yet lowered — this call site is Escaping (or exceeded \
+         MCAML_SPECIALIZE_LIMIT); the objpool cell + mcaml:apply dispatch \
+         runtime lands in F5"
   | ICons (d, h, t) ->
       push_cmds st prefix (cmd_cons d h t)
   | IHead (d, c) ->

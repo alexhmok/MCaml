@@ -209,9 +209,20 @@ let () =
     ) program;
     let fn_order = List.rev !fn_order in
 
-    (* Phase 2a: leaf inliner. Disable with MCAML_NO_INLINE=1 for A/B measurement. *)
-    let no_inline = try Sys.getenv "MCAML_NO_INLINE" = "1" with Not_found -> false in
+    (* Phase 2a: leaf inliner. Disable with MCAML_NO_INLINE=1 (or the
+       MCAML_O0=1 umbrella) for A/B measurement. *)
+    let no_inline = Cfg.pass_disabled "MCAML_NO_INLINE" in
     if not no_inline then Inline.run fn_table;
+
+    (* Phase F3+F4: closure escape analysis + specialization. Sits
+       between Inline.run and Monomorphize.run per §13.12 decision 3 —
+       needs the same post-inline whole-program visibility the inliner
+       itself needs. Mutates fn_table in place (may add clones); any
+       new entries are picked up by the same extra_names diff below
+       that already generically covers Monomorphize's own clones, so
+       no separate fn_order plumbing is needed here. *)
+    let no_closure_spec = Cfg.pass_disabled "MCAML_NO_CLOSURE_SPEC" in
+    if not no_closure_spec then Closure_spec.run fn_table;
 
     (* Phase 2b: monomorphize array-parameterized templates. After this
        the table still contains the templates but they're marked

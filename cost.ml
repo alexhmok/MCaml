@@ -76,6 +76,22 @@ let estimate (i : instr) : int =
      placeholder estimate here is 3 for the exit. *)
   | IRegionEnter _              -> 2
   | IRegionExit _               -> 3
+  (* Phase F closure ops. IClosureMake commits to no runtime allocation
+     of its own at this IR level (see cfg.ml) — costed at 0 here; any
+     instance surviving to codegen is Escaping and F5 will need to give
+     it a real cost once it has a real lowering. IApply's decision-5
+     price is "4 + 2 * K_max_captured", a single whole-program constant
+     over every Escaping closure's *capture count* (invisible at an
+     individual IApply site — captures live inside the closure cell,
+     not in this op's own arg list, so args here are ordinary call
+     arguments and must not be conflated with captures). Computing
+     K_max_captured is F5's job (it requires enumerating every
+     surviving Escaping closure shape first); a fixed conservative
+     placeholder of 4 (K_max_captured=0) stands in until then — this
+     arm exists for exhaustiveness only, since closure_spec.ml's F3+F4
+     resolves every lambda this session's test battery reaches. *)
+  | IClosureMake _               -> 0
+  | IApply _                     -> 4
 
 (* Terminator cost. [TTail] lowers to [len(args)] param renames plus
    one [function mcaml:<f>] dispatch. The other terminators are
