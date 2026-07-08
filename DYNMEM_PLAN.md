@@ -1461,6 +1461,87 @@ Before writing code, confirm which task you're starting and outline the
 planned file edits.
 ```
 
+### 8.8 Phase D session 2 kickoff (D4 — objpool migration)
+
+```
+Read /Users/alexmok/MCaml/DYNMEM_PLAN.md — §2 for current status, §3 and
+§13.5 for settled design decisions, §§4–5 for the runtime ABI, §13 for
+escalation triggers. Read CLAUDE.md for the pipeline layout and the manual
+rebuild command. Phase D frontend (D1–D3) landed in commits
+3dccc3f / 91907a8 / e0d5ca6; verify §2 agrees and `git status` is clean
+before starting.
+
+This session is D4 ALONE: generalize conspool into the unified objpool.
+It is the highest-risk step of Phase D — full focus, do not start D5 even
+if it looks easy from here.
+
+Settled decisions — do not relitigate:
+- §13.5 Option (a): ONE unified `mcaml:objpool cells` pool with
+  tag-discriminated compound cells, ONE `$objpool_next` counter, ONE
+  arena-reset path. Cons cells become `{tag: 1, h, t}` — the h/t field
+  names are KEPT so cons_head/cons_tail stay field-addressed at 3 cmds;
+  generic ADT cells (D5) will use f0/f1/…. Cons's tag value is 1 per
+  §13.5's example. Note in the plan that tags are per-type (D3 assigns
+  0..n-1 in decl order) and are only interpreted under the scrutinee's
+  static type — they are not globally unique, and that's fine.
+- Nil sentinel stays -1 (§4.2); is_nil is unchanged.
+- ICons grows to EXACTLY 6 commands (§5.1's five + one tag write). This
+  is sanctioned by §13.5 and supersedes the §5/§13 escalation budget for
+  ICons. IHead/ITail stay EXACTLY 3 — only the storage path changes.
+- D4 adds NO new IR ops (ADT alloc / tag read / field read are D5).
+  The only observable change is where and how cons cells live.
+
+Migration scope — grep for `conspool`; every hit must move or be
+consciously kept, ending at zero live references:
+- codegen_helpers.ml: cmd_cons (+tag write), cons_head/cons_tail bodies,
+  region truncation helper bodies.
+- codegen_cfg.ml reserved slots: $conspool_next → $objpool_next,
+  $region_save_<k>_conspool → $region_save_<k>_objpool.
+- main.ml: end-of-invocation reset commands (§4.4); the
+  any_dyn_heap_use gate keeps counting ICons/IHead/ITail.
+- Region machinery (C4/C5): truncate helpers, save slots, and the C5
+  stash/rebuild list walkers. The walkers MUST preserve each cell's tag
+  when copying — a rebuild that re-appends {h, t} without the tag would
+  corrupt every post-region match the moment D5 lands.
+  `mcaml:region_tmp conspool` → `mcaml:region_tmp objpool` (§4.5).
+- tools/pack_datapack.py: INIT_MCFUNCTION lines (§4.3).
+- sim/sim.py: model `mcaml:objpool cells` (compound cells incl. tag).
+- DYNMEM_PLAN §§3.2, 4.1, 4.3–4.5, 5.1–5.2, §10 glossary: update the
+  ABI tables in the same commits so the plan never lies about the
+  runtime. Fix any CLAUDE.md mention of conspool if one exists.
+
+Guardrails:
+- Baseline BEFORE the first edit: rebuild per CLAUDE.md, run
+  `cat lib/math.mcaml scripts/mc_test_suite.mcaml | ./mcaml -o
+  build_suite && python3 tools/sim_check_suite.py build_suite`
+  (must print SUITE PASSED, 66 checks) and hash the five canaries
+  (test_all, stress_nested_if, test_arr_set, primitives_v1,
+  demo_classifier).
+- The five canaries stay byte-identical — none touch cons or regions.
+- Cons/region outputs will legitimately change; their gate is semantic:
+  suite green (66/66) after the sim.py objpool extension, plus the
+  Python exit harnesses (test_cons.py, test_regions.py, test_dyn_array.py,
+  test_fixed_point.py in /tmp/mcaml_out). Those harnesses are not
+  committed — if /tmp was cleared, regenerate them per the plan's
+  conventions before migrating, so you have a pre/post signal.
+- Verify by CFG dump / command count: ICons exactly 6, IHead/ITail
+  exactly 3, region enter/exit budgets unchanged (§5.6).
+- No commit may leave the runtime half on conspool and half on objpool —
+  the migration is atomic per commit even if you split doc updates out.
+
+After the task: update §2 of DYNMEM_PLAN.md and commit with the task ID.
+D4 changes runtime conventions and init, so end by reminding me to rerun
+tools/MANUAL_TEST.md's five-minute in-game check before the next datapack
+ship. If you hit any §13 escalation trigger other than the sanctioned
+ICons 5→6, stop and tell me. Before writing code, confirm the migration
+order and outline the planned file edits.
+
+Session 3 is then D5 (pattern compiler — tag read ONCE into a scoreboard
+slot via the macro getter, dispatch entirely with `execute if score ...
+matches <tag>`, decision-tree arithmetic assumes floor / and %) together
+with D9 tests.
+```
+
 ## 9. Rollback and A/B flags
 
 Add these environment flags in the same style as the existing
