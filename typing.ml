@@ -206,27 +206,112 @@ type scheme = { qvars : typ option ref list; sbody : typ }
 
 let mono (t : typ) : scheme = { qvars = []; sbody = t }
 
+(* Copy a typ, substituting fresh tvars for the quantified refs in
+   [mapping]. Resolving first means a qvar that got destructively
+   bound AFTER generalization (a forward call constraining a later
+   def, §13.10 decision 7) transparently copies as its resolved type. *)
+let rec copy_with (mapping : (typ option ref * typ) list) (t : typ) : typ =
+  match resolve t with
+  | TVar r ->
+      (match List.find_opt (fun (q, _) -> q == r) mapping with
+       | Some (_, f) -> f
+       | None -> TVar r)
+  | TList t -> TList (copy_with mapping t)
+  | TArrDyn t -> TArrDyn (copy_with mapping t)
+  | TRef t -> TRef (copy_with mapping t)
+  | TArrStatic (t, n) -> TArrStatic (copy_with mapping t, n)
+  | TMat (t, m, n) -> TMat (copy_with mapping t, m, n)
+  | TTuple ts -> TTuple (List.map (copy_with mapping) ts)
+  | (TInt | TFloat | TBool | TUnit | TSelector | TPos | TAdt _) as t -> t
+
 let instantiate (s : scheme) : typ =
   match s.qvars with
   | [] -> s.sbody
   | qs ->
       let mapping = List.map (fun q -> (q, fresh_tvar ())) qs in
-      let rec copy (t : typ) : typ =
-        match resolve t with
-        | TVar r ->
-            (match List.find_opt (fun (q, _) -> q == r) mapping with
-             | Some (_, f) -> f
-             | None -> TVar r)
-        | TList t -> TList (copy t)
-        | TArrDyn t -> TArrDyn (copy t)
-        | TRef t -> TRef (copy t)
-        | TArrStatic (t, n) -> TArrStatic (copy t, n)
-        | TMat (t, m, n) -> TMat (copy t, m, n)
-        | TTuple ts -> TTuple (List.map copy ts)
-        | (TInt | TFloat | TBool | TUnit | TSelector | TPos | TAdt _)
-          as t -> t
-      in
-      copy s.sbody
+      copy_with mapping s.sbody
+
+(* ---- E3: generalization (scan-the-env, §13.10 decision 1) ----------- *)
+
+(* Unbound tvar refs reachable from [t], deduped by ref identity. *)
+let rec free_tvars (acc : typ option ref list) (t : typ)
+    : typ option ref list =
+  match resolve t with
+  | TVar r -> if List.exists (fun r' -> r' == r) acc then acc else r :: acc
+  | TList t | TArrDyn t | TRef t | TArrStatic (t, _) | TMat (t, _, _) ->
+      free_tvars acc t
+  | TTuple ts -> List.fold_left free_tvars acc ts
+  | TInt | TFloat | TBool | TUnit | TSelector | TPos | TAdt _ -> acc
+
+let scheme_free_tvars (acc : typ option ref list) (s : scheme)
+    : typ option ref list =
+  List.fold_left (fun acc r ->
+    if List.exists (fun q -> q == r) s.qvars then acc
+    else if List.exists (fun r' -> r' == r) acc then acc
+    else r :: acc) acc (free_tvars [] s.sbody)
+
+(* Tvars free in the GLOBAL tables (fun_sigs entries other than
+   [except], plus global_vals). A tvar shared with another function's
+   still-uninferred signature must not be quantified — the constraint
+   linking the two defs would silently evaporate at instantiation. *)
+let global_free_tvars ~(except : string) () : typ option ref list =
+  let acc =
+    Hashtbl.fold (fun name (params, ret) acc ->
+      if name = except then acc
+      else List.fold_left free_tvars acc (ret :: params))
+      fun_sigs []
+  in
+  Hashtbl.fold (fun _ t acc -> free_tvars acc t) global_vals acc
+
+(* §13.10 decision 3: only syntactic values generalize. *)
+let rec is_value (e : expr) : bool =
+  match e with
+  | Int _ | Float _ | Bool _ | Unit | Nil | Var _ -> true
+  | Tuple es -> List.for_all is_value es
+  | Record fs -> List.for_all (fun (_, e) -> is_value e) fs
+  | Cons (h, t) -> is_value h && is_value t
+  | App (f, args) when Hashtbl.mem ctor_info f -> List.for_all is_value args
+  | _ -> false
+
+let generalize (env : (string * scheme) list) (name : string) (t : typ)
+    : scheme =
+  let outside =
+    List.fold_left (fun acc (_, s) -> scheme_free_tvars acc s)
+      (global_free_tvars ~except:name ()) env
+  in
+  let qs =
+    List.filter (fun r -> not (List.exists (fun r' -> r' == r) outside))
+      (free_tvars [] t)
+  in
+  { qvars = qs; sbody = t }
+
+(* ---- E3/E4: generalized function signatures -------------------------- *)
+
+(* name -> (qvars, param typs, return typ). Populated by
+   [generalize_fun] right after a def's body is inferred; consulted by
+   the App rule BEFORE fun_sigs (a hit here instantiates fresh tvars
+   per call site; a miss falls back to the raw monotype in fun_sigs —
+   which is exactly what self-recursion and forward calls want,
+   §13.10 decision 7). *)
+let fun_schemes
+    : (string, typ option ref list * typ list * typ) Hashtbl.t =
+  Hashtbl.create 16
+
+let generalize_fun (name : string) (params : typ list) (ret : typ) : unit =
+  let outside = global_free_tvars ~except:name () in
+  let free = List.fold_left free_tvars [] (ret :: params) in
+  let qs =
+    List.filter (fun r -> not (List.exists (fun r' -> r' == r) outside))
+      free
+  in
+  Hashtbl.replace fun_schemes name (qs, params, ret)
+
+let instantiate_fun (qs, params, ret) : typ list * typ =
+  if qs = [] then (params, ret)
+  else begin
+    let mapping = List.map (fun q -> (q, fresh_tvar ())) qs in
+    (List.map (copy_with mapping) params, copy_with mapping ret)
+  end
 
 (* ADT ctor fields must be single-scoreboard-int values (§12.1 uniform
    representation): scalars and handles. TArrDyn is a (base, len) vreg
@@ -838,6 +923,7 @@ let rec useful (tys : typ list) (matrix : pattern list list)
 
 let build_sigs (prog : program) : unit =
   Hashtbl.clear fun_sigs;
+  Hashtbl.clear fun_schemes;
   List.iter (fun d ->
     match d with
     | Fun (name, params, ret, _) ->
@@ -929,9 +1015,10 @@ let rec infer env e =
 
   | Let (x, e1, e2) ->
       let t1 = infer env e1 in
-      (* E3 (let-generalization) lands here; until then every let is
-         monomorphic, which is exactly the pre-Phase-E behavior. *)
-      infer ((x, mono t1) :: env) e2
+      (* E3: syntactic values generalize (§13.10 decision 3); expansive
+         RHSes — `ref e` above all — stay monomorphic. *)
+      let s1 = if is_value e1 then generalize env x t1 else mono t1 in
+      infer ((x, s1) :: env) e2
 
   | If (cond, e1, e2) ->
       unify_msg (infer env cond) TBool "If condition must be Bool";
@@ -1044,7 +1131,16 @@ let rec infer env e =
       TAdt adt
 
   | App (f, args) ->
-      (match Hashtbl.find_opt fun_sigs f with
+      (* E3: generalized signature first (fresh instantiation per call
+         site); raw monotype second (self-recursion + forward calls,
+         §13.10 decision 7); TInt fallback last (synthesized helpers,
+         unchanged since Phase 1). *)
+      let sig_opt =
+        match Hashtbl.find_opt fun_schemes f with
+        | Some fs -> Some (instantiate_fun fs)
+        | None -> Hashtbl.find_opt fun_sigs f
+      in
+      (match sig_opt with
        | Some (param_types, ret_type) ->
            let arg_types = List.map (infer env) args in
            if List.length arg_types <> List.length param_types then
@@ -1052,8 +1148,13 @@ let rec infer env e =
                "App %s: expected %d args, got %d" f
                (List.length param_types) (List.length arg_types)));
            List.iter2 (fun at pt ->
-             unify_msg at pt (Printf.sprintf
-               "App %s: arg type mismatch" f)
+             try unify at pt
+             with Unify_fail (a, b) ->
+               (* Legacy prefix preserved; the unify pair is appended
+                  for E8 diagnostic quality. *)
+               raise (Error (Printf.sprintf
+                 "App %s: arg type mismatch (cannot unify %s with %s)"
+                 f (string_of_typ a) (string_of_typ b)))
            ) arg_types param_types;
            ret_type
        | None ->
