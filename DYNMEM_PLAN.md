@@ -1403,7 +1403,153 @@ self-recursion with source-order generalization.
       merge, or beyond `MCAML_SPECIALIZE_LIMIT` — every one of these
       fails LOUDLY (compile-time error), never silently.)
 - [ ] F4-followup. Drop-and-renumber the retired parameter slot instead of passing a dummy zero (currently a harmless one-extra-argument-pass per specialized call, not a correctness issue — deferred, not required for the zero-cost claim since the dummy-argument fix already makes the originating IClosureMake DCE-able)
-- [ ] F5. Apply-dispatch runtime for escaping lambdas: a closure objpool (reuse Phase D's objpool), the `mcaml:apply` macro-dispatch function, env-unpack prelude at lifted function entry
+- [x] F5. Apply-dispatch runtime for escaping lambdas. (Session 4, commit
+      `36a97c7` — implementation — plus a separate plan-doc commit
+      documenting §13.12 decisions 7–8 and this §2 entry. Full design
+      record in §13.12 decisions 7 (cell layout /
+      code table / shared apply dispatch / env-unpack trampoline / the
+      IApply save-restore bug found and fixed while adding escaping-
+      shape test coverage) and 8 (ref-then-call scope decision).
+
+      New module `closure_layout.ml`: a whole-program pass, run once in
+      `main.ml` right after `Closure_spec.run` (before `Monomorphize.run`
+      — ordering between the two doesn't matter per decision 3, neither
+      touches the other's machinery), that scans every non-template
+      `cfg_func` for surviving `IClosureMake` instructions and assigns
+      each distinct lambda-helper name a dense whole-program `code` in
+      alphabetical order, plus derives `k_max_captured` (feeds `cost.ml`'s
+      `IApply` formula, finally replacing the session-3 placeholder) and
+      `k_max_apply_args` (recorded for completeness, not load-bearing for
+      codegen correctness — see decision 7). This snapshot is taken BEFORE
+      per-function DCE has run (DCE happens inside `Optimize.run`, deep in
+      the per-function Phase 3 loop) and is therefore a conservative
+      *superset* of what ultimately survives to codegen — an explicit,
+      documented tradeoff (decision 7) after an attempt to compute it
+      post-DCE via a whole-table Optimize pre-pass changed
+      `unroll.ml`'s cross-function caller-constant-resolution timing
+      enough to make `test_arr_set.mcaml` (one of the five canaries)
+      unroll differently. Reverted immediately per §13's own escalation
+      trigger; the accepted cost is a handful of harmless dead
+      `apply_dispatch_<N>.mcfunction` files for an all-Known-lambda
+      program, never a change to any actually-compiled function body.
+
+      `codegen_helpers.ml` gains `cmd_closure_make` (mirrors
+      `cmd_adt_alloc` exactly: tag fixed to `-2`, fields `env_0, env_1,
+      ...` instead of `f0, f1, ...`; 3 + #captures commands),
+      `cmd_apply` (stages the closure handle into the shared
+      `mcaml:tmp args.idx` macro slot — same convention as
+      `cons_head`/`obj_f<k>` — and each call's own args into a new
+      reserved `$apply_arg_<i>` bank, then dispatches to the shared
+      `mcaml:apply`), `apply_dispatch_body` (the shared whole-program
+      `$code`-dispatch chain: one `execute if score $code vars matches
+      <code> run return run function mcaml:apply_dispatch_<code> with
+      storage mcaml:tmp args` line per known shape, reusing the exact
+      `return run` TTail idiom `codegen_cfg.ml` already relies on so a
+      matching branch doesn't fall through to test the rest),
+      `apply_dispatch_trampoline_body` (the per-shape env-unpack: reads
+      `env_0..env_{n-1}` from the cell into `param_0..param_{n-1}`,
+      copies `$apply_arg_0..$apply_arg_{m-1}` into the trailing param
+      slots, then `return run`s to the concrete lifted lambda helper —
+      mirrors `for_lift.ml`'s own `fv_list @ params` leading-captures
+      convention), and `cmd_apply_helper_body` (IApply's save/restore
+      variant — see the bug note below). `cmd_call_helper_body_narrow`
+      was factored into a shared `cmd_call_helper_body_generic` (same
+      lazy-init/push/save/`<call_cmds>`/restore/pop scaffolding,
+      parameterized by the call itself) so both ICall's and IApply's
+      save/restore helpers share one implementation; zero behavior
+      change for ICall (verified by the canary diff below).
+
+      `codegen_cfg.ml`'s two loud F5-deferred stubs are replaced:
+      `IClosureMake` looks up its code via `Closure_layout.code_of` and
+      emits `cmd_closure_make`; `IApply` computes
+      `slots_live_across_call` (the SAME liveness-driven save/restore
+      set ICall already computes) and either emits `cmd_apply` inline
+      (no slots live across) or wraps it in a save/restore helper file
+      via `cmd_apply_helper_body` — see the bug note. Two new reserved-
+      slot patterns in `is_reserved_slot`: literal `$code` and a generic
+      `$apply_arg_` prefix match (sized dynamically per program via
+      `closure_layout.ml`, unlike the fixed `$region_save_0..3` pairs,
+      since the count needed is a whole-program constant with no small
+      hardcoded ceiling to enumerate).
+
+      `cost.ml` gains a `k_max_captured` mutable ref (set once by
+      `main.ml`, the one piece of mutable state in an otherwise pure
+      cost model — same shape as `Cfg.o0`/`pass_disabled`) and the real
+      decision-5 formula `IApply -> 4 + 2 * !k_max_captured`;
+      `IClosureMake`'s arm changed from the session-3 placeholder `0` to
+      `3 + List.length caps` (it now HAS a real, exactly-known lowering
+      whenever an instance survives to codegen — priced identically to
+      `IAdtAlloc` just above it in the same match).
+
+      **Bug found and fixed during implementation** (caught by the new
+      self-tail-forward test, not hypothetical): the first version of
+      `IApply`'s lowering dispatched to `mcaml:apply` directly with no
+      save/restore at all. Physical scoreboard slots are ONE flat global
+      namespace assigned per-function by regalloc — not a real call
+      stack — so a lifted lambda helper invoked via apply freely reuses
+      `$r0`, `$r1`, ... for its own locals exactly like any other
+      function, and can silently clobber a live caller slot. A
+      self-tail loop forwarding a captured closure across its own
+      back-edge (`fun loop(f, n, acc) = if n=0 then acc else loop(f,
+      n-1, f(acc))`) reproduced this immediately: the second iteration's
+      `f(acc)` call clobbered the physical slot holding the closure
+      handle itself (which happened to alias a scratch register
+      `main__lam1`'s own body reused), and the third iteration's apply
+      dispatch read a `cells[<garbage>]` index. Fixed by giving IApply
+      the exact same `slots_live_across_call` treatment ICall already
+      had — this is the reason `cmd_call_helper_body_narrow` got
+      factored into the shared `..._generic` form above, rather than
+      writing a second, parallel save/restore implementation.
+
+      Also discovered while writing test coverage: a thin single-line
+      forwarding function (`fun inner(f, x) = f(x)`) is a leaf by
+      `inline.ml`'s own definition and gets spliced away by `Inline.run`
+      before `Closure_spec.run` ever sees it, silently collapsing an
+      intended "two-hop" test into a same-function (zero-cost) one. Both
+      the multi-hop-forwarded and budget-exceeded test sources needed a
+      real second instruction (routing through a distinct
+      `helper_add_one` callee) to keep the intervening function from
+      being inlined away — not a bug, just a sharp edge worth recording
+      since it will bite the next person writing an Escaping-shape probe
+      by hand.
+
+      Verified end-to-end via `scripts/test_lambdas.mcaml` (unchanged —
+      still exactly the four Known-path entries) and the extended
+      `/tmp/mcaml_out/test_lambdas.py` (uncommitted, same convention as
+      every prior Phase F/G harness): the four Known-path entries still
+      produce ZERO apply-dispatch/closure-cell machinery (grep pin,
+      unchanged from session 3) with correct `$ret`; five NEW probes —
+      ambiguous-merge (flipped from session 3's reject probe to a
+      positive run-and-check-$ret test now that F5 exists), multi-hop-
+      forwarded, self-tail-forward, budget-exceeded (9 distinct closures
+      into one HOF against the default `MCAML_SPECIALIZE_LIMIT=8`,
+      structurally confirmed as exactly 8 zero-cost clones + 1 real
+      apply-dispatch fallback), and ref-then-call (still rejected — see
+      decision 8) — all pass. `MCAML_NO_CLOSURE_SPEC=1` (F3+F4 disabled
+      entirely) re-verified against the same four Known-path entries:
+      every one now round-trips through REAL apply-dispatch instead of
+      hitting a stub, with correct `$ret`. Full battery green: all ten
+      `/tmp` harnesses (adts, cons, dyn_array, fixed_point, lambdas,
+      list_match, param_types, polymorphism, regions, tuples_records),
+      every `scripts/*.mcaml` file's compiled output byte-hash diffed
+      against a pre-edit snapshot (zero differences outside
+      `test_lambdas.mcaml`'s expected new dead-file superset, per the
+      decision-7 tradeoff above; the four scripts that already failed to
+      typecheck before this session — `debug_fib`, `mc_test_suite`,
+      `test_fail`, `test_globals` — fail identically, pre-existing and
+      unrelated), five canaries byte-identical.
+
+      **What F5 closes vs. defers, restated from the session-3 list**:
+      EVERY Escaping shape session 3 enumerated now compiles and runs
+      through real apply-dispatch — ref-stored-then-called is the one
+      deliberate exception, and it was never actually reaching the F5
+      stub in the first place (decision 8: it fails earlier, at
+      knormal's pre-existing defensive check, and F5 explicitly chose
+      not to extend `closure_env` to reach it). F4-followup (drop-and-
+      renumber instead of dummy-arg) and F6 (diagnostics /
+      `MCAML_STRICT_HOT`) remain open — F6 did not fall out naturally
+      this session and was not attempted, per the kickoff's own
+      framing.)
 - [ ] F6. Diagnostics: `[closure]` per-lambda report (specialized vs escaping + reason + cost estimate); `MCAML_STRICT_HOT=1` env knob to promote escaping-in-hot-loop to a compile error; `cost.ml` integration so `tick_split`/`tick_guard` budgets account for apply-dispatch cost
 - [ ] F7. Tests: literal lambdas in HOFs specialize; closures captured in ADTs take the apply path; strict-hot mode fires on the right patterns
 
@@ -4382,6 +4528,161 @@ already-existing catch-all, no new rejection arm needed); `for_lift`'s
 oracle degraded mode and the two-pass `main.ml` driver (type+
 generalize, then zonk+compile) — closure conversion slots between
 Inline and Monomorphize (decision 3), not inside typing.
+
+**7. F5 decisions (apply-dispatch runtime for escaping lambdas).**
+Settled while implementing, per the same protocol as decisions 1–6 —
+each sub-choice below was a genuine fork the F5 kickoff explicitly
+deferred to this session rather than pre-deciding.
+
+*Cell layout / `code` encoding.* Confirmed as decision 4 already
+specified: `{tag: -2, code, env_0, env_1, ...}`. `code` is a dense,
+small, whole-program integer — a NEW global table (lambda-helper name
+→ code), not a hash or intern of the helper name — assigned by the new
+`closure_layout.ml` module: scan every non-template `cfg_func` for
+`IClosureMake` instructions, collect the distinct `fname`s, sort
+alphabetically for determinism, assign `0..N-1`. Alphabetical rather
+than discovery-order specifically so the codes (and therefore the
+`apply.mcfunction` dispatch chain and every `apply_dispatch_<N>.mcfunction`
+filename) are stable across otherwise-unrelated changes elsewhere in
+the source that might reorder `fn_table` iteration.
+
+*When is the table computed — pre-DCE superset, not post-DCE exact.*
+The natural-looking refinement — compute `closure_layout` AFTER
+per-function DCE has removed every Known-classified (and therefore
+dead) `IClosureMake`, so an all-Known-lambda program emits zero
+`apply`/`apply_dispatch_<N>` files at all — was tried and reverted.
+DCE only happens inside `Optimize.run`, which `main.ml`'s Phase 3 loop
+runs interleaved with regalloc/codegen ONE FUNCTION AT A TIME via
+`Codegen.compile_cfg_to_files`. Pulling `Optimize.run` out into a
+separate whole-table pre-pass (Optimize for every function, THEN
+regalloc+codegen for every function) to get a post-DCE snapshot changed
+`unroll.ml`'s cross-function caller-constant-resolution timing enough
+that `scripts/test_arr_set.mcaml` — one of the five canaries, which
+uses no closures at all — started unrolling a loop it previously
+didn't. The exact mechanism was not fully root-caused (plausibly:
+`unroll.ml`'s "resolve `lo`/`hi` from the unique caller's `IConst`
+defs" reads `fn_table` cross-function, and something about which OTHER
+functions have already had their full Optimize+Regalloc+Codegen
+sequence applied — not just Optimize — subtly matters even though
+regalloc/codegen never touch the instructions unroll pattern-matches
+on) — and per §13's own escalation trigger ("an existing test changes
+its output or command count"), it was reverted on sight rather than
+chased further, since re-deriving unroll's ACTUAL cross-function
+sensitivity was a large, separate investigation with no bearing on F5's
+own goal. `closure_layout.compute` therefore runs at the ORIGINAL
+point (right after `Closure_spec.run`, before `Monomorphize.run`,
+exactly as decision 5's own framing already said) and is a conservative
+superset of what survives to codegen: harmless, because an unreached
+`code` just means `mcaml:apply`'s dispatch chain carries one never-taken
+branch and its trampoline file is never called — the compiled function
+BODIES (which is what F3+F4's zero-cost claim is actually about) are
+completely unaffected, confirmed by the unchanged Known-path grep pin
+in `test_lambdas.py`.
+
+*Apply-dispatch chain shape — one shared function, not one per
+call-site shape.* `mcaml:apply` is a single whole-program macro
+function (mirrors `obj_tag`'s `$(idx)`-driven macro-getter pattern):
+reads `$code` from the closure cell, then chains one `execute if score
+$code vars matches <code> run return run function
+mcaml:apply_dispatch_<code> with storage mcaml:tmp args` per known
+shape — the same `return run` TTail idiom `codegen_cfg.ml` already
+relies on, so a matching branch terminates instead of falling through
+to test the rest. Rejected the alternative (a dispatch chain
+synthesized per distinct call-site "closure shape signature", i.e. per
+TFun arity seen at IApply sites): a lifted lambda helper's OWN arity
+split (captures vs. own args) is a fixed, whole-program property of
+that helper, completely independent of which call site happens to
+invoke it — so per-call-site chains would just be N copies of the same
+dispatch logic with no narrowing benefit, more generated files, and a
+real risk of drifting out of sync with `closure_layout.ml`'s single
+source of truth for the code assignment.
+
+*Env-unpack location — per-shape trampoline, not inlined in
+`mcaml:apply`.* Each `apply_dispatch_<code>.mcfunction` is a thin
+per-shape wrapper: read `env_0..env_{n-1}` from the cell into
+`param_0..param_{n-1}` (mirrors `for_lift.ml`'s own `fv_list @ params`
+leading-captures convention — this is the one place codegen has to
+reconstruct that split, since an ordinary `ICall` never needs to, the
+caller already has every argument positioned correctly), copy
+`$apply_arg_0..$apply_arg_{m-1}` (this call's own, non-captured
+arguments, staged by the caller into a new reserved bank before
+dispatching — necessary because the captures' byte offset into the
+target's param array isn't known until `$code` is read at runtime, so
+the caller can't place its own args directly into `param_N` without
+knowing which shape it will end up being), then `return run` to the
+concrete lifted lambda helper. Keeping this per-shape rather than
+inlining every shape's unpack logic directly into `mcaml:apply`'s own
+dispatch chain keeps that shared function's size independent of
+`k_max_captured`, and mirrors the existing `cons_head`/`obj_f<k>`
+precedent of one small per-purpose macro helper file per concern.
+
+*Two new reserved scoreboard slot patterns (§4.1 extension, same
+protocol as every prior phase's additions).* `$code` (scratch for
+`mcaml:apply`'s own `$code` read) and a generic `$apply_arg_` prefix
+match in `is_reserved_slot` (unlike the fixed `$region_save_0..3`
+pairs, the count needed is a whole-program constant with no small
+hardcoded ceiling — sized dynamically by `closure_layout.ml`, so a
+prefix match was the only viable form, same pattern already used for
+`$ref_*`).
+
+*The IApply save/restore bug (found empirically, not anticipated by
+the kickoff).* The first implementation of `IApply`'s lowering
+dispatched to `mcaml:apply` with no save/restore around the call at
+all. This is a genuine correctness bug, not a style choice: physical
+scoreboard slots (`$r0`, `$r1`, ...) are ONE FLAT GLOBAL NAMESPACE
+assigned per-function by `regalloc_cfg.ml`, not a real call stack — a
+lifted lambda helper invoked via apply has no idea it's being called
+through a closure and freely reuses `$r0`, `$r1`, ... for its own
+locals, exactly like an ordinary function does. `ICall` already
+protects against this (`slots_live_across_call` + the
+`cmd_call_helper_body_narrow` save/restore helper), but the first
+`IApply` lowering didn't replicate it. Caught by the NEW self-tail-
+forward test this session added
+(`fun loop(f, n, acc) = if n=0 then acc else loop(f, n-1, f(acc))`,
+forwarding a captured closure across the loop's own back-edge): the
+second iteration's `f(acc)` call clobbered the physical slot holding
+the closure handle itself, and the third iteration's apply dispatch
+read a garbage cell index and crashed. Fixed by giving `IApply` the
+identical `slots_live_across_call` treatment `ICall` already had —
+`codegen_helpers.ml`'s `cmd_call_helper_body_narrow` was factored into
+a shared `cmd_call_helper_body_generic` (same lazy-init/push/save/
+`<call_cmds>`/restore/pop scaffolding, parameterized by the call
+itself) specifically so both share ONE implementation instead of two
+parallel, driftable copies. Recorded here because it's exactly the
+kind of interaction the §13.6/§13.12-decision-5 cost formula
+("4 + 2 * K_max_captured") implicitly assumed away by never mentioning
+save/restore cost at all — a future session tightening that formula
+should account for the save/restore helper's own extra commands when
+slots ARE live across an apply call, which the current formula does
+not distinguish.
+
+**8. Ref-then-call scope decision — deliberately NOT lifted.**
+Session 3's own completion notes were ambiguous about whether
+ref-stored-then-called closures (`let r = ref (fun ...) in ... ;
+let g = !r in g(x)`) reach the F5-deferred codegen stub or fail
+earlier; the F5 kickoff itself corrected this: they fail EARLIER, at
+`knormal.ml`'s pre-existing defensive `Hashtbl.mem Typing.fun_sigs f`
+check (the same arm that also catches the HOF-factory-return case,
+`let g = make_adder(5) in g(10)`) — never reaching an `IClosureMake`/
+`IApply` pair at all. F5 chose NOT to extend `closure_env` to cover
+this shape. Rationale: `closure_env` is currently seeded only from (a)
+a `TFun`-typed function PARAMETER (`normalize_fun`) and (b) a direct
+`Let (x, Closure (fname, caps), e2)` binding — both cases where
+knormal can locally see, syntactically, that `x` holds a closure.
+`let g = !r in ...` binds `g` from a `Deref` expression, not a literal
+`Closure` node, so recognizing it would require knormal to carry a
+real per-variable type environment (exactly the gap decision 2 already
+named as out of v1 scope for the structurally-identical factory-return
+case: "knormal has no per-variable type environment to detect this
+shape"). Building that environment is a legitimate, mechanically
+straightforward follow-up, but it is a knormal-frontend change that
+WIDENS which uses reach `IApply` in the first place, not a codegen/
+runtime question — orthogonal to F5's actual job, which is giving a
+real lowering to every use that already gets that far. The pre-existing
+knormal message stays exactly as-is; `test_lambdas.py`'s new
+`ref_then_call` probe pins it as an intentional negative test (rejected
+with the same message) so a future session doesn't silently regress or
+accidentally "fix" this boundary without re-opening the decision.
 
 ## 13. Escalation triggers
 
