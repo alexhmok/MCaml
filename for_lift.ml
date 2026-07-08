@@ -32,6 +32,17 @@ let fresh_hi_name () =
   incr counter;
   Printf.sprintf "__hi_%d" !counter
 
+(* Phase F: name for a lambda-lifted helper. Deliberately does NOT
+   contain the substring "__for" (unlike fresh_name) so
+   [is_synthetic_name]'s substring check does not mistake it for a
+   for-loop helper and skip its real typing — a lambda helper takes
+   every capture as an explicit leading param (no borrowed enclosing-
+   scope names), so it needs and gets ordinary top-level typing, unlike
+   a for-helper. *)
+let fresh_lambda_name parent =
+  incr counter;
+  Printf.sprintf "%s__lam%d" parent !counter
+
 (* Is this def name a synthesized for helper? Used by main.ml to skip
    typing (helpers reference the enclosing function's locals directly,
    which are not in their own param env). *)
@@ -94,6 +105,16 @@ let rec free_vars (bound : S.t) (e : expr) : S.t =
         S.empty fields
   | Field (e, _) -> free_vars bound e
   | Region (_, e) -> free_vars bound e
+  (* Phase F: a raw Lambda should never reach here (walk always
+     converts it to Closure before computing free vars of the
+     surrounding body — see the walk arm below), but stays defensively
+     correct: excludes the lambda's own params, same as the real
+     conversion does. *)
+  | Lambda (params, body) ->
+      free_vars (S.union bound (S.of_list (List.map fst params))) body
+  | Closure (_, caps) ->
+      List.fold_left (fun acc c -> S.union acc (free_vars bound c))
+        S.empty caps
   | Match (e, arms) ->
       List.fold_left (fun acc (p, body) ->
         S.union acc (free_vars (S.union (pattern_vars p) bound) body))
@@ -240,6 +261,52 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
   | Region (tr, e) ->
       let (e', d) = walk parent env e in
       (Region (tr, e'), d)  (* share tr *)
+  (* Phase F: closure conversion. Structurally identical to the For
+     case above — hoist the lambda's body into a synthetic top-level
+     helper taking its free variables as extra (leading) params, and
+     replace the occurrence with a call-free reference to that helper
+     plus the captured values. Differs from For in exactly one way: a
+     lambda is a VALUE (may be stored/returned/passed), not something
+     called immediately at its own site, so the replacement is a
+     Closure node (which typing reads as TFun(own_params, ret)), not an
+     App. (§13.12 F1 sub-decision 3.) *)
+  | Lambda (params, body) ->
+      let bound_names = S.of_list (List.map fst params) in
+      let body_env =
+        List.fold_left (fun m (p, t) -> M.add p t m) env params
+      in
+      let (body', d_inner) = walk parent body_env body in
+      let fvs = free_vars bound_names body' in
+      let fv_list =
+        S.elements fvs
+        |> List.filter_map (fun n ->
+             match M.find_opt n env with
+             | Some t -> Some (n, t)
+             | None -> None)
+      in
+      (* Refs lower to globally-stable scoreboard slot names, exactly
+         like For's fv filtering — the helper body references them
+         directly by name and does NOT need them as captures/params. *)
+      let fv_list =
+        List.filter
+          (fun (_, t) -> match t with TRef _ -> false | _ -> true)
+          fv_list
+      in
+      let synth = fresh_lambda_name parent in
+      let helper_params = fv_list @ params in
+      let fv_args = List.map (fun (n, _) -> Var n) fv_list in
+      (* E4-style optional return annotation: mint an unbound tvar so
+         the real Phase 1 typing pass (this helper is NOT
+         is_synthetic_name-skipped, unlike a for-helper) infers/checks
+         it from body' normally. *)
+      let helper = Fun (synth, helper_params, TVar (ref None), body') in
+      (Closure (synth, fv_args), d_inner @ [helper])
+  (* Only ever produced by this walk itself (see above), never present
+     in the input program — kept for match exhaustiveness / defensive
+     correctness if a Closure ever arrives already-converted. *)
+  | Closure (fname, caps) ->
+      let pairs = List.map (walk parent env) caps in
+      (Closure (fname, List.map fst pairs), List.concat_map snd pairs)
   | Match (e, arms) ->
       let (e', d0) = walk parent env e in
       (* Pattern binders enter the env as TInt: under the §12.1 uniform

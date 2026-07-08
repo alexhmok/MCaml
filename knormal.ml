@@ -97,6 +97,17 @@ let str_of_coord p =
    the static path is bit-identical on static-only programs. *)
 let dyn_env : (string, string) Hashtbl.t = Hashtbl.create 16
 
+(* Phase F: names known (from a TFun-typed param, seeded by
+   [normalize_fun] below) to hold a closure handle. A closure handle IS
+   just one scalar int at the CFG level (decision 1) — cfg_build's `_`
+   prelude arm already copies it from param_i with no edit needed — but
+   ACTUALLY CALLING one requires runtime dispatch through the closure
+   cell's code field, which lands in F3/F4/F5. This table exists so
+   that call, specifically, fails loudly at compile time instead of
+   silently emitting a bogus KCall against a nonexistent global
+   function named after the local vreg. *)
+let closure_env : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 (* Compile-time environment mapping user-level binder names to array storage IDs.
    Arrays are NOT first-class runtime values in Milestone 1: a `let a = [|..|]`
    binds `a` at compile time to a storage id like "arr3". Cleared at entry to
@@ -572,6 +583,26 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
          even when an enclosing KSeq passes [~dest:None]. *)
       KRegion (normalize_to dest body, !tr, dest)
 
+  (* Phase F: a raw Lambda should never reach here — for_lift.ml fully
+     converts every Lambda into a Closure before knormal ever runs
+     (§13.12 F1 sub-decision 3). Kept only for match exhaustiveness /
+     defensive correctness; a loud failure here means for_lift missed
+     a case, which is itself a bug worth surfacing loudly. *)
+  | Lambda (_, _) ->
+      failwith "internal: raw Lambda reached knormal — for_lift should \
+                have converted it to Closure; this is a compiler bug"
+
+  (* Phase F: closure construction. Allocating the real {tag:-2, code,
+     env_0, ...} objpool cell needs escape analysis to pick a lowering
+     strategy (specialize vs. apply-dispatch) and lands in F3/F4/F5 —
+     loud stub for now, same posture Phase D's D1 used for Match before
+     D5 landed. *)
+  | Closure (fname, _) ->
+      failwith (Printf.sprintf
+        "closure construction (helper %s): allocating a first-class \
+         function value is not yet lowered (lands in F3/F4/F5 — escape \
+         analysis + specialization/apply-dispatch)" fname)
+
   | Nil ->
       (* Empty list sentinel: -1, per §4.2. *)
       (match dest with
@@ -771,6 +802,16 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
       (match dest with
        | None -> seq KUnit
        | Some d -> seq (KLet (d, KUnit, KAdtAlloc (d, tag, temps))))
+
+  (* Phase F: calling a closure handle held in a local var/param. Real
+     dispatch (read the cell's code field, jump to it) needs escape
+     analysis to pick a lowering strategy and lands in F3/F4/F5 — loud
+     stub for now, same posture Phase D's D1 used for Match before D5. *)
+  | App (f, _) when Hashtbl.mem closure_env f ->
+      failwith (Printf.sprintf
+        "closure application through '%s': calling a first-class \
+         function value is not yet lowered (lands in F3/F4/F5 — escape \
+         analysis + specialization/apply-dispatch)" f)
 
   | App (f, args) ->
       let rec bind_args args acc = match args with
@@ -1205,6 +1246,7 @@ let normalize e =
   Hashtbl.clear arr_env;
   Hashtbl.clear arr_dims;
   Hashtbl.clear dyn_env;
+  Hashtbl.clear closure_env;
   (* Phase G: seed globals after clearing so per-function locals still
      have a fresh slate but global val names resolve. *)
   reseed_globals ();
@@ -1221,6 +1263,7 @@ let normalize_fun (params : (string * Ast.typ) list) (body : expr) : kexpr =
   Hashtbl.clear arr_env;
   Hashtbl.clear arr_dims;
   Hashtbl.clear dyn_env;
+  Hashtbl.clear closure_env;
   (* Phase G: seed globals so `fun f () = global_lut[i]` resolves. *)
   reseed_globals ();
   List.iteri (fun i (name, ty) ->
@@ -1246,6 +1289,7 @@ let normalize_fun (params : (string * Ast.typ) list) (body : expr) : kexpr =
            bound) has something to look up. *)
         let _ = i in
         Hashtbl.replace dyn_env name ("$dyn_len_param_" ^ name)
+    | TFun _ -> Hashtbl.replace closure_env name ()
     | _ -> ()
   ) params;
   normalize_to (Some "$ret") body

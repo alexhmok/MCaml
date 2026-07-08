@@ -170,8 +170,30 @@ param:
   | name = ID { (name, TVar (ref None)) }
 
 /* D7: `int * int` is a tuple type. One TIMES-free atom collapses to
-   itself; two or more become TTuple. */
+   itself; two or more become TTuple.
+   Phase F: `t -> r` / `() -> r` arrow-type ANNOTATION syntax (distinct
+   from the Lambda EXPRESSION grammar above, which needs no arrow
+   surface syntax at all since a lambda's own type is inferred). v1
+   scope: arity 0 and arity 1 only, mirroring G4's own single-param
+   scope cut for type application (§13.11 decision 4) — a true n-ary
+   `(t1, t2) -> r` surface form would need `LPAREN
+   nonempty_typ_comma_list RPAREN ARROW typ`, which shares a prefix
+   with the existing `LPAREN typ RPAREN` grouping atom below (both
+   start `LPAREN typ`) and cannot be disambiguated by menhir's LALR(1)
+   lookahead at the point the parser must choose between them; the
+   single-arg case sidesteps this entirely (no LPAREN at the front) and
+   arity>=2 HOF parameters are deferred as a mechanical follow-up (a
+   2+-ary LAMBDA EXPRESSION `fun (x, y) -> ...` is still fully usable
+   and infers its own TFun([tx;ty],tret) type — only an EXPLICIT
+   annotation for one is out of v1 scope). Right-recursive on [typ]
+   itself so `int -> int -> int` (a function returning a function,
+   decision 2's HOF-factory case) associates right with zero extra
+   grammar. */
 typ:
+  | t = star_typ_list ARROW ret = typ
+      { TFun ([(match t with [x] -> x | ts -> TTuple ts)], ret) }
+  | LPAREN RPAREN ARROW ret = typ
+      { TFun ([], ret) }
   | ts = star_typ_list { match ts with [t] -> t | ts -> TTuple ts }
 
 star_typ_list:
@@ -271,6 +293,25 @@ expr:
   | e = expr LBRACK i = expr COMMA j = expr RBRACK { Index2(e, i, j) }
 
   | REGION LPAREN FUN LPAREN RPAREN ARROW body = seq_expr RPAREN { Region (ref TUnit, body) }
+
+  /* Phase F: lambda expression. Mirrors Fun's own production exactly,
+     reusing param_list verbatim - no new nonterminal (F1 sub-decision
+     2). Body sits at `expr` (not seq_expr), same reason match_arm's
+     body does: a trailing "; e2" after the lambda sequences with
+     whatever follows instead of being swallowed into the body.
+     Region's own literal REGION LPAREN FUN LPAREN RPAREN ARROW ...
+     production above is a fully separate token sequence that never
+     builds through `expr`, so this rule cannot interact with it.
+     %prec BELOW_BAR is required here for the same reason match_arm
+     carries it: ARROW has no declared precedence, so without this the
+     reduce action of THIS rule is unresolved against a shift of any
+     following operator token (PLUS, CONS, ...) - menhir silently
+     defaults to shift, producing 18 shift/reduce conflicts. Pinning
+     the reduce action below every operator's precedence makes the
+     body extend greedily and removes every conflict (confirmed by
+     re-running menhir after adding this). */
+  | FUN LPAREN params = param_list RPAREN ARROW body = expr %prec BELOW_BAR
+    { Lambda (params, body) }
 
   | MATCH e = seq_expr WITH opt_bar arms = match_arms { Match(e, arms) }
 

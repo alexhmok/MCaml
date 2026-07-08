@@ -9,6 +9,7 @@ type typ = TInt | TFloat | TBool | TUnit | TSelector | TPos
          | TTuple of typ list         (* D7: structural tuple; runtime value is an objpool handle to a {tag:0, f0...} cell *)
          | TVar of typ option ref     (* Phase E: unification variable — None = unbound, Some t = destructively linked (§13.10 decision 1). Only typing.ml (and the parser, for omitted annotations) ever mints one; main.ml zonks every def before knormal so no pass below typing sees a TVar. Schemes live in typing.ml's env, NOT here (decision 2). *)
          | TParam of string           (* G4: decl-side type variable — a BINDER, not a unification var. Legal only inside a registered ctor field type until substituted at every use/pattern site; never reaches unify unsubstituted (§13.11 decision 2). *)
+         | TFun of typ list * typ     (* Phase F: n-ary uncurried arrow type, NO partial application in v1 (§13.12 decision 1). Runtime value is a closure handle — one objpool cell reference, exactly one scoreboard int like every other handle type. A THIRD sibling to TAdt/TParam, not a replacement for either. *)
 
 (* Phase D: one constructor of a declared ADT: name + field types.
    Constructor names must be Capitalized (validated at registration in
@@ -76,6 +77,25 @@ type expr =
   | Tuple of expr list                     (* D7: (e1, e2, ...) — arity >= 2; allocates one {tag:0, f0...} objpool cell *)
   | Record of (string * expr) list         (* D8: { x = e; ... } — exact field set required, any order; same {tag:0, f0...} cell (decl order) *)
   | Field of expr * string                 (* D8: r.x — 3-cmd KFieldGet through the obj_f<k> macro getter *)
+  (* Phase F: `fun (params) -> body` lambda EXPRESSION (distinct from the
+     top-level `Fun` def, which already existed). v1 params are bare var
+     binders, NOT patterns (§13.12 F1 sub-decision 1) — mirrors Fun's own
+     param grammar exactly. for_lift.ml fully consumes every Lambda,
+     replacing it with a Closure node before typing ever runs (§13.12 F1
+     sub-decision 3) — so typing/knormal seeing a raw Lambda here is
+     either for_lift's own degraded oracle call or a bug. *)
+  | Lambda of (string * typ) list * expr
+  (* Phase F: closure-conversion IR — the ONE uniform post-conversion
+     form F3's escape analysis will consume (§13.12 F1 sub-decision 3).
+     for_lift.ml lifts every Lambda's body to a synthetic top-level `Fun`
+     helper (captures as leading params, exactly like a for-loop helper)
+     and replaces the Lambda occurrence with `Closure(helper_name,
+     captured_value_exprs)`. Typed as `TFun(own_param_types, ret_type)`
+     by looking up the helper's signature and splitting off the leading
+     `List.length captured_value_exprs` params as captures. knormal loudly
+     rejects constructing one (lowering to a real {tag:-2,...} cell lands
+     in F3/F4/F5) — same posture Phase D's D1 used for Match before D5. *)
+  | Closure of string * expr list
 
 type def =
   | Val of string * expr

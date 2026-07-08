@@ -117,6 +117,14 @@ let rec string_of_typ (t : typ) : string =
       "(" ^ String.concat ", " (List.map string_of_typ args) ^ ") " ^ n
   | TVar r -> tvar_name r
   | TParam p -> "'" ^ p
+  | TFun (ps, ret) ->
+      let params_str =
+        match ps with
+        | [] -> "()"
+        | [t] -> string_of_typ t
+        | ts -> "(" ^ String.concat ", " (List.map string_of_typ ts) ^ ")"
+      in
+      params_str ^ " -> " ^ string_of_typ ret
 
 let rec occurs (r : typ option ref) (t : typ) : bool =
   match resolve t with
@@ -125,6 +133,7 @@ let rec occurs (r : typ option ref) (t : typ) : bool =
       occurs r t
   | TTuple ts -> List.exists (occurs r) ts
   | TAdt (_, args) -> List.exists (occurs r) args
+  | TFun (ps, ret) -> List.exists (occurs r) ps || occurs r ret
   | TInt | TFloat | TBool | TUnit | TSelector | TPos | TParam _ -> false
 
 exception Unify_fail of typ * typ
@@ -140,7 +149,8 @@ exception Unify_fail of typ * typ
    explicit annotations, exactly as they do today. *)
 let tvar_bindable (t : typ) : string option =
   match t with
-  | TInt | TFloat | TBool | TList _ | TTuple _ | TAdt _ | TVar _ -> None
+  | TInt | TFloat | TBool | TList _ | TTuple _ | TAdt _ | TVar _
+  | TFun _ -> None
   | TArrDyn _ -> Some "darr"
   | TArrStatic _ -> Some "static array"
   | TMat _ -> Some "matrix"
@@ -193,6 +203,8 @@ let rec unify (t1 : typ) (t2 : typ) : unit =
   | TAdt (a, args_a), TAdt (b, args_b)
     when a = b && List.length args_a = List.length args_b ->
       List.iter2 unify args_a args_b
+  | TFun (p1, r1), TFun (p2, r2) when List.length p1 = List.length p2 ->
+      List.iter2 unify p1 p2; unify r1 r2
   | _ -> raise (Unify_fail (t1, t2))
 
 (* Unify with a legacy error message: every type check that predates
@@ -222,6 +234,7 @@ let rec zonk_default (t : typ) : typ =
   | TMat (t, m, n) -> TMat (zonk_default t, m, n)
   | TTuple ts -> TTuple (List.map zonk_default ts)
   | TAdt (n, args) -> TAdt (n, List.map zonk_default args)
+  | TFun (ps, ret) -> TFun (List.map zonk_default ps, zonk_default ret)
   | (TInt | TFloat | TBool | TUnit | TSelector | TPos | TParam _) as t -> t
 
 (* ---- Schemes (§13.10 decision 2: env-side, typ stays scheme-free) --- *)
@@ -247,6 +260,8 @@ let rec copy_with (mapping : (typ option ref * typ) list) (t : typ) : typ =
   | TMat (t, m, n) -> TMat (copy_with mapping t, m, n)
   | TTuple ts -> TTuple (List.map (copy_with mapping) ts)
   | TAdt (n, args) -> TAdt (n, List.map (copy_with mapping) args)
+  | TFun (ps, ret) ->
+      TFun (List.map (copy_with mapping) ps, copy_with mapping ret)
   | (TInt | TFloat | TBool | TUnit | TSelector | TPos | TParam _) as t -> t
 
 let instantiate (s : scheme) : typ =
@@ -278,6 +293,8 @@ let rec subst_typarams (mapping : (string * typ) list) (t : typ) : typ =
   | TMat (t, m, n) -> TMat (subst_typarams mapping t, m, n)
   | TTuple ts -> TTuple (List.map (subst_typarams mapping) ts)
   | TAdt (n, args) -> TAdt (n, List.map (subst_typarams mapping) args)
+  | TFun (ps, ret) ->
+      TFun (List.map (subst_typarams mapping) ps, subst_typarams mapping ret)
   | TInt | TFloat | TBool | TUnit | TSelector | TPos | TVar _ -> t
 
 (* ---- E3: generalization (scan-the-env, §13.10 decision 1) ----------- *)
@@ -291,6 +308,7 @@ let rec free_tvars (acc : typ option ref list) (t : typ)
       free_tvars acc t
   | TTuple ts -> List.fold_left free_tvars acc ts
   | TAdt (_, args) -> List.fold_left free_tvars acc args
+  | TFun (ps, ret) -> List.fold_left free_tvars acc (ret :: ps)
   | TInt | TFloat | TBool | TUnit | TSelector | TPos | TParam _ -> acc
 
 let scheme_free_tvars (acc : typ option ref list) (s : scheme)
@@ -399,6 +417,9 @@ let rec check_typ_ok (allowed_params : string list) (t : typ) : unit =
   | TList t | TArrDyn t | TRef t | TArrStatic (t, _) | TMat (t, _, _) ->
       check_typ_ok allowed_params t
   | TTuple ts -> List.iter (check_typ_ok allowed_params) ts
+  | TFun (ps, ret) ->
+      List.iter (check_typ_ok allowed_params) ps;
+      check_typ_ok allowed_params ret
   | TInt | TFloat | TBool | TUnit | TSelector | TPos | TVar _ -> ()
 
 let rec check_field_type (decl : string) (cname : string) (ft : typ) : unit =
@@ -447,6 +468,11 @@ let rec check_field_type (decl : string) (cname : string) (ft : typ) : unit =
       raise (Error (Printf.sprintf
         "type %s, constructor %s: ref fields would break purity — \
          rejected" decl cname))
+  | TFun _ ->
+      raise (Error (Printf.sprintf
+        "type %s, constructor %s: closures cannot be stored as an ADT \
+         field in v1 — pass as a function argument, let-bind it, or \
+         return it instead" decl cname))
 
 let register_type_decl (name : string) (params : string list)
     (ctors : constructor list) : unit =
@@ -516,6 +542,11 @@ let check_record_field_type (decl : string) (fname : string) (ft : typ)
       raise (Error (Printf.sprintf
         "type %s, field %s: ref fields would break purity — rejected"
         decl fname))
+  | TFun _ ->
+      raise (Error (Printf.sprintf
+        "type %s, field %s: closures cannot be stored as a record \
+         field in v1 — pass as a function argument, let-bind it, or \
+         return it instead" decl fname))
 
 let register_record_decl (name : string) (fields : (string * typ) list)
     : unit =
@@ -726,6 +757,10 @@ let rec check_tuple_elem (ty : typ) : unit =
   | TRef _ ->
       raise (Error "tuple element: ref fields would break purity — \
                     rejected")
+  | TFun _ ->
+      raise (Error "tuple element: closures cannot be stored in a \
+                    tuple in v1 — pass as a function argument, \
+                    let-bind it, or return it instead")
 
 let wilds n = List.init n (fun _ -> PWild)
 
@@ -1272,6 +1307,35 @@ let rec infer env e =
       unify_msg (infer env arg) (TList elem) "tail: arg must be a list";
       TList elem
 
+  (* Phase F: value application — calling a local var/param bound to a
+     TFun value (a HOF's own function-typed parameter, or a let-bound
+     lambda alias, reached through zero or more aliases per §13.12
+     decision 2). Must be checked before the ctor_info/global-function
+     cascade below: ctor names are always Capitalized (so a lowercase
+     local binder can never collide with one) and a local binding
+     shadows any same-named global by construction — alpha.ml renames
+     the App callee to the local's alpha-renamed name whenever it
+     resolves as a local binder, so this lookup only ever fires for a
+     genuine local. instantiate is pure (mints fresh tvars, no
+     destructive mutation), so calling it twice here is safe, just
+     slightly wasteful. *)
+  | App (f, args) when
+      (match List.assoc_opt f env with
+       | Some s -> (match resolve (instantiate s) with
+                    | TFun _ -> true | _ -> false)
+       | None -> false) ->
+      (match resolve (instantiate (List.assoc f env)) with
+       | TFun (param_types, ret_type) ->
+           if List.length args <> List.length param_types then
+             raise (Error (Printf.sprintf
+               "App %s: expected %d argument(s), got %d" f
+               (List.length param_types) (List.length args)));
+           List.iter2 (fun a pt ->
+             unify_msg (infer env a) pt (Printf.sprintf
+               "App %s: argument type mismatch" f)) args param_types;
+           ret_type
+       | _ -> assert false)
+
   (* Phase D: constructor application. Ctors are Capitalized and
      top-level fun names are validated lowercase (alpha.ml), so this
      guard can't shadow a real function. *)
@@ -1484,6 +1548,53 @@ let rec infer env e =
             | _ ->
                 raise (Error (Printf.sprintf
                   ".%s requires a value of record type %s" f owner))))
+
+  (* Phase F: lambda expression. A raw Lambda should never reach the
+     REAL Phase 1 typing pass — for_lift.ml fully converts every Lambda
+     into a Closure before typing ever runs (§13.12 F1 sub-decision 3)
+     — so this arm exists to serve for_lift's OWN degraded-mode oracle
+     call (Typing.infer on a Let RHS, used only to thread free-variable
+     types for an enclosing for-loop/lambda's capture list), which
+     queries the ORIGINAL pre-conversion expression. Structural and
+     sound either way: params are monomorphic var binders (never
+     generalized — §13.12 F1 sub-decision 1), so this is exactly the
+     rule a real Lambda arm would need. *)
+  | Lambda (params, body) ->
+      let env' =
+        List.fold_left (fun acc (p, t) -> (p, mono t) :: acc) env params in
+      TFun (List.map snd params, infer env' body)
+
+  (* Phase F: closure-conversion IR. for_lift.ml lifted this lambda's
+     body into the top-level helper [fname] (already registered in
+     fun_sigs by build_sigs, which runs before any def's body is
+     inferred — for_lift appends synthesized helpers to the program
+     BEFORE build_sigs runs) taking every capture as a leading param.
+     [caps] carries exactly those captured-value expressions, so the
+     split point between "captures" and "the lambda's own params" is
+     simply their count. *)
+  | Closure (fname, caps) ->
+      let (param_types, ret_type) =
+        match Hashtbl.find_opt fun_sigs fname with
+        | Some sig_ -> sig_
+        | None ->
+            raise (Error (Printf.sprintf
+              "internal: closure-lifted helper %s has no signature — \
+               this is a compiler bug" fname))
+      in
+      let n_caps = List.length caps in
+      let (cap_types, own_types) =
+        try split_at n_caps param_types
+        with Error _ ->
+          raise (Error (Printf.sprintf
+            "internal: closure-lifted helper %s has fewer params (%d) \
+             than captured values (%d) — this is a compiler bug"
+            fname (List.length param_types) n_caps))
+      in
+      List.iter2 (fun c ct ->
+        unify_msg (infer env c) ct
+          "internal: closure capture type mismatch — this is a compiler bug")
+        caps cap_types;
+      TFun (own_types, ret_type)
 
   | Nil ->
       (* E4b: 'a list — every [] mention gets a fresh element tvar,

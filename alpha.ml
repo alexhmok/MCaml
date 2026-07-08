@@ -76,7 +76,23 @@ let rec g env e =
   | BinOp(op, e1, e2) -> BinOp(op, g env e1, g env e2)
   | If(c, e1, e2) -> If(g env c, g env e1, g env e2)
   | Seq(e1, e2) -> Seq(g env e1, g env e2)
-  | App(f, args) -> App(f, List.map (g env) args)
+  (* Phase F: rename the callee too when it resolves as a local binder
+     (a HOF's own function-typed parameter, or a let-bound lambda alias)
+     so typing's value-application check (which looks the RENAMED name
+     up in its scheme env) can find it. Falls back to the untouched
+     name otherwise — exactly today's behavior — so this is a no-op for
+     every existing call to a genuine top-level function: top-level Fun
+     names are never added to [env] (only Let/For/Match/param binders
+     are), so [f] can only be found here if it shadows a local. *)
+  | App(f, args) ->
+      App((try M.find f env with Not_found -> f), List.map (g env) args)
+  | Lambda (params, body) ->
+      let (params', env') = List.fold_right (fun (p, t) (ps, acc_env) ->
+        let p' = new_name p in
+        ((p', t) :: ps, M.add p p' acc_env)
+      ) params ([], env) in
+      Lambda (params', g env' body)
+  | Closure (fname, caps) -> Closure (fname, List.map (g env) caps)
   | Array elems -> Array (List.map (g env) elems)
   | Index1 (e, i) -> Index1 (g env e, g env i)
   | Index2 (e, i, j) -> Index2 (g env e, g env i, g env j)
