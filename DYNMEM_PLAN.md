@@ -773,7 +773,29 @@ which is MineTorch's project, not MCaml's.
       command emission, zero behavior change, and without it the
       build has a non-exhaustive-match warning. Suite 66/66 green;
       all five canaries byte-identical.)
-- [ ] D2. Parser: `type t = A | B of int | C of t * t` syntax, `match e with | p -> e | ...`
+- [x] D2. Parser: `type t = A | B of int | C of t * t` syntax, `match e with | p -> e | ...`
+      (Lexer: `type`/`match`/`with`/`of` keywords + bare `|` → BAR
+      (longest-match keeps `||`, `|>`, `[|`, `|]` intact). Parser:
+      TypeDecl production with optional leading BAR; `typ` gains a
+      bare-ID arm producing `TAdt name` so ctor fields and fun params
+      can reference declared types (existence checked in D3);
+      MATCH/pattern grammar with a `BELOW_BAR` virtual precedence
+      marker (the BELOW_SEMI trick): `match_arm → pattern ARROW expr
+      %prec BELOW_BAR` sinks the arm-reduce below every operator
+      token, so arm bodies extend greedily (`p -> e * 2` keeps `* 2`;
+      trailing `| arm`s attach to the innermost match, OCaml
+      semantics). Without the %prec this surfaced as 17 shift/reduce
+      conflicts in one state; with it menhir reports ZERO conflicts
+      (only the 3 pre-existing unused-token warnings). Constructor
+      application/nullary-ctor expressions need no parser support:
+      `Circle(3)` is App, `Point` is Var — typing disambiguates via
+      the Capitalized-ctor convention (enforced in pattern position
+      by `pattern_of_id`; `_` → PWild). Note the arm-body-is-`expr`
+      consequence: `;` ends the match rather than continuing the arm
+      body — parenthesize for multi-statement arms. Probes: 3-ctor
+      decl + match parses through alpha/for_lift and reaches the D3
+      typing placeholder; decl-only program compiles clean. Suite
+      66/66; all five canaries byte-identical.)
 - [ ] D3. Typing: nominal-type environment; pattern typing; exhaustiveness + redundancy check
 - [ ] D4. Runtime: generalize `conspool` into a single `objpool` with tag-discriminated cells (see §13 decision D.a). Alternative: keep conspool for lists and add a sibling pool per ADT — decide in D4 before touching codegen
 - [ ] D5. Pattern compiler: decision-tree lowering to nested `if` / scoreboard matches in knormal

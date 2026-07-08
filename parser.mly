@@ -1,4 +1,16 @@
-%{ open Ast %}
+%{
+open Ast
+
+(* Phase D: constructors are Capitalized, variables/wildcards are not.
+   This is how a bare ID in pattern position disambiguates. *)
+let is_ctor_name s =
+  String.length s > 0 && s.[0] >= 'A' && s.[0] <= 'Z'
+
+let pattern_of_id name =
+  if name = "_" then PWild
+  else if is_ctor_name name then PCtor (name, [])
+  else PVar name
+%}
 
 /* Tokens */
 %token <int> INT
@@ -20,9 +32,14 @@
 %token LBAR RBAR LBRACK RBRACK
 %token CONS
 %token REGION ARROW
+%token TYPE MATCH WITH OF BAR
 
 /* Virtual precedence marker used to lower seq_expr reduction below operators */
 %token BELOW_SEMI
+/* Phase D: virtual marker so a nested match greedily takes trailing
+   `| arm`s (shift beats reducing the inner match_arms list) — same
+   trick as BELOW_SEMI, OCaml semantics. */
+%token BELOW_BAR
 
 /* Types */
 %token T_INT T_FLOAT T_BOOL T_UNIT T_SEL T_POS
@@ -44,10 +61,20 @@
 %type <Ast.expr list> nonempty_arg_list
 %type <Ast.expr list> expr_semi_list
 %type <Ast.expr list> nonempty_expr_semi_list
+%type <Ast.pattern> pattern
+%type <Ast.pattern list> pattern_comma_list
+%type <(Ast.pattern * Ast.expr) list> match_arms
+%type <Ast.pattern * Ast.expr> match_arm
+%type <Ast.constructor list> ctor_list
+%type <Ast.constructor> ctor
+%type <Ast.typ list> ctor_typs
+%type <unit> opt_bar
 
 /* Precedence */
 %nonassoc BELOW_SEMI
 %right SEMICOLON
+%nonassoc BELOW_BAR
+%left BAR
 %right PIPE
 %nonassoc IN ELSE
 %right COLEQ
@@ -76,6 +103,24 @@ definition:
     { Val(name, e) }
   | FUN name = ID LPAREN params = param_list RPAREN COLON ret_type = typ EQUAL body = seq_expr
     { Fun(name, params, ret_type, body) }
+  | TYPE name = ID EQUAL opt_bar ctors = ctor_list
+    { TypeDecl(name, ctors) }
+
+opt_bar:
+  | { () }
+  | BAR { () }
+
+ctor_list:
+  | c = ctor { [c] }
+  | c = ctor BAR rest = ctor_list { c :: rest }
+
+ctor:
+  | name = ID { (name, []) }
+  | name = ID OF ts = ctor_typs { (name, ts) }
+
+ctor_typs:
+  | t = typ { [t] }
+  | t = typ TIMES rest = ctor_typs { t :: rest }
 
 param_list:
   | { [] }
@@ -101,6 +146,7 @@ typ:
   | T_MAT LBRACK T_FLOAT COMMA m = INT COMMA n = INT RBRACK { TMat(TFloat, m, n) }
   | T_LIST { TList TInt }
   | T_DARR { TArrDyn TInt }
+  | name = ID { TAdt name }   /* Phase D: nominal reference to a declared ADT; existence checked in typing */
   | REF T_INT { TRef TInt }
   | REF T_BOOL { TRef TBool }
 
@@ -152,6 +198,35 @@ expr:
   | e = expr LBRACK i = expr COMMA j = expr RBRACK { Index2(e, i, j) }
 
   | REGION LPAREN FUN LPAREN RPAREN ARROW body = seq_expr RPAREN { Region (ref TUnit, body) }
+
+  | MATCH e = seq_expr WITH opt_bar arms = match_arms { Match(e, arms) }
+
+match_arms:
+  | a = match_arm %prec BELOW_BAR { [a] }
+  | a = match_arm BAR rest = match_arms { a :: rest }
+
+match_arm:
+  /* %prec BELOW_BAR sinks this rule below every operator token, so an
+     arm body extends greedily: `p -> e * 2` keeps `* 2` in the body
+     (shift) instead of reducing the arm and making the whole match the
+     left operand. Same resolution gives trailing `| arm`s to the
+     innermost match. */
+  | p = pattern ARROW body = expr %prec BELOW_BAR { (p, body) }
+
+pattern:
+  | i = INT { PInt i }
+  | name = ID { pattern_of_id name }
+  | name = ID LPAREN ps = pattern_comma_list RPAREN
+      { if not (is_ctor_name name) then
+          failwith (Printf.sprintf
+            "pattern %s(...): only constructors (Capitalized) can take \
+             arguments in a pattern" name);
+        PCtor(name, ps) }
+  | LPAREN p = pattern RPAREN { p }
+
+pattern_comma_list:
+  | p = pattern { [p] }
+  | p = pattern COMMA rest = pattern_comma_list { p :: rest }
 
 expr_semi_list:
   | { [] }

@@ -49,6 +49,10 @@ rule read = parse
   | "list"   { T_LIST }
   | "darr"   { T_DARR }
   | "region" { REGION }
+  | "type"   { TYPE }
+  | "match"  { MATCH }
+  | "with"   { WITH }
+  | "of"     { OF }
   | "->"     { ARROW }
   | selector { SELECTOR (Lexing.lexeme lexbuf) }
   | "~"      { TILDE }
@@ -77,6 +81,7 @@ rule read = parse
   | "!="     { NEQ }
   | "&&"     { AND }
   | "||"     { OR }
+  | "|"      { BAR }
   | ":="     { COLEQ }
   | "!"      { BANG }
   | id       { ID (Lexing.lexeme lexbuf) }

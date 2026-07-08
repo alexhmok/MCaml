@@ -2,6 +2,7 @@
 (* The type of tokens. *)
 
 type token = 
+  | WITH
   | VAL
   | T_UNIT
   | T_SEL
@@ -13,6 +14,7 @@ type token =
   | T_DARR
   | T_BOOL
   | T_ARR
+  | TYPE
   | TRUE
   | TO
   | TIMES
@@ -31,8 +33,10 @@ type token =
   | PIPE
   | PERCENT
   | OR
+  | OF
   | NEQ
   | MINUS
+  | MATCH
   | LT
   | LPAREN
   | LET
@@ -63,6 +67,8 @@ type token =
   | CMD
   | CARET
   | BELOW_SEMI
+  | BELOW_BAR
+  | BAR
   | BANG
   | ARROW
   | AND
