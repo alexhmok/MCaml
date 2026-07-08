@@ -2901,6 +2901,190 @@ Monomorphize; specialization folded into Monomorphize's existing clone
 key, per §13.12 decision 3).
 ```
 
+### 8.16 Phase F session 3 kickoff (F3 + F4 — escape analysis + specialization)
+
+Re-pasteable across sessions: check §2 for which F tasks are open.
+
+```
+Read /Users/alexmok/MCaml/DYNMEM_PLAN.md — §2 for current status
+(Phases A–E, M/N/Math, G4, and Phase F session 2 (F1+F2) are all
+closed; F1+F2 landed in commit `f492835` — implementation — and
+`03d63e6` — plan doc/sub-decisions). Read §13.12 in full (all five
+headline decisions plus the F1/F2 session-2 notes now folded into §2's
+Phase F checklist) before writing any code. Also read §13.6
+(specialize-aggressively/fall-back-gracefully), §13.5 (closure cell
+layout), §13.10/§13.11 (tvar single-int amendment; TAdt/TParam
+widening precedent for "widen an existing constructor, don't add a
+parallel table"), and §13 (bottom) for escalation triggers. Read
+CLAUDE.md for the pipeline and the manual rebuild command. Verify
+`git status` is clean before starting.
+
+**Read this before anything else — a load-bearing gap in the current
+baseline, discovered while drafting this kickoff, not assumed away:**
+F1+F2 chose the "stub at knormal" branch explicitly left open by the
+prior session's own guardrails (§8.15's text: "If F2 lands a real
+closure-conversion IR form, knormal's stub moves to wherever closure
+conversion doesn't yet handle escape classification"). Concretely
+today: `knormal.ml` raises `failwith` the instant it sees a `Closure`
+construction OR a call through a `closure_env`-tracked local — meaning
+**zero functions that use a lambda in any way currently survive past
+knormal**, so **`fn_table` (post-inline) never contains a single
+lambda-shaped CFG to classify.** F3 (escape analysis over `fn_table`)
+therefore has NOTHING to analyze until closure construction and
+closure application are lowered into SOME real CFG-level
+representation. This session's actual first task — call it F2's
+completion, not optional — is closing that gap: decide the concrete
+`kexpr`/CFG IR shape(s) for "materialize a closure value" and "call a
+closure value" (decision 5 already named the call-side op — `IApply of
+vreg option * vreg * vreg list` in `cfg.ml`, dispatch macro deferred to
+F5 — but nothing today MINTS one), get it flowing knormal → cfg_build →
+`fn_table`, and ONLY THEN can F3 classify anything. `codegen_cfg.ml`
+inherits the loud stub at THIS point (exactly as §8.15 anticipated):
+"IApply lowering lands in F5" — a much narrower, more defensible stub
+boundary than knormal's current blanket rejection, and the one
+`cfg_build.ml`/`codegen_cfg.ml` changes this session should aim to land
+on.
+
+Before designing that lowering, investigate whether Known-classified
+closures need real cell allocation AT ALL. Decision 3 frames F4 as
+"whole-program defunctionalization" (MLton-style) — the classic result
+is that a `Known` closure's captures thread through as ORDINARY EXTRA
+ARGUMENTS to a cloned callee, with NO runtime closure cell ever
+materialized; only `Escaping` closures (ref-stored, returned, re-passed
+past a HOF's budget) need the real `{tag:-2, code, env_0, ...}` cell
+and `IApply` dispatch. If that holds, the CFG-level "uniform form" F2
+guardrails asked for may only need to be as rich as a monomorphize-
+style PSEUDO-ARG token on a call argument that is a known-literal-or-
+alias `Closure` — mirroring the EXISTING `"#arr:<aid>"` pseudo-arg
+knormal already emits for array-bound names (`knormal.ml:823-828`,
+consumed by `monomorphize.ml`'s `extract_maps`/`ensure_clone`/
+`rewrite_caller`, `monomorphize.ml:187-261`) — with a real `IApply`-
+producing lowering reserved for the genuinely-escaping cases only. This
+is NOT decided — investigate and settle it as this session's first
+sub-decision, following the exact D5/D6/G4/F1 protocol (research, state
+the options, pick one, document why, THEN implement). If you instead
+decide every Closure needs a real cell regardless of classification,
+that's a legitimate answer too — but state why the MLton-style
+zero-allocation path for Known closures doesn't work here before
+picking the more expensive uniform path.
+
+F3 scope (per §2's task line): a new standalone pass over the whole
+`fn_table`, sitting between `Inline.run` and `Monomorphize.run`
+(`main.ml:214` / `main.ml:219`, confirmed strictly sequential over the
+same `fn_table : (string, Cfg.cfg_func) Hashtbl.t`) — needs the same
+post-inline whole-program visibility the inliner itself needs, per
+decision 3. Produces a per-lambda `{Known | Escaping of reason}`
+classification using the boundary decision 2 already settled
+precisely (quoted in §13.12: called immediately through zero or more
+let/param aliases, or passed to a HOF parameter that is itself only
+ever called within that HOF, stays `Known`; a `ref`-store, a
+function-return, a non-calling parameter, or re-passing past another
+HOF's exhausted `MCAML_SPECIALIZE_LIMIT` makes it `Escaping via
+<reason>` instead). Do not relitigate this boundary — implement it.
+
+F4 scope: NOT a new re-entrant phase — an EXTENSION of
+`monomorphize.ml`'s existing per-argument-shape clone key
+(`extract_maps`/`ensure_clone`/`rewrite_caller`, cited above), adding
+"closure identity of a Known-classified TFun argument" as a second
+specialization axis alongside the existing array-shape axis. Clones
+re-enter `fn_table`/`fn_order` through the exact mechanism
+`Monomorphize.run` already uses for array clones (`main.ml:222-226`) —
+zero new plumbing in `main.ml` if F4 is a real extension rather than a
+parallel pass. `MCAML_SPECIALIZE_LIMIT=K` (default 8) reuses
+Monomorphize's existing per-source-function clone-count bookkeeping as
+the SAME counter Known-lambda clones increment; beyond K, "give up
+cloning and route through apply-dispatch instead" is new logic — and
+since real apply-dispatch CODEGEN is F5's job, the fallback path this
+session lands on should itself be a clearly-labeled, loud, narrow stub
+(NOT a silent wrong compile), consistent with the "codegen_cfg.ml:
+IApply lowering lands in F5" boundary above.
+
+Facts already gathered — cite directly, do not re-derive: `main.ml`'s
+full phase order and the exact `Inline.run`/`Monomorphize.run` call
+sites (`main.ml:214`, `:219`, `:222-226`); `cost.ml`'s `ICall` pricing
+(`cost.ml:36`, `:45-47`) and the `IApply` pricing decision 5 already
+settled (`4 + 2 * K_max_captured`, a single whole-program constant
+computed once escape analysis has enumerated every Escaping closure
+shape — NOT per-call-site); `monomorphize.ml`'s full clone-key
+mechanism (`is_pseudo_arr`/`aid_of_pseudo` at `:21-25`, `extract_maps`
+at `:187-205`, `ensure_clone` at `:207-239`, `rewrite_caller` at
+`:241-261`, `run` at `:263`); the closure cell layout and tag `-2`
+(§13.12 decision 4); `MCAML_STRICT_HOT`'s home in `optimize.ml`'s Phase
+3, not typing (§13.12 decision 5, unchanged — this session should NOT
+need to implement the strict-hot check itself unless F3's
+classification makes it trivial, but do not let it scope-creep in if
+it's not trivial; F6 is a separate later task).
+
+Behaviors that MUST survive (restated, now including F1+F2's own
+list): every §13.10/§13.11/§13.12 decision including the tvar
+single-int amendment; zero clones for value-polymorphic non-lambda
+functions AND zero clones for lambda-free HOF-shaped functions that
+happen to take a `TFun` param but are never called with a literal/
+known closure (only ACTUAL Known-closure call sites should clone); the
+§4.4 public-entry contract and every §4.1 reserved slot; ICons/IHead/
+ITail budgets; the D5 decision-tree shapes; the region-walker domain
+staying `TList TInt` only; `for_lift`'s oracle degraded mode and the
+two-pass `main.ml` driver; every one of F1+F2's own smoke-test
+behaviors (a HOF passing/calling a lambda literal types successfully;
+a lambda stored in a tuple/record/ADT field is rejected at typing; a
+closure handle merely passed through without being called or
+constructed compiles and runs as inert scalar plumbing) — re-run these
+as a sanity check before assuming F3/F4 changed nothing structurally
+about the F1/F2 typing layer (they shouldn't; F3/F4 sit below typing).
+
+Guardrails (the full battery, now including F1/F2's baseline):
+- Baseline BEFORE the first edit — rebuild per CLAUDE.md; `cat
+  lib/math.mcaml scripts/mc_test_suite.mcaml | ./mcaml -o build_suite
+  && python3 tools/sim_check_suite.py build_suite` (66/66 + async);
+  `python3 tools/sim_check_phase_d.py` (40/40); `python3
+  tools/sim_check_phase_e.py` (42/42 + 12 probes); hash the five
+  canaries against `/tmp/mcaml_out/canary_hashes_f_baseline.txt`
+  (regenerate the compare set with a fresh `./mcaml` compile of each of
+  test_all/primitives_v1/demo_classifier/stress_nested_if/
+  test_arr_set — must still match byte-for-byte, lambdas are purely
+  additive); all nine `/tmp` harnesses (test_dyn_array, test_cons,
+  test_regions, test_fixed_point, test_adts, test_list_match,
+  test_tuples_records, test_polymorphism, test_param_types).
+- Five canaries stay byte-identical THROUGH F3/F4 too — escape
+  analysis and specialization are new machinery that only fires when a
+  `TFun`-shaped value is actually in play; a lambda-free program must
+  not change AT ALL.
+- If F3/F4 needs a NEW reserved scoreboard slot beyond §4.1, or a new
+  IR op beyond the `IApply` decision 5 already named, that's fine and
+  expected (decision 5 anticipated exactly this) — but document it in
+  §4.1/CLAUDE.md's module layout as you go, per §3.6's "new IR ops are
+  opaque to all existing passes" discipline (DCE/CSE/copy_prop/
+  liveness/regalloc must all either handle the new op correctly or
+  visibly skip it, the same way they already skip `$ref_*`-prefixed
+  SR carriers and macro-getter hidden writes).
+- Zero new menhir conflicts is N/A this session (no grammar changes
+  expected) — but if F3/F4's design ends up needing one, run menhir and
+  confirm, don't assume.
+
+If the MLton-style zero-allocation investigation above, or the
+IApply/pseudo-arg design question, forces a §3 decision to bend (most
+likely candidate: §3.6 "new IR ops are opaque to all existing passes,"
+if a pseudo-arg-style token turns out to need bespoke handling in
+DCE/CSE/liveness the way array pseudo-args already do), STOP and flag
+per §13 — do not special-case through it silently.
+
+After the session: update §2 with commit hashes (decision-record commit
+separate from implementation commits, same discipline as every prior
+phase — including the NEW closure-lowering-boundary decision this
+kickoff surfaced, which is not one of §13.12's original five and needs
+its own citation trail same as F1's three sub-decisions did), leave the
+tree green, and note in §2 exactly which lambda usages now fully
+compile end-to-end (Known, fully specialized, zero apply-dispatch) vs.
+which still hit the narrower F5-deferred stub (Escaping). Session 4 is
+then F5 (apply-dispatch runtime: the closure objpool cell, the
+`mcaml:apply` macro-dispatch function, env-unpack prelude) plus
+whatever of F6 (diagnostics, `MCAML_STRICT_HOT`) falls out naturally —
+do not start F5's actual runtime codegen this session unless F3+F4
+leaves genuinely no Escaping closures anywhere in the test battery (in
+which case say so explicitly rather than silently skipping F5's own
+kickoff).
+```
+
 ## 9. Rollback and A/B flags
 
 Add these environment flags in the same style as the existing
