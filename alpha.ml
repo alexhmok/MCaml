@@ -96,6 +96,9 @@ let rec g env e =
   | Nil -> Nil
   | Cons (h, t) -> Cons (g env h, g env t)
   | Tuple es -> Tuple (List.map (g env) es)
+  | Record fields ->
+      Record (List.map (fun (f, e) -> (f, g env e)) fields)
+  | Field (e, f) -> Field (g env e, f)
   | Region (tr, e) -> Region (tr, g env e)   (* share tr so typing's write is visible downstream *)
   (* Phase D: pattern variables are binders — rename them like Let/For
      binders so `let r = 5 in match e with Circle(r) -> r` resolves the
@@ -122,6 +125,8 @@ and check_dup_binders p =
     | PVar x -> x :: acc
     | PCtor (_, ps) | PTuple ps ->
         List.fold_left (fun a q -> binders q a) acc ps
+    | PRecord fields ->
+        List.fold_left (fun a (_, q) -> binders q a) acc fields
     | PCons (ph, pt) -> binders pt (binders ph acc)
   in
   let names = List.sort compare (binders p []) in
@@ -157,6 +162,13 @@ and rename_pattern env p =
           (p' :: acc, e')) ([], env) ps
       in
       (PTuple (List.rev ps_rev), env')
+  | PRecord fields ->
+      let (fs_rev, env') =
+        List.fold_left (fun (acc, e) (f, p) ->
+          let (p', e') = rename_pattern e p in
+          ((f, p') :: acc, e')) ([], env) fields
+      in
+      (PRecord (List.rev fs_rev), env')
   | PNil -> (PNil, env)
   | PCons (ph, pt) ->
       let (ph', env') = rename_pattern env ph in
@@ -166,7 +178,7 @@ and rename_pattern env p =
 (* Rename Definitions (Top Level) *)
 let h env d =
   match d with
-  | TypeDecl _ -> d
+  | TypeDecl _ | RecordDecl _ -> d
       (* Phase D: type declarations bind no runtime names; ctor-name
          validation (Capitalized, unique) happens at registration in
          typing.ml where the error messages have full context. *)

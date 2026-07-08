@@ -35,6 +35,25 @@ let ctor_info : (string, string * typ list * int) Hashtbl.t = Hashtbl.create 16
 
 let is_constructor (name : string) : bool = Hashtbl.mem ctor_info name
 
+(* ---- D8: nominal record environment --------------------------------- *)
+
+(* record type name -> fields in declaration order. Disjoint from
+   adt_decls by construction (registration rejects collisions), but a
+   record VALUE still types as TAdt name — no new typ constructor —
+   so param passing, field representability, and the D5 region-return
+   rejection reuse the TAdt arms. *)
+let record_decls : (string, (string * typ) list) Hashtbl.t =
+  Hashtbl.create 8
+
+(* field name -> (owner record type, decl-order index, field type).
+   ONE GLOBAL FIELD NAMESPACE (mirrors D3's global ctor namespace):
+   a field name belongs to at most one record type, which is what lets
+   `{ x = 1; y = 2 }` and `r.x` resolve without type annotations. *)
+let record_fields : (string, string * int * typ) Hashtbl.t =
+  Hashtbl.create 16
+
+let is_record_type (name : string) : bool = Hashtbl.mem record_decls name
+
 (* ADT ctor fields must be single-scoreboard-int values (§12.1 uniform
    representation): scalars and handles. TArrDyn is a (base, len) vreg
    PAIR per §3.4 so it doesn't fit one cell field — rejected in v1. *)
@@ -47,7 +66,10 @@ let rec check_field_type (decl : string) (cname : string) (ft : typ) : unit =
          Its own elements must obey the same rules. *)
       List.iter (check_field_type decl cname) ts
   | TAdt n ->
-      if not (Hashtbl.mem adt_decls n) then
+      (* D8: record types are TAdt at the type level, so a ctor field
+         may reference a declared record too. *)
+      if not (Hashtbl.mem adt_decls n) && not (Hashtbl.mem record_decls n)
+      then
         raise (Error (Printf.sprintf
           "type %s, constructor %s: unknown type '%s' in field — declare \
            it before this type (v1 has no forward references between \
@@ -72,7 +94,7 @@ let rec check_field_type (decl : string) (cname : string) (ft : typ) : unit =
          rejected" decl cname))
 
 let register_type_decl (name : string) (ctors : constructor list) : unit =
-  if Hashtbl.mem adt_decls name then
+  if Hashtbl.mem adt_decls name || Hashtbl.mem record_decls name then
     raise (Error ("duplicate type declaration: " ^ name));
   if String.length name = 0
      || not ((name.[0] >= 'a' && name.[0] <= 'z') || name.[0] = '_') then
@@ -97,6 +119,67 @@ let register_type_decl (name : string) (ctors : constructor list) : unit =
     Hashtbl.replace ctor_info cname (name, fields, tag)
   ) ctors
 
+(* D8: record registration. Same validation posture as
+   register_type_decl, plus the global-field-namespace check. *)
+let check_record_field_type (decl : string) (fname : string) (ft : typ)
+    : unit =
+  match ft with
+  | TInt | TFloat | TBool | TList _ -> ()
+  | TTuple ts -> List.iter (check_field_type decl fname) ts
+  | TAdt n ->
+      if not (Hashtbl.mem adt_decls n) && not (Hashtbl.mem record_decls n)
+      then
+        raise (Error (Printf.sprintf
+          "type %s, field %s: unknown type '%s' — declare it before \
+           this type (v1 has no forward references between type \
+           declarations)" decl fname n))
+  | TArrDyn _ ->
+      raise (Error (Printf.sprintf
+        "type %s, field %s: darr fields are not supported in v1 \
+         (a dynamic array is a base+len pair, not a single handle)"
+        decl fname))
+  | TUnit | TSelector | TPos ->
+      raise (Error (Printf.sprintf
+        "type %s, field %s: field type is not representable as a \
+         record field" decl fname))
+  | TArrStatic _ | TMat _ ->
+      raise (Error (Printf.sprintf
+        "type %s, field %s: static arrays/matrices are compile-time \
+         storage, not first-class values" decl fname))
+  | TRef _ ->
+      raise (Error (Printf.sprintf
+        "type %s, field %s: ref fields would break purity — rejected"
+        decl fname))
+
+let register_record_decl (name : string) (fields : (string * typ) list)
+    : unit =
+  if Hashtbl.mem adt_decls name || Hashtbl.mem record_decls name then
+    raise (Error ("duplicate type declaration: " ^ name));
+  if String.length name = 0
+     || not ((name.[0] >= 'a' && name.[0] <= 'z') || name.[0] = '_') then
+    raise (Error (Printf.sprintf
+      "type name '%s' must start with a lowercase letter" name));
+  if fields = [] then
+    raise (Error (Printf.sprintf
+      "record type %s must declare at least one field" name));
+  (* Register the name first so self-recursive fields resolve
+     (`type node = { v : int; next : node }` — the -1-free story for
+     such a type is the user's problem, but the reference is legal). *)
+  Hashtbl.replace record_decls name fields;
+  List.iteri (fun idx (fname, ft) ->
+    (match Hashtbl.find_opt record_fields fname with
+     | Some (owner, _, _) ->
+         raise (Error (Printf.sprintf
+           "field %s is already declared by record type %s — field \
+            names share one global namespace (like constructors)"
+           fname owner))
+     | None -> ());
+    (* a duplicate inside THIS decl is caught the same way because we
+       insert as we go *)
+    check_record_field_type name fname ft;
+    Hashtbl.replace record_fields fname (name, idx, ft)
+  ) fields
+
 (* ---- Phase D: pattern typing + Maranget usefulness ------------------ *)
 
 let rec string_of_pattern (p : pattern) : string =
@@ -113,6 +196,11 @@ let rec string_of_pattern (p : pattern) : string =
       "(" ^ string_of_pattern ph ^ " :: " ^ string_of_pattern pt ^ ")"
   | PTuple ps ->
       "(" ^ String.concat ", " (List.map string_of_pattern ps) ^ ")"
+  | PRecord fields ->
+      "{" ^ String.concat "; "
+              (List.map (fun (f, p) -> f ^ " = " ^ string_of_pattern p)
+                 fields)
+      ^ "}"
 
 (* Validate a pattern against the scrutinee type; return its binders.
    Duplicate binders inside one pattern are caught in alpha.ml
@@ -140,6 +228,31 @@ let rec check_pattern (t : typ) (p : pattern) : (string * typ) list =
        | TList TInt ->
            check_pattern TInt ph @ check_pattern (TList TInt) pt
        | _ -> raise (Error "pattern _ :: _ requires a list scrutinee"))
+  | PRecord fields ->
+      (match t with
+       | TAdt name when Hashtbl.mem record_decls name ->
+           let decl = Hashtbl.find record_decls name in
+           (* dup fields within the pattern *)
+           let rec dup = function
+             | (a, _) :: rest ->
+                 if List.mem_assoc a rest then Some a else dup rest
+             | [] -> None
+           in
+           (match dup fields with
+            | Some f ->
+                raise (Error (Printf.sprintf
+                  "record pattern mentions field %s twice" f))
+            | None -> ());
+           List.concat
+             (List.map (fun (f, p) ->
+                match List.assoc_opt f decl with
+                | Some ft -> check_pattern ft p
+                | None ->
+                    raise (Error (Printf.sprintf
+                      "record type %s has no field %s" name f)))
+               fields)
+       | _ ->
+           raise (Error "record pattern requires a record scrutinee"))
   | PTuple ps ->
       (match t with
        | TTuple ts ->
@@ -181,7 +294,8 @@ let rec check_tuple_elem (ty : typ) : unit =
   | TList _ -> ()
   | TTuple ts -> List.iter check_tuple_elem ts
   | TAdt n ->
-      if not (Hashtbl.mem adt_decls n) then
+      if not (Hashtbl.mem adt_decls n) && not (Hashtbl.mem record_decls n)
+      then
         raise (Error (Printf.sprintf
           "tuple element of unknown type '%s'" n))
   | TArrDyn _ ->
@@ -217,7 +331,7 @@ let specialize_ctor (c : string) (ar : int) (matrix : pattern list list) =
     match row with
     | PCtor (c', ps) :: rest -> if c' = c then Some (ps @ rest) else None
     | (PWild | PVar _) :: rest -> Some (wilds ar @ rest)
-    | (PInt _ | PNil | PCons _ | PTuple _) :: _ -> None
+    | (PInt _ | PNil | PCons _ | PTuple _ | PRecord _) :: _ -> None
     | [] -> None) matrix
 
 let specialize_int (i : int) (matrix : pattern list list) =
@@ -225,7 +339,7 @@ let specialize_int (i : int) (matrix : pattern list list) =
     match row with
     | PInt j :: rest -> if i = j then Some rest else None
     | (PWild | PVar _) :: rest -> Some rest
-    | (PCtor _ | PNil | PCons _ | PTuple _) :: _ -> None
+    | (PCtor _ | PNil | PCons _ | PTuple _ | PRecord _) :: _ -> None
     | [] -> None) matrix
 
 (* D7: tuple column. Tuples are a single always-present "ctor" of
@@ -235,7 +349,27 @@ let specialize_tuple (ar : int) (matrix : pattern list list) =
     match row with
     | PTuple ps :: rest -> Some (ps @ rest)
     | (PWild | PVar _) :: rest -> Some (wilds ar @ rest)
-    | (PInt _ | PCtor _ | PNil | PCons _) :: _ -> None
+    | (PInt _ | PCtor _ | PNil | PCons _ | PRecord _) :: _ -> None
+    | [] -> None) matrix
+
+(* D8: expand a record pattern's field list to a full decl-order
+   sub-pattern vector (missing fields = PWild). After this a record
+   column is exactly a tuple column. *)
+let record_row (decl : (string * typ) list)
+    (fields : (string * pattern) list) : pattern list =
+  List.map (fun (f, _) ->
+    match List.assoc_opt f fields with
+    | Some p -> p
+    | None -> PWild) decl
+
+let specialize_record (decl : (string * typ) list)
+    (matrix : pattern list list) =
+  let ar = List.length decl in
+  List.filter_map (fun row ->
+    match row with
+    | PRecord fields :: rest -> Some (record_row decl fields @ rest)
+    | (PWild | PVar _) :: rest -> Some (wilds ar @ rest)
+    | (PInt _ | PCtor _ | PNil | PCons _ | PTuple _) :: _ -> None
     | [] -> None) matrix
 
 (* D6: TList column specializations. The list signature is the fixed
@@ -246,7 +380,7 @@ let specialize_nil (matrix : pattern list list) =
     match row with
     | PNil :: rest -> Some rest
     | (PWild | PVar _) :: rest -> Some rest
-    | (PInt _ | PCtor _ | PCons _ | PTuple _) :: _ -> None
+    | (PInt _ | PCtor _ | PCons _ | PTuple _ | PRecord _) :: _ -> None
     | [] -> None) matrix
 
 let specialize_cons (matrix : pattern list list) =
@@ -254,7 +388,7 @@ let specialize_cons (matrix : pattern list list) =
     match row with
     | PCons (ph, pt) :: rest -> Some (ph :: pt :: rest)
     | (PWild | PVar _) :: rest -> Some (PWild :: PWild :: rest)
-    | (PInt _ | PCtor _ | PNil | PTuple _) :: _ -> None
+    | (PInt _ | PCtor _ | PNil | PTuple _ | PRecord _) :: _ -> None
     | [] -> None) matrix
 
 let default_matrix (matrix : pattern list list) =
@@ -305,6 +439,26 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                 let (wf, wr) = split_at ar w in
                 Some (PTuple wf :: wr)
             | None -> None)
+       | PRecord qfields ->
+           let decl =
+             match ty with
+             | TAdt n when Hashtbl.mem record_decls n ->
+                 Hashtbl.find record_decls n
+             | _ ->
+                 raise (Error
+                   "internal: record pattern on a non-record column in \
+                    match analysis")
+           in
+           let ar = List.length decl in
+           (match useful (List.map snd decl @ trest)
+                    (specialize_record decl matrix)
+                    (record_row decl qfields @ qrest) with
+            | Some w ->
+                let (wf, wr) = split_at ar w in
+                Some (PRecord
+                        (List.map2 (fun (f, _) p -> (f, p)) decl wf)
+                      :: wr)
+            | None -> None)
        | PNil ->
            (match useful trest (specialize_nil matrix) qrest with
             | Some w -> Some (PNil :: w)
@@ -336,6 +490,31 @@ let rec useful (tys : typ list) (matrix : pattern list list)
              | None -> None
            in
            (match ty with
+            | TAdt name when Hashtbl.mem record_decls name ->
+                (* D8: record column — a single always-present "ctor",
+                   same shape as the TTuple arm below. *)
+                let decl = Hashtbl.find record_decls name in
+                let ar = List.length decl in
+                let has_rec =
+                  List.exists (fun row ->
+                    match row with PRecord _ :: _ -> true | _ -> false)
+                    matrix
+                in
+                if has_rec then
+                  (match useful (List.map snd decl @ trest)
+                           (specialize_record decl matrix)
+                           (wilds ar @ qrest) with
+                   | Some w ->
+                       let (wf, wr) = split_at ar w in
+                       Some (PRecord
+                               (List.map2 (fun (f, _) p -> (f, p))
+                                  decl wf)
+                             :: wr)
+                   | None -> None)
+                else
+                  (match useful trest (default_matrix matrix) qrest with
+                   | Some w -> Some (PWild :: w)
+                   | None -> None)
             | TAdt name when Hashtbl.mem adt_decls name ->
                 let ctors = Hashtbl.find adt_decls name in
                 let complete =
@@ -446,7 +625,7 @@ let build_sigs (prog : program) : unit =
     match d with
     | Fun (name, params, ret, _) ->
         Hashtbl.replace fun_sigs name (List.map snd params, ret)
-    | Val _ | TypeDecl _ -> ()
+    | Val _ | TypeDecl _ | RecordDecl _ -> ()
   ) prog
 
 let rec infer env e =
@@ -739,6 +918,59 @@ let rec infer env e =
       List.iter check_tuple_elem ts;
       TTuple ts
 
+  | Record fields ->
+      (* D8: the owner type resolves from the first field name (one
+         global field namespace). The literal must provide the EXACT
+         field set — no unknowns, no duplicates, no omissions — in any
+         order. *)
+      (match fields with
+       | [] -> raise (Error "empty record literal")
+       | (f0, _) :: _ ->
+           let owner =
+             match Hashtbl.find_opt record_fields f0 with
+             | Some (owner, _, _) -> owner
+             | None ->
+                 raise (Error (Printf.sprintf
+                   "unknown record field %s" f0))
+           in
+           let decl = Hashtbl.find record_decls owner in
+           List.iter (fun (f, e) ->
+             (match List.assoc_opt f decl with
+              | None ->
+                  raise (Error (Printf.sprintf
+                    "record type %s has no field %s" owner f))
+              | Some ft ->
+                  let te = infer env e in
+                  if te <> ft then
+                    raise (Error (Printf.sprintf
+                      "record type %s: field %s type mismatch" owner f)));
+             if List.length (List.filter (fun (f', _) -> f' = f) fields)
+                > 1 then
+               raise (Error (Printf.sprintf
+                 "record literal mentions field %s twice" f))) fields;
+           List.iter (fun (f, _) ->
+             if not (List.mem_assoc f fields) then
+               raise (Error (Printf.sprintf
+                 "record literal of type %s is missing field %s"
+                 owner f))) decl;
+           TAdt owner)
+
+  | Field (e, f) ->
+      (* D8: r.x — the 3-cmd single-field read. *)
+      (match Hashtbl.find_opt record_fields f with
+       | None ->
+           raise (Error (Printf.sprintf "unknown record field %s" f))
+       | Some (owner, _, ft) ->
+           (match infer env e with
+            | TAdt n when n = owner -> ft
+            | TAdt n when Hashtbl.mem record_decls n ->
+                raise (Error (Printf.sprintf
+                  "field %s belongs to record type %s but the value \
+                   has type %s" f owner n))
+            | _ ->
+                raise (Error (Printf.sprintf
+                  ".%s requires a value of record type %s" f owner))))
+
   | Nil ->
       (* v1: monomorphic int lists. Nil defaults to TList TInt; the Cons
          rule below rejects anything else. *)
@@ -765,7 +997,9 @@ let rec infer env e =
   | Match (scrut, arms) ->
       let tscrut = infer env scrut in
       (match tscrut with
-       | TAdt name when not (Hashtbl.mem adt_decls name) ->
+       | TAdt name
+         when not (Hashtbl.mem adt_decls name)
+              && not (Hashtbl.mem record_decls name) ->
            raise (Error (Printf.sprintf
              "match on a value of undeclared type %s" name))
        | _ -> ());

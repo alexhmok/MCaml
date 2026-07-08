@@ -64,6 +64,13 @@ rule read = parse
   | "]"      { RBRACK }
   | "("      { LPAREN }
   | ")"      { RPAREN }
+  (* D8: record braces + field-access dot. Safe w.r.t. floats: ocamllex
+     longest-match keeps `0.5` a FLOAT token (digits '.' digits* beats
+     INT then DOT); selector dots only occur inside the bracketed part
+     of the selector token. *)
+  | "{"      { LBRACE }
+  | "}"      { RBRACE }
+  | "."      { DOT }
   | ","      { COMMA }
   | "::"     { CONS }
   | ":"      { COLON }

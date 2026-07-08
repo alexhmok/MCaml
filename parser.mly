@@ -27,6 +27,7 @@ let pattern_of_id name =
 
 /* Symbols */
 %token LPAREN RPAREN LBRACE RBRACE COMMA COLON SEMICOLON
+%token DOT
 %token EQUAL PLUS MINUS TIMES DIV PERCENT LT GT LEQ GEQ NEQ AND OR
 %token TILDE CARET EOF
 %token LBAR RBAR LBRACK RBRACK
@@ -71,6 +72,9 @@ let pattern_of_id name =
 %type <Ast.constructor list> ctor_list
 %type <Ast.constructor> ctor
 %type <Ast.typ list> ctor_typs
+%type <(string * Ast.typ) list> record_field_decls
+%type <(string * Ast.expr) list> record_field_exprs
+%type <(string * Ast.pattern) list> record_field_pats
 %type <unit> opt_bar
 
 /* Precedence */
@@ -88,7 +92,7 @@ let pattern_of_id name =
 %left PLUS MINUS
 %left TIMES DIV PERCENT
 %nonassoc BANG REF
-%left LBRACK
+%left LBRACK DOT
 
 %start prog
 
@@ -108,6 +112,14 @@ definition:
     { Fun(name, params, ret_type, body) }
   | TYPE name = ID EQUAL opt_bar ctors = ctor_list
     { TypeDecl(name, ctors) }
+  /* D8: record declaration. Fields in decl order; registration and
+     the global-field-namespace check live in typing.ml. */
+  | TYPE name = ID EQUAL LBRACE fields = record_field_decls RBRACE
+    { RecordDecl(name, fields) }
+
+record_field_decls:
+  | f = ID COLON t = typ { [(f, t)] }
+  | f = ID COLON t = typ SEMICOLON rest = record_field_decls { (f, t) :: rest }
 
 opt_bar:
   | { () }
@@ -212,6 +224,10 @@ expr:
      App (the App production consumes its own LPAREN). */
   | LPAREN e = expr COMMA rest = nonempty_arg_list RPAREN { Tuple (e :: rest) }
 
+  /* D8: record literal and field access. */
+  | LBRACE fields = record_field_exprs RBRACE { Record fields }
+  | e = expr DOT field = ID { Field(e, field) }
+
   | REF e = expr { Ref e }
   | BANG e = expr { Deref e }
   | e1 = expr COLEQ e2 = expr { RefSet(e1, e2) }
@@ -264,10 +280,21 @@ atom_pattern:
   /* D7: tuple pattern — (p1, p2, ...). One-element parens stay
      grouping (the arm above). */
   | LPAREN p = pattern COMMA ps = pattern_comma_list RPAREN { PTuple (p :: ps) }
+  /* D8: record pattern — fields permutable and omittable (missing =
+     PWild; resolution against the decl is typing's job). */
+  | LBRACE fields = record_field_pats RBRACE { PRecord fields }
 
 pattern_comma_list:
   | p = pattern { [p] }
   | p = pattern COMMA rest = pattern_comma_list { p :: rest }
+
+record_field_exprs:
+  | f = ID EQUAL e = expr { [(f, e)] }
+  | f = ID EQUAL e = expr SEMICOLON rest = record_field_exprs { (f, e) :: rest }
+
+record_field_pats:
+  | f = ID EQUAL p = pattern { [(f, p)] }
+  | f = ID EQUAL p = pattern SEMICOLON rest = record_field_pats { (f, p) :: rest }
 
 expr_semi_list:
   | { [] }

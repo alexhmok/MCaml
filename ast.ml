@@ -30,6 +30,11 @@ type pattern =
      are structural and never enter the ctor namespace. Always a
      complete single-ctor signature, so match dispatch reads no tag. *)
   | PTuple of pattern list             (* (p1, p2, ...) — arity >= 2 *)
+  (* D8: record pattern. Fields may appear in any order and may be
+     omitted (missing = PWild). Owner type resolves from the field
+     names (one global field namespace). Like tuples: single-ctor
+     complete signature, zero tag reads. *)
+  | PRecord of (string * pattern) list (* { x = p; ... } *)
 type binop = Add | Sub | Mult | Div | Mod
            | FMult | FDiv                 (* Phase N: Q16.16 fixed-point multiply/divide *)
            | Eq | Neq | Lt | Leq | Gt | Geq | And | Or
@@ -67,10 +72,13 @@ type expr =
   | Region of typ ref * expr               (* region (fun () -> body) — the [typ ref] is written by typing.ml and read by knormal.ml so the IR's IRegionExit can carry the return type the deep-copy walker dispatches on *)
   | Match of expr * (pattern * expr) list  (* Phase D: match e with | p -> e | ... *)
   | Tuple of expr list                     (* D7: (e1, e2, ...) — arity >= 2; allocates one {tag:0, f0...} objpool cell *)
+  | Record of (string * expr) list         (* D8: { x = e; ... } — exact field set required, any order; same {tag:0, f0...} cell (decl order) *)
+  | Field of expr * string                 (* D8: r.x — 3-cmd KFieldGet through the obj_f<k> macro getter *)
 
 type def =
   | Val of string * expr
   | Fun of string * (string * typ) list * typ * expr
   | TypeDecl of string * constructor list (* Phase D: type t = A | B of int | ... *)
+  | RecordDecl of string * (string * typ) list (* D8: type t = { x : int; ... } — fields in decl order; no ctor_info entry *)
 
 type program = def list

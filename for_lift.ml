@@ -89,6 +89,10 @@ let rec free_vars (bound : S.t) (e : expr) : S.t =
   | Tuple es ->
       List.fold_left (fun acc a -> S.union acc (free_vars bound a))
         S.empty es
+  | Record fields ->
+      List.fold_left (fun acc (_, a) -> S.union acc (free_vars bound a))
+        S.empty fields
+  | Field (e, _) -> free_vars bound e
   | Region (_, e) -> free_vars bound e
   | Match (e, arms) ->
       List.fold_left (fun acc (p, body) ->
@@ -102,6 +106,9 @@ and pattern_vars (p : pattern) : S.t =
   | PVar x -> S.singleton x
   | PCtor (_, ps) | PTuple ps ->
       List.fold_left (fun acc p -> S.union acc (pattern_vars p)) S.empty ps
+  | PRecord fields ->
+      List.fold_left (fun acc (_, p) -> S.union acc (pattern_vars p))
+        S.empty fields
   | PCons (ph, pt) -> S.union (pattern_vars ph) (pattern_vars pt)
 
 (* Walk an expression carrying a type env. Returns (new_expr, extra_defs). *)
@@ -221,6 +228,15 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
   | Tuple es ->
       let pairs = List.map (walk parent env) es in
       (Tuple (List.map fst pairs), List.concat_map snd pairs)
+  | Record fields ->
+      let pairs =
+        List.map (fun (f, e) ->
+          let (e', d) = walk parent env e in ((f, e'), d)) fields
+      in
+      (Record (List.map fst pairs), List.concat_map snd pairs)
+  | Field (e, f) ->
+      let (e', d) = walk parent env e in
+      (Field (e', f), d)
   | Region (tr, e) ->
       let (e', d) = walk parent env e in
       (Region (tr, e'), d)  (* share tr *)
@@ -242,7 +258,7 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
 
 let lift_def (d : def) : def list =
   match d with
-  | Val _ | TypeDecl _ -> [d]
+  | Val _ | TypeDecl _ | RecordDecl _ -> [d]
   | Fun (name, params, ret, body) ->
       let env =
         List.fold_left (fun m (p, t) -> M.add p t m) M.empty params

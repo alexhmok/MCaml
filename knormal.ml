@@ -718,6 +718,46 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
        | None -> seq KUnit
        | Some d -> seq (KLet (d, KUnit, KAdtAlloc (d, 0, temps))))
 
+  | Record fields ->
+      (* D8: same {tag:0, f0...} cell as a tuple. Fields evaluate in
+         SOURCE order (the literal's order), then the allocation takes
+         the temps in DECL order so f<k> always means decl field k. *)
+      let owner =
+        match fields with
+        | (f0, _) :: _ ->
+            let (o, _, _) = Hashtbl.find Typing.record_fields f0 in o
+        | [] -> failwith "knormal: empty record literal survived typing"
+      in
+      let decl = Hashtbl.find Typing.record_decls owner in
+      let with_temps = List.map (fun (f, e) -> (f, new_temp (), e)) fields in
+      let ks =
+        List.map (fun (_, t, e) -> normalize_to (Some t) e) with_temps in
+      let seq body = List.fold_right (fun k acc -> KSeq (k, acc)) ks body in
+      let ordered =
+        List.map (fun (f, _) ->
+          let (_, t, _) =
+            List.find (fun (f', _, _) -> f' = f) with_temps in
+          t) decl
+      in
+      (match dest with
+       | None -> seq KUnit
+       | Some d -> seq (KLet (d, KUnit, KAdtAlloc (d, 0, ordered))))
+
+  | Field (e, f) ->
+      (* D8: r.x — single-field read through the obj_f<k> macro getter
+         (3 cmds), mirroring the head/tail arms. With no ambient dest
+         the read is skipped (KFieldGet is never DCE'd, so emitting it
+         would cost 3 dead commands). *)
+      let (_, idx, _) = Hashtbl.find Typing.record_fields f in
+      let t_r = new_temp () in
+      let k_r = normalize_to (Some t_r) e in
+      (match dest with
+       | None -> KLet (t_r, KUnit, k_r)
+       | Some d ->
+           KLet (t_r, KUnit,
+             KSeq (k_r,
+               KLet (d, KUnit, KFieldGet (d, t_r, idx)))))
+
   | App (f, args) when Typing.is_constructor f ->
       (* Phase D / D5: constructor application. Normalize every field
          into a temp, then allocate one tagged objpool cell. With no
@@ -786,7 +826,7 @@ and compile_match (dest : string option) (occs : string list)
        components (and discharges their binders) without emitting any
        test. *)
     | Ast.PInt _ | Ast.PCtor _ | Ast.PNil | Ast.PCons _
-    | Ast.PTuple _ -> false
+    | Ast.PTuple _ | Ast.PRecord _ -> false
   in
   match rows with
   | [] ->
@@ -985,6 +1025,64 @@ and compile_match (dest : string option) (occs : string list)
                   let (p, rest, binds, body) = split_row row in
                   match p with
                   | Ast.PTuple subs -> Some (subs @ rest, binds, body)
+                  | Ast.PWild ->
+                      Some (List.init ar (fun _ -> Ast.PWild) @ rest,
+                            binds, body)
+                  | Ast.PVar x ->
+                      Some (List.init ar (fun _ -> Ast.PWild) @ rest,
+                            (x, occ) :: binds, body)
+                  | _ -> None)
+               rows
+           in
+           let used = Array.make (max ar 1) false in
+           List.iter
+             (fun (ps, _, _) ->
+                List.iteri
+                  (fun i p ->
+                     if i < ar && p <> Ast.PWild then used.(i) <- true)
+                  ps)
+             spec_rows;
+           let sub = compile_match dest (f_temps @ occs_rest) spec_rows in
+           let rec add_reads i acc =
+             if i < 0 then acc
+             else
+               add_reads (i - 1)
+                 (if used.(i)
+                  then KSeq (KFieldGet (List.nth f_temps i, occ, i), acc)
+                  else acc)
+           in
+           add_reads (ar - 1) sub
+       | Ast.PRecord fields0 ->
+           (* D8: record column. Rows normalize to decl-order sub-
+              pattern vectors (missing fields = PWild), after which
+              this is exactly the tuple case: always-complete single-
+              ctor signature, no test, used-fields filter (an omitted
+              or `_` field emits NO obj_f<k> read). *)
+           let owner =
+             match fields0 with
+             | (f0, _) :: _ ->
+                 let (o, _, _) = Hashtbl.find Typing.record_fields f0 in
+                 o
+             | [] ->
+                 failwith
+                   "match lowering: empty record pattern survived typing"
+           in
+           let decl = Hashtbl.find Typing.record_decls owner in
+           let ar = List.length decl in
+           let to_vec fields =
+             List.map (fun (f, _) ->
+               match List.assoc_opt f fields with
+               | Some p -> p
+               | None -> Ast.PWild) decl
+           in
+           let f_temps = List.init ar (fun _ -> new_temp ()) in
+           let spec_rows =
+             List.filter_map
+               (fun row ->
+                  let (p, rest, binds, body) = split_row row in
+                  match p with
+                  | Ast.PRecord fields ->
+                      Some (to_vec fields @ rest, binds, body)
                   | Ast.PWild ->
                       Some (List.init ar (fun _ -> Ast.PWild) @ rest,
                             binds, body)
