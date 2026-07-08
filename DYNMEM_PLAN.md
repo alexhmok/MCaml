@@ -2215,6 +2215,105 @@ v1 — B2's monomorphic int lists reject non-int heads at `::`, so no
 such list can be constructed. List-in-ctor (a TList ctor field, D3)
 works. Revisit when Phase E makes `'a list` real.
 
+**[D7 tuples — structural, dedicated variants]**: option (b) of §8.11.
+`TTuple of typ list` in typ, `Tuple of expr list` in expr, `PTuple of
+pattern list` in pattern — nothing enters the ctor namespace, same
+posture as D6's PNil/PCons. Option (a) (parse-time desugar to a
+synthesized nominal ctor) fails for the reason §8.11 predicted: nominal
+decls are keyed by ctor name and monomorphic, but tuple shapes vary per
+use site and the parser cannot know field types.
+
+- Type surface: OCaml's `int * int`, with OCaml's disambiguation
+  against ctor decls. The grammar layers `typ` into
+  `typ := typ_atom (TIMES typ_atom)+ → TTuple | typ_atom`, and
+  `ctor_typs` keeps consuming `typ_atom TIMES` at the top level — so
+  `of int * t` stays TWO fields and a tuple-typed ctor field must be
+  parenthesized: `of (int * int) * t`. `typ_atom` gains
+  `LPAREN typ RPAREN`. Zero new menhir conflicts.
+- Expr surface `(a, b, c)`; pattern surface `(p1, p2, p3)`. Arity ≥ 2
+  (a 1-tuple is just parens, unchanged).
+- Runtime: a tuple value is one objpool handle to a `{tag:0, f0, ...,
+  f<n-1>}` cell, allocated by the existing KAdtAlloc/IAdtAlloc with
+  tag 0 (3+n cmds); fields read by the existing KFieldGet/IFieldGet
+  (3 cmds). Zero new IR ops. The tag value is never read: a TTuple
+  match column is an always-complete single-ctor signature, so D5's
+  single-ctor rule dispatches with ZERO tag reads and the used-fields
+  filter elides reads for `_` sub-patterns.
+- Element representability = D3's ctor-field rules (TInt/TFloat/TBool/
+  TList/TAdt/record, plus TTuple itself — a nested tuple is one
+  handle); TArrDyn/TUnit/TRef/TArrStatic/TMat rejected with the same
+  messages.
+- Typing is exact structural equality (`=` on typ works — typ carries
+  no refs), so tuples pass through fun_sigs param/return checks
+  unchanged: tuple params and returns ride the scalar-handle
+  convention with zero knormal/cfg_build edits.
+- Exhaustiveness/redundancy: Maranget `useful` gets a TTuple column
+  arm — signature complete iff any PTuple heads the column (there is
+  only one "ctor"); specialize unfolds the element sub-patterns with
+  element types from the scrutinee TTuple. Witnesses render as
+  `(_, 5)` tuple syntax.
+- Destructuring-let lands NOW as parse-time sugar:
+  `let (a, b) = e in body` → `Match(e, [(PTuple [PVar a; PVar b],
+  body)])`. Tuple patterns only (records destructure via match);
+  nested patterns come free since the parenthesized form recurses
+  through the pattern grammar.
+
+**[D8 records — nominal decl, dedicated AST, typing-side tables]**:
+records get the decl-level nominal home §8.11 sketched, but per the D6
+lesson the "ctor synthesized from the type name" idea is dropped — a
+synthesized `Point` (or any user-spellable name) in ctor_info could
+collide with or leak into expression typing's ctor fallback. Instead:
+
+- Decl: `type point = { x : int; y : int }` parses to a new def
+  variant `RecordDecl of string * (string * typ) list`. typing.ml
+  registers it in `record_decls` (type → fields in decl order) and
+  `record_fields` (field → owner type, index, field type). Record
+  type names share the type namespace with ADT decls (collision =
+  error). Field types pass the same representability check as ctor
+  fields.
+- ONE GLOBAL FIELD NAMESPACE, mirroring D3's global ctor namespace: a
+  field name belongs to at most one record type. This is what lets
+  literals and `r.x` resolve with zero type annotations; the cost
+  (can't reuse `x` across two record types) matches the ctor-name
+  restriction users already live with.
+- A record value types as `TAdt name` — no new typ constructor — so
+  param passing, ctor-field/tuple-element representability, and the
+  D5 region-return rejection all reuse the existing TAdt arms.
+  `adt_decls` and `record_decls` are disjoint by construction; Match
+  typing and `useful` consult both.
+- Literal `{ x = 1; y = 2 }` is a dedicated `Record of (string *
+  expr) list` expr node. Typing resolves the owner type from the
+  first field name and requires the EXACT field set: unknown field,
+  duplicate field, and missing field are all errors; permutation is
+  fine. knormal (not the parser — the parser owns no field tables;
+  not typing-as-rewrite — infer stays analysis-only) lowers it:
+  fields evaluate in SOURCE order into temps, then one
+  `KAdtAlloc(d, 0, temps-in-DECL-order)`. Same `{tag:0, f0...}` cell
+  as a tuple; 3+n cmds.
+- Pattern `{ x = px; y = py }` → `PRecord of (string * pattern)
+  list`. Fields MAY be omitted (missing = PWild, OCaml-style), and
+  are checked for dup/unknown against the owner. The Maranget column
+  arm normalizes each PRecord to a full decl-order sub-pattern vector
+  and then behaves exactly like TTuple: single-ctor complete
+  signature, zero tag reads, used-fields filter (an omitted or `_`
+  field emits NO obj_f<k> read). Witnesses render as
+  `{x = _; y = 5}` with the full field set.
+- Field access surface: `r.x`, via a new DOT lexer token and a
+  dedicated `Field of expr * string` expr node → KFieldGet, 3 cmds.
+  Lexing is safe: ocamllex longest-match keeps `0.5` a FLOAT (the
+  float regex `digits '.' digits*` beats INT DOT), and selector dots
+  only occur inside the bracketed selector token. Match-destructuring
+  remains available; `r.x` is the cheaper single-field idiom, same
+  relationship as head/tail vs list match (D6).
+- LBRACE/RBRACE finally get lexer rules; the pre-existing menhir
+  unused-token warning count drops from 3 to 1 (only the IN
+  precedence note remains).
+
+Both features compile to exactly the committed D4/D5 machinery — no
+new IR ops, no codegen/optimizer/sim edits, no reserved slots, no pool
+changes. Phase E ('a tuples / polymorphic fields), G3 (modules), and
+first-class field names stay out of scope.
+
 Closures reuse this pool in F5. Closure cells are `{tag: $CLOSURE, code, env_field_0, env_field_1, ...}`.
 
 ### 13.6 Lambdas: specialize aggressively, fall back gracefully
