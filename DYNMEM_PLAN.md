@@ -966,6 +966,17 @@ which is MineTorch's project, not MCaml's.
 > points matched sim ($ret 42/309/22/15/24) — objpool init, tagged
 > cells, and the obj_tag/obj_f<k> macro getters verified in real
 > Minecraft.
+
+> Phase D exhaustive in-game verification completed 2026-07-08
+> (post-D7/D8): scripts/mc_test_suite_phase_d.mcaml (commit `a7f6784`,
+> 40 self-checking entries covering D1–D9 — ADT dispatch incl. the
+> elided last-ctor path, nested decision trees, bool/float/list/ADT
+> ctor fields, D6 list patterns, D7 tuples incl. eval-order pins, D8
+> records incl. chained r.tl.x, pool interleaving, alloc-in-arms)
+> packed via pack_datapack.py and run in real Minecraft: ALL 40
+> PASSED, $objpool_next = 0 after run_all_d (§4.4 reset confirmed
+> in-game). Pre-flight verifier: tools/sim_check_phase_d.py (also pins
+> the zero-obj_tag / no-unused-obj_f greps). Phase D is closed.
 - [x] D7. Tuples as single-constructor ADTs (sugar): `(a, b)` → `Pair(a, b)` at parse time
       (NOT the parse-time ctor desugar the task line predates — decided
       in §13.5 (commit `08a8b62`) as STRUCTURAL, per the D6 "dedicated
@@ -2072,6 +2083,144 @@ outline the planned file edits.
 
 Phase D then has no open tasks; next per §13.7 is Phase E (HM
 inference + let-polymorphism) — do not start it in this session.
+```
+
+### 8.12 Phase E kickoff (E1–E8 — HM inference + let-polymorphism)
+
+Re-pasteable across sessions: check §2 for which E tasks are open and
+pick up from there.
+
+```
+Read /Users/alexmok/MCaml/DYNMEM_PLAN.md — §2 for current status (all
+of Phase D is closed and in-game verified, commit a7f6784), §3 and
+§13 for settled decisions (§13.1 uniform representation is the
+load-bearing one for this phase), §13.5 for the D6/D7/D8 precedents,
+§13 (bottom) for escalation triggers. Read CLAUDE.md for the pipeline
+and the manual rebuild command. Verify `git status` is clean before
+starting.
+
+This phase is E1–E8: rewrite typing.ml's equality checker as
+Hindley-Milner unification with let-polymorphism. §13.1 makes this
+cheap at runtime: every value is one scoreboard int, so a polymorphic
+function compiles ONCE — no clones per instantiation, zero new
+codegen paths. The ONLY types that ever specialize are
+TArrStatic/TMat (length-in-type), which keep the existing
+monomorphize template path unchanged (E7 is a verification task, not
+new code). Phase F (lambdas) is OUT of scope — E8's polymorphic test
+functions are first-order only (id, swap over ('a * 'b), list
+length/sum — no map/fold, those need F).
+
+This is the largest single rewrite since M2 (typing.ml is ~900 lines
+and every phase A–D behavior routes through infer). Expect 2–3
+sessions. Suggested order: decisions + E1/E2 first (engine lands with
+annotations still REQUIRED and every existing behavior preserved —
+this alone must leave the whole test battery green), then E3/E4
+(generalization + optional annotations), then E5/E6/E8. Update §2 and
+commit at each boundary; stop at a green state, never mid-rewrite.
+
+Make the DECISIONS first and document them in a new §13.10 before
+writing code (D5/D6 protocol):
+
+  1. Unification representation — (evaluate first) MinCaml-style
+     destructive: `TVar of typ option ref` (None = unbound, Some t =
+     link), occurs check, path compression on resolve. The
+     alternative (persistent substitution maps) doubles the plumbing
+     for no benefit at this scale. Decide how generalization finds
+     free tvars: level-based (Rémy) vs scan-the-env; scan is O(n²)
+     but the env is tiny — pick and document.
+  2. Where schemes live — the E1 task line says `TScheme of tvar
+     list * typ` inside typ; consider instead keeping typ scheme-free
+     and making the ENV map name → scheme (standard, and it keeps
+     every existing `typ` consumer — Maranget matrices, check_pattern,
+     knormal, cfg_build — ignorant of schemes). If you deviate from
+     the E1 wording, document why.
+  3. Value restriction — MCaml has `ref e`. Generalize only
+     syntactic values (literals, ctors of values, tuples/records of
+     values, Nil, functions once F lands) or only non-expansive
+     RHSes; `let r = ref ... in` must NOT generalize. Document the
+     rule and its test.
+  4. Scope of polymorphic TYPES — inference gives polymorphic
+     FUNCTIONS over existing types. Decide explicitly whether this
+     phase also lifts B2's monomorphic-list restriction ('a list:
+     ctor-in-list patterns, Cons accepting any head) and whether
+     parameterized USER decls (`type 'a option = None | Some of 'a`)
+     land now or as a follow-up task (they need decl syntax, a tick
+     token `'a` in the lexer — check interactions with nothing: `'`
+     is currently an illegal char — and arity-checked TAdt
+     application). The record nil-story (§13.5 D8 note) wants 'a
+     option eventually; it does NOT have to be this phase. Whatever
+     you pick, update the E-task list in §2 to match.
+  5. Residual-tvar defaulting (E6) — a function like
+     `fun f(x) = 0` never constrains x. Decide: default unresolved
+     tvars to TInt at the knormal boundary (uniform representation
+     makes this sound) vs reject with "cannot infer". Recommend
+     default-to-TInt with the decision documented; it matches the
+     existing App-fallback culture.
+  6. Annotation semantics (E4) — annotations become optional but
+     stay CHECKED: an annotation is a unification constraint, not
+     dead syntax. Parser: `param := ID | ID COLON typ`, return typ
+     optional — verify zero new menhir conflicts.
+  7. Recursion — self-recursive calls unify against the function's
+     own MONOTYPE (no polymorphic recursion, standard HM);
+     generalization happens after the def is inferred. Function decl
+     order stays source order (same rule as type decls). Mutual
+     recursion stays out (G1).
+
+Behaviors that MUST survive the rewrite (these are load-bearing, all
+pinned by existing tests/probes):
+- D3 Maranget exhaustiveness/redundancy needs CONCRETE types at
+  match-analysis time — resolve/force scrutinee types before the
+  matrices run; witnesses must not print '_weak1'-style tvars.
+- The Capitalized-ctor convention, one global ctor namespace, one
+  global record-field namespace, record literals requiring the exact
+  field set.
+- fmul/fdiv asymmetry: `*`/`/` on TFloat stay REJECTED with the
+  pointer to fmul/fdiv (N5 decision) — unification must not silently
+  accept them.
+- for_lift synthesized helpers (E5): walk's env currently calls
+  Typing.infer as a concrete-type oracle and main.ml SKIPS typing for
+  __for helpers (they reference enclosing locals). Decide how the
+  walk tolerates unbound tvars (thread the real env, or default) and
+  document.
+- fun_sigs consumers: build_sigs feeds App checking; the App
+  unknown-signature fallback (returns TInt) must keep working for
+  synthesized helpers.
+- §4.4 public-entry contract and every runtime convention — typing is
+  the only layer changing; knormal and below must see fully-resolved
+  concrete typs exactly as today.
+
+Guardrails (the full battery, now EIGHT checks):
+- Baseline BEFORE the first edit: rebuild per CLAUDE.md; suite 66/66
+  + async (tools/sim_check_suite.py); Phase D suite 40/40
+  (./mcaml -o build_phase_d < scripts/mc_test_suite_phase_d.mcaml;
+  python3 tools/sim_check_phase_d.py build_phase_d); hash the five
+  canaries; all SEVEN /tmp harnesses green (test_dyn_array,
+  test_cons, test_regions, test_fixed_point, test_adts,
+  test_list_match, test_tuples_records — regenerate per §2
+  conventions if /tmp was cleared).
+- The five canaries stay byte-identical through the ENTIRE phase —
+  typing is upstream of codegen, so any hash drift means inference
+  changed a resolved type somewhere. That is an instant stop-and-
+  investigate.
+- Zero new menhir conflicts. Every pre-existing typing error message
+  that a test greps for keeps firing (rewrite the message text only
+  if you update the probe in the same commit).
+- E8 tests: scripts/test_polymorphism.mcaml + /tmp harness per D9
+  conventions — polymorphic id used at int/bool/list/tuple types in
+  one program, first-order polymorphic list helpers, a
+  tuple-polymorphic swap, value-restriction rejection probe, an
+  un-annotated fun inferring its param types from use, an annotation-
+  mismatch error probe, and HM diagnostic quality checks (unify-fail
+  error names both types, occurs-check error is actionable).
+
+If the rewrite reveals that preserving some existing behavior is
+impossible under HM (e.g. an App-fallback ambiguity), STOP and flag
+it per §13 — do not paper over it with special cases.
+
+After each session: update §2 (mark E-task progress with commit
+hashes), keep decision-doc commits separate from implementation
+commits, and leave the tree green. When E is fully closed, author
+§8.13 for Phase F.
 ```
 
 ## 9. Rollback and A/B flags
