@@ -2386,12 +2386,25 @@ pick up from there.
 ```
 Read /Users/alexmok/MCaml/DYNMEM_PLAN.md — §2 for current status (all
 of Phase E is closed: HM inference + let-polymorphism landed, commits
-25cc860..ab19836), §13.6 for the settled two-strategy design
-(specialize aggressively, fall back gracefully — do NOT revisit),
-§13.5 for the closure cell layout ({tag: $CLOSURE, code, env_0, ...}
-in the existing objpool), §13.10 for the Phase E decisions Phase F
-builds on (esp. the tvar single-int restriction — a closure handle IS
-a single int, so 'a -> 'b tvars stay sound), §13 (bottom) for
+25cc860..ab19836; G4 — parameterized user type decls, pulled ahead of
+this phase — is also closed, decisions 201b09b, implementation
+264801b), §13.6 for the settled two-strategy design (specialize
+aggressively, fall back gracefully — do NOT revisit), §13.5 for the
+closure cell layout ({tag: $CLOSURE, code, env_0, ...} in the existing
+objpool), §13.10 for the Phase E decisions Phase F builds on (esp. the
+tvar single-int restriction — a closure handle IS a single int, so
+'a -> 'b tvars stay sound), §13.11 for G4's decisions — `Ast.typ` now
+also carries `TAdt of string * typ list` (applied user types) and
+`TParam of string` (decl-side type variable, substituted away before
+typing.ml's `unify` — never reaches it unsubstituted). `TFun` is a
+SIBLING constructor to both, not a replacement for either: every
+function G4 touched to add a `TAdt`/`TParam` arm (`check_typ_ok`,
+`subst_typarams`, `string_of_typ`, `occurs`, `free_tvars`,
+`copy_with`, `zonk_default`, `unify`, `tvar_bindable`, plus
+`check_field_type`/`check_record_field_type`/`check_tuple_elem`) also
+needs a `TFun` arm — grep those names in typing.ml before writing
+decision 1's arrow-type code so the same pass covers all three new
+constructors in one sweep rather than three. §13 (bottom) for
 escalation triggers. Read CLAUDE.md for the pipeline and the manual
 rebuild command. Verify `git status` is clean before starting.
 
@@ -2450,13 +2463,17 @@ Behaviors that MUST survive (all pinned by the existing battery):
   (type+generalize, then zonk+compile) — closure conversion must slot
   between them or after, not inside typing.
 
-Guardrails (the full battery, now NINE checks):
+Guardrails (the full battery, now TEN checks):
 - Baseline BEFORE the first edit: rebuild per CLAUDE.md; suite 66/66 +
-  async; Phase D suite 40/40; hash the five canaries; all EIGHT /tmp
-  harnesses green (test_dyn_array, test_cons, test_regions,
-  test_fixed_point, test_adts, test_list_match, test_tuples_records,
-  test_polymorphism — regenerate per §2 conventions if /tmp was
-  cleared).
+  async; Phase D suite 40/40; Phase E suite 42/42
+  (tools/sim_check_phase_e.py — includes its 12 rejection probes);
+  hash the five canaries; all NINE /tmp harnesses green
+  (test_dyn_array, test_cons, test_regions, test_fixed_point,
+  test_adts, test_list_match, test_tuples_records, test_polymorphism,
+  test_param_types — regenerate per §2 conventions if /tmp was
+  cleared; test_param_types.py isn't checked in, only its source
+  scripts/test_param_types.mcaml is — see G4's commit for the harness
+  body to recreate).
 - Five canaries byte-identical until a phase task deliberately
   changes codegen for lambda-free programs (none should — lambdas are
   purely additive; any drift is a stop-and-investigate).
