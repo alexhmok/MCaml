@@ -1067,14 +1067,26 @@ which is MineTorch's project, not MCaml's.
       Point"); the .py harness only runs well-typed programs.)
 
 ### Phase E — Hindley-Milner inference + let-polymorphism
-- [ ] E1. `ast.ml`: extend `typ` with `TVar of tvar ref` and `TScheme of tvar list * typ`
-- [ ] E2. `typing.ml`: rewrite `infer` as unification-based, replacing the current equality checker
-- [ ] E3. Let-generalization at `let` bindings; instantiation at uses
-- [ ] E4. Annotations on `fun` params and return types become optional
-- [ ] E5. `for_lift.ml`: the `walk` env must tolerate unresolved `TVar`s (currently uses `Typing.infer` as a concrete-type oracle)
-- [ ] E6. `knormal.ml normalize_fun`: force resolution of any residual `TVar`s before the pass runs
-- [ ] E7. `monomorphize.ml`: keep the existing `TArrStatic`/`TMat` template path (length-in-type forces specialization). All other polymorphic types flow through uniform int representation — no new monomorphization work needed
-- [ ] E8. Tests: polymorphic `id`, polymorphic list helpers, HM error diagnostics
+
+Decisions for the whole phase are in §13.10 (settled before E1/E2 work
+began). Headline calls: destructive `TVar of typ option ref` (no
+TScheme in typ — schemes live in typing.ml's env, declared deviation
+from the E1 wording), scan-the-env generalization, syntactic-value
+restriction, 'a list lifted this phase (new E4b), parameterized user
+decls (`type 'a option`) deferred to Phase G follow-up, residual tvars
+default to TInt at the knormal boundary, annotations optional-but-
+checked (return annotations become CHECKED — a strengthening), monotype
+self-recursion with source-order generalization.
+
+- [ ] E1. `ast.ml`: extend `typ` with `TVar of typ option ref` (schemes stay OUT of typ per §13.10 decision 2)
+- [ ] E2. `typing.ml`: rewrite `infer` as unification-based, replacing the current equality checker (annotations still required; every behavior + error string preserved; battery green + canaries byte-identical)
+- [ ] E3. Let-generalization at `let` bindings; instantiation at uses (syntactic-value restriction per §13.10 decision 3)
+- [ ] E4. Annotations on `fun` params and return types become optional (parser: `param := ID | ID COLON typ`, optional return; omitted → `TVar (ref None)`; zero new menhir conflicts; return annotations become checked)
+- [ ] E4b. Lift B2's monomorphic-list restriction to 'a list (Nil/Cons/head/tail/is_nil generic; PCons/PNil + Maranget list column carry the element type; `list` annotation keyword still means `TList TInt`; region-return of `TList` non-int keeps failing loudly at codegen)
+- [ ] E5. `for_lift.ml`: the `walk` env must tolerate unresolved `TVar`s (zonk + default-to-TInt when materializing helper params; §13.10 E5 corollary)
+- [ ] E6. `knormal.ml` boundary: main.ml zonks each def and BINDS residual `TVar`s to TInt before `compile_def_to_cfg` (knormal and below never see a TVar)
+- [ ] E7. `monomorphize.ml`: keep the existing `TArrStatic`/`TMat` template path (length-in-type forces specialization). All other polymorphic types flow through uniform int representation — no new monomorphization work needed (verification task)
+- [ ] E8. Tests: `scripts/test_polymorphism.mcaml` + /tmp harness per D9 conventions — polymorphic `id` at int/bool/list/tuple, first-order polymorphic list helpers (length/sum — no map/fold, that's F), tuple-polymorphic swap, value-restriction rejection probe, un-annotated fun inferring param types from use, annotation-mismatch probe, HM diagnostic quality (unify-fail names both types; occurs-check error actionable)
 
 ### Phase F — First-class lambdas (specialization + escape-analysis fallback)
 - [ ] F1. Parser/AST: `fun x -> e`, partial application, `Lambda of pattern list * expr` AST node
@@ -1089,6 +1101,7 @@ which is MineTorch's project, not MCaml's.
 - [ ] G1. Mutual recursion: `fun f ... and g ...`
 - [ ] G2. Nested `let rec`
 - [ ] G3. Modules / namespaces / qualified names (requires lexer fix to allow `.` in qualified names, or pick an alternative separator)
+- [ ] G4. Parameterized user type decls (`type 'a option = None | Some of 'a`) — deferred from Phase E per §13.10 decision 4; needs a `'` lexer token (currently illegal char), decl syntax, and arity-checked TAdt application. The D8 record nil-story wants this eventually.
 
 ## 3. Load-bearing design decisions
 
@@ -2605,6 +2618,140 @@ a workload comes in that genuinely needs runtime length (variable
 sequence length served from one compiled model), revisit. Until then,
 Phase L stays in the "nice for human ergonomics, not on the critical
 path" backlog.
+
+### 13.10 Phase E decisions (HM inference + let-polymorphism)
+
+Settled before the first E1/E2 edit, per the D5/D6 protocol. The seven
+decisions from the §8.12 kickoff, in order:
+
+**1. Unification representation — MinCaml-style destructive, scan-the-env
+generalization.** `TVar of typ option ref` (`None` = unbound, `Some t` =
+link) added to `Ast.typ`; `resolve` follows links with path compression;
+`unify` binds after an occurs check. The persistent-substitution
+alternative doubles the plumbing (every `infer` return threads a subst)
+for zero benefit at this scale. Generalization finds free tvars by
+scanning the typing env, not Rémy levels: the env at any `let` is the
+local assoc list (params + enclosing lets, a handful of entries) plus
+globals that are closed by construction (`global_vals`, `fun_sigs` from
+annotations, ctor/record tables) — the O(n²) scan is over n ≈ 10.
+Levels would thread a mutable int through every tvar for no measurable
+win. Revisit only if typing time on a real program becomes visible.
+
+**2. Schemes live in the ENV, not in `typ` — declared deviation from the
+E1 task wording.** `typ` stays scheme-free; typing.ml gains a private
+`scheme` (quantified tvar-ref list + body typ) and the inference env maps
+name → scheme (trivial/mono schemes for lambdas-free binders).
+Rationale: every existing `typ` consumer — Maranget matrices,
+check_pattern, knormal, cfg_build, monomorphize's template keys, the
+Region typ ref — stays ignorant of schemes; a `TScheme` inside `typ`
+would force an impossible-case arm in each. `fun_sigs` is read only
+inside typing.ml (verified by grep), so generalized function sigs live in
+a parallel `fun_schemes` table without touching any public interface.
+Public `Typing.infer : (string * typ) list -> expr -> typ` keeps its
+signature (wraps monotypes into trivial schemes internally) so
+for_lift's oracle call sites don't change shape.
+
+**3. Value restriction — generalize syntactic values only.** A `let x =
+e1` RHS generalizes iff e1 is a syntactic value: literal (Int/Float/
+Bool/Unit), Var, Nil, Cons of values, Tuple/Record of values, ctor App
+of values. Everything else — `ref e` above all, but also any real App,
+BinOp, If, Deref — stays monomorphic (free tvars remain unbound and
+unify with later uses). Top-level `fun` defs are always generalized
+(after their own body is inferred — see decision 7). Pinned by an E8
+probe: `let r = ref [] in` used at two element types must fail with a
+unify error, not generalize.
+
+**4. Scope of polymorphic TYPES — lift 'a list THIS phase; defer
+parameterized user decls.** B2's monomorphic-int-list restriction is
+lifted as its own task (new E4b in §2): `Nil : 'a list` (fresh tvar per
+mention), `Cons : 'a -> 'a list -> 'a list`, `head/tail/is_nil` become
+list-generic, PCons/PNil and the Maranget list column carry the
+element type ([elem; TList elem] instead of [TInt; TList TInt]). This
+is the D6 scope note coming due ("ctor-in-list patterns are Phase E's
+job") and costs no runtime change — handles are ints regardless of
+element type. Guardrail carried over from C5: the region-return walker
+handles `TList TInt` only; codegen_cfg already fails loudly on
+`TList <nested>` region returns (verified), and that stays the
+behavior — deep-copying a list whose heads are objpool handles would
+dangle them. The `list` TYPE ANNOTATION keyword keeps meaning
+`TList TInt` (no `int list` postfix grammar this phase), so every
+annotated program types exactly as today; polymorphic lists enter via
+inference only. Parameterized USER decls (`type 'a option = None |
+Some of 'a`) are DEFERRED to a follow-up task (noted under Phase G in
+§2): they need decl syntax, a `'` lexer token (currently an illegal
+character — needs its own conflict check), and arity-checked TAdt
+application — none of which E8's first-order test battery requires.
+
+**5. Residual-tvar defaulting — default to TInt at the knormal
+boundary.** After a def's body is inferred (and its sig generalized),
+main.ml zonks the def: every typ reachable from params/return is
+resolved; still-unbound tvars are BOUND to TInt before
+compile_def_to_cfg runs. §13.1 uniform representation makes any
+concrete choice runtime-sound (every value is one scoreboard int);
+TInt matches the existing App-fallback culture. So `fun f(x) = 0`
+compiles with `x : int`, exactly as if annotated. Same rule applies
+at the two other places a tvar could otherwise escape typing:
+arithmetic BinOps whose operands are both unconstrained (unify with
+TInt eagerly — `fun f(x, y) = x + y` gives ints, OCaml-compatible),
+and for_lift's oracle (decision under E5 below). "Cannot infer"
+rejection was considered and dropped: it punishes exactly the
+programs the App-fallback has always accepted.
+
+**6. Annotation semantics — optional but CHECKED.** Parser: `param :=
+ID | ID COLON typ`, return `COLON typ` optional (omitted → the parser
+mints `TVar (ref None)` in place — no new AST shape, no option types).
+An annotation present is a unification constraint: params seed the env
+with the annotated type; the declared return unifies with the inferred
+body type. NOTE this last part is a deliberate STRENGTHENING: today the
+return annotation is decorative (only feeds fun_sigs for callers; the
+body's type is never compared against it — see for_lift's comment).
+Under E4 a wrong return annotation becomes a type error. The full
+battery gates this: if any pre-existing script fails the new check,
+that's a finding to surface, not to special-case (per §8.12's stop
+rule). Zero new menhir conflicts is a hard gate; lexer untouched (no
+tick token needed this phase, per decision 4).
+
+**7. Recursion — monotype self-calls, source-order generalization.**
+While f's body is being inferred, `fun_schemes` has no entry for f, so
+self-calls fall through to `fun_sigs`' raw monotype (shared tvar refs)
+— no polymorphic recursion, standard HM. Generalization happens once,
+immediately after f's def is inferred. Forward calls (caller earlier in
+source than callee) keep working — build_sigs registers every sig
+upfront, sharing the same tvar refs — but a forward call unifies
+against the callee's not-yet-generalized MONOTYPE, so a function used
+polymorphically at several types must be declared before those uses
+(annotated/monomorphic forward calls, the only kind that exist in
+current programs, are unaffected). Mutual recursion stays out (G1).
+
+**E5 corollary (for_lift oracle).** for_lift's `walk` runs before
+build_sigs populates fun_sigs, so its `Typing.infer` oracle calls
+already run in degraded mode (every App → TInt fallback) and that
+stays. Under HM the oracle may now return types containing unbound
+tvars (e.g. `let l = [] in for ...`); when the walk materializes a
+synthesized helper's param list from the env, it zonks each fv type
+and defaults residual tvars to TInt (decision 5's rule, applied
+early). TArrDyn/TRef fvs are concrete in the env and keep their
+existing handling (dyn_env seeding / param filtering). main.ml keeps
+SKIPPING full typing for `__for` helpers; speculative walk-time
+unifications cannot leak into the real pass because the walk's tvars
+are minted fresh per oracle call and the AST carries no types — the
+one shared mutable (the Region typ ref) is unreachable inside for
+bodies because region-in-helper is already rejected at main.ml
+(C3 public-entry check).
+
+**Match analysis under tvars (D3 preservation).** check_pattern becomes
+unification-based (a PInt column unifies the scrutinee type with TInt,
+PCons with TList elem, etc. — same error strings). The Maranget
+matrices run AFTER all of a match's patterns are checked, on the
+RESOLVED scrutinee type, so column types are as concrete as the program
+makes them. A still-unbound tvar column can only carry wild/var
+patterns (anything stronger would have constrained it), which the
+existing catch-all column arm already handles — witnesses therefore
+never contain tvars, and no '_weak1' can print. Diagnostics gain a
+`string_of_typ` that renders unbound tvars as 'a/'b for unify-fail
+messages (E8 quality checks); every PRE-EXISTING error string is
+preserved byte-for-byte by catching `Unify_fail` at each legacy call
+site and re-raising the legacy message.
 
 ## 13. Escalation triggers
 
