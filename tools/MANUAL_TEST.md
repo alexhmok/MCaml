@@ -1,8 +1,8 @@
 # Manual datapack test procedure
 
 A 5-minute checklist for verifying that an MCaml-compiled datapack
-loads in real Minecraft and produces the same `$ret` value as
-`/tmp/mcaml_out/sim.py`. Use this whenever a compiler change touches
+loads in real Minecraft and produces the same `$ret` value as the
+simulator (`sim/sim.py`). Use this whenever a compiler change touches
 codegen, the runtime conventions, or `tools/pack_datapack.py`.
 
 This is the gate that catches what `sim.py` cannot:
@@ -97,11 +97,41 @@ This is the gate that catches what `sim.py` cannot:
    /scoreboard players get $ret vars
    ```
 
-6. **Compare against `sim.py`.** For the same source:
+6. **Compare against the simulator.** `sim/sim.py` is a library, not
+   a CLI. For the standard test programs, the checked-in expectation
+   lives in the matching harness under `/tmp/mcaml_out/` (e.g.
+   `test_adts.py`, `test_cons.py`, `test_regions.py`) — run it and
+   the in-game `$ret` must match the harness's `want` values:
 
    ```sh
-   python3 /tmp/mcaml_out/sim.py build/ main_test
+   python3 /tmp/mcaml_out/test_adts.py
    ```
+
+   (The harnesses are uncommitted by convention; if `/tmp` was
+   cleared, regenerate them per DYNMEM_PLAN §2 before comparing.)
+
+   For an ad-hoc program with no harness, drive the sim directly on
+   the same `build/` directory you packed:
+
+   ```sh
+   python3 - <<'EOF'
+   import sys; sys.path.insert(0, "/Users/alexmok/MCaml/sim")
+   import sim
+   sim.DIR = "/Users/alexmok/MCaml/build"   # the compiled -o dir
+   w = sim.World()
+   w.storage["mcaml:objpool"]  = {"cells": []}
+   w.storage["mcaml:scratch"]  = {"cells": []}
+   w.storage["mcaml:permheap"] = {"cells": []}
+   w.storage["mcaml:region_tmp"] = {"objpool": [], "scratch": []}
+   for s in ("$objpool_next", "$scratch_next", "$permheap_next"):
+       w.scores[s] = 0
+   sim.run_function(w, "main_test")          # the entry point name
+   print("$ret =", w.scores.get("$ret"))
+   EOF
+   ```
+
+   (The storage/counter seeding mirrors what `mcaml:init` does at
+   datapack load — §§4.3/4.5 of DYNMEM_PLAN.md.)
 
    The two `$ret` values must agree. For `test_full_chain.mcaml` the
    expected value is **70** (`1*5 + 2*6 + 3*7 + 4*8`).
