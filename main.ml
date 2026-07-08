@@ -94,7 +94,8 @@ let () =
        order means a type must be declared before first use (no
        forward references between type declarations in v1). *)
     List.iter (function
-      | TypeDecl (name, ctors) -> Typing.register_type_decl name ctors
+      | TypeDecl (name, params, ctors) ->
+          Typing.register_type_decl name params ctors
       | RecordDecl (name, fields) -> Typing.register_record_decl name fields
       | _ -> ()
     ) program;

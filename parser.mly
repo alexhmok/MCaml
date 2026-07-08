@@ -10,6 +10,10 @@ let pattern_of_id name =
   if name = "_" then PWild
   else if is_ctor_name name then PCtor (name, [])
   else PVar name
+
+(* G4: TYVAR's lexeme keeps the leading quote ("'a"); strip it so stored
+   param/TParam names are bare ("a") — §13.11 decision 3. *)
+let strip_tyvar tv = String.sub tv 1 (String.length tv - 1)
 %}
 
 /* Tokens */
@@ -18,6 +22,7 @@ let pattern_of_id name =
 %token <string> ID
 %token <string> STRING
 %token <string> SELECTOR
+%token <string> TYVAR
 
 /* Keywords */
 %token LET IN IF THEN ELSE FUN VAL CMD
@@ -116,7 +121,12 @@ definition:
   | FUN name = ID LPAREN params = param_list RPAREN EQUAL body = seq_expr
     { Fun(name, params, TVar (ref None), body) }
   | TYPE name = ID EQUAL opt_bar ctors = ctor_list
-    { TypeDecl(name, ctors) }
+    { TypeDecl(name, [], ctors) }
+  /* G4: single-param parameterized decl, e.g. `type 'a option = ...`.
+     v1 scope: exactly one param (§13.11 decision 4); multi-param
+     decls are a deferred follow-up. */
+  | TYPE tv = TYVAR name = ID EQUAL opt_bar ctors = ctor_list
+    { TypeDecl(name, [strip_tyvar tv], ctors) }
   /* D8: record declaration. Fields in decl order; registration and
      the global-field-namespace check live in typing.ml. */
   | TYPE name = ID EQUAL LBRACE fields = record_field_decls RBRACE
@@ -181,10 +191,23 @@ typ_atom:
   | T_MAT LBRACK T_FLOAT COMMA m = INT COMMA n = INT RBRACK { TMat(TFloat, m, n) }
   | T_LIST { TList TInt }
   | T_DARR { TArrDyn TInt }
-  | name = ID { TAdt name }   /* Phase D: nominal reference to a declared ADT; existence checked in typing */
+  | name = ID { TAdt (name, []) }   /* Phase D: nominal reference to a declared ADT; existence checked in typing */
   | REF T_INT { TRef TInt }
   | REF T_BOOL { TRef TBool }
   | LPAREN t = typ RPAREN { t }   /* D7: grouping, e.g. a tuple-typed ctor field `of (int * int) * t` */
+  /* G4: postfix type application, e.g. `int option`, `int option
+     option`, `(int * int) option`. Left-recursive on typ_atom so it
+     composes with LPAREN-grouping and nests for free. v1: single arg
+     only (§13.11 decision 4). */
+  | t = typ_atom name = ID { TAdt (name, [t]) }
+  /* G4/decision 5: `list` joins the postfix grammar (`float list`,
+     `t list`); the bare T_LIST keyword above stays `int list` for
+     back-compat. */
+  | t = typ_atom T_LIST { TList t }
+  /* G4: decl-side type variable reference inside a ctor/record/param
+     field type, e.g. `Some of 'a`. Legality (bound by the enclosing
+     decl's own param list) is checked in typing.ml, not here. */
+  | v = TYVAR { TParam (strip_tyvar v) }
 
 seq_expr:
   | e = expr %prec BELOW_SEMI { e }

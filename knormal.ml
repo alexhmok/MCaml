@@ -934,7 +934,7 @@ and compile_match (dest : string option) (occs : string list)
                [] rows
            in
            let (owner, _, _) = Hashtbl.find Typing.ctor_info c0 in
-           let all_ctors = Hashtbl.find Typing.adt_decls owner in
+           let (_, all_ctors) = Hashtbl.find Typing.adt_decls owner in
            let complete =
              List.for_all (fun (cn, _) -> List.mem cn heads) all_ctors
            in

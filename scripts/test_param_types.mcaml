@@ -1,0 +1,107 @@
+(* G4 exit tests: parameterized user type declarations (§13.11).
+   D9-convention harness (see tools' test_param_types.py counterpart in
+   /tmp/mcaml_out): each entry point below is compiled once, then run
+   individually in a fresh sim.World, asserting $ret plus the §4.4
+   arena-reset postconditions. Rejection probes (arity errors, unbound
+   type variables, ctor arg mismatches) live in the Python harness as
+   inline-compiled sources, since they must FAIL to compile — this
+   file only holds the well-typed positive suite. *)
+
+type 'a option = None | Some of 'a
+type shape = Circle of int | Square of int
+type node = { v : int; next : node option }
+
+(* -- 'a option round-trip through a polymorphic-use fixed-signature
+      helper (annotated at int, so this one call site is monomorphic;
+      the zero-clones probe below uses a truly generalized function). *)
+fun get_or(o: int option, d: int): int =
+  match o with
+  | None -> d
+  | Some(x) -> x
+
+fun test_get_or_some(): int = get_or(Some(42), 0)
+fun test_get_or_none(): int = get_or(None, 7)
+
+(* -- zero-clones: is_none is unannotated, so its 'a option -> int
+      scheme generalizes and every call site below instantiates fresh
+      — the harness greps for exactly one is_none.mcfunction. *)
+fun is_none(o): int =
+  match o with
+  | None -> 1
+  | Some(_) -> 0
+
+fun test_is_none_int(): int = is_none(Some(5))
+fun test_is_none_bool(): int = is_none(Some(true))
+fun test_is_none_none(): int = is_none(None)
+
+(* -- option at int/bool/tuple/ADT payloads, all in one program *)
+fun test_option_bool(): int =
+  match Some(true) with
+  | None -> 0
+  | Some(b) -> if b then 1 else 2
+
+fun test_option_tuple(): int =
+  match Some((3, 4)) with
+  | None -> 0
+  | Some(t) -> (match t with (a, b) -> a + b)
+
+fun shape_area(s: shape): int =
+  match s with
+  | Circle(r) -> r * r * 3
+  | Square(sd) -> sd * sd
+
+fun test_option_adt(): int =
+  match Some(Circle(2)) with
+  | None -> 0
+  | Some(sh) -> shape_area(sh)
+
+(* -- nested int option option *)
+fun unwrap2(x: int option option): int =
+  match x with
+  | None -> -1
+  | Some(inner) -> (match inner with None -> -2 | Some(v) -> v)
+
+fun test_nested_some_some(): int = unwrap2(Some(Some(9)))
+fun test_nested_some_none(): int = unwrap2(Some(None))
+fun test_nested_none(): int = unwrap2(None)
+
+(* -- node option record field: the D8 nil-story shape, a nil-free
+      linked record chain terminated by None instead of a sentinel. *)
+fun sum_chain(n: node): int =
+  match n.next with
+  | None -> n.v
+  | Some(m) -> n.v + sum_chain(m)
+
+fun test_record_chain(): int =
+  let a = { v = 1; next = None } in
+  let b = { v = 2; next = Some(a) } in
+  let c = { v = 3; next = Some(b) } in
+  sum_chain(c)
+
+(* -- option-of-list and list-of-option *)
+fun sum_list(l: int list): int =
+  match l with
+  | [] -> 0
+  | h :: t -> h + sum_list(t)
+
+fun sum_opt_list(o: int list option): int =
+  match o with
+  | None -> 0
+  | Some(l) -> sum_list(l)
+
+fun test_option_of_list(): int =
+  sum_opt_list(Some(1 :: 2 :: 3 :: []))
+
+fun test_option_of_list_none(): int =
+  sum_opt_list(None)
+
+fun list_of_opts_sum(l: int option list): int =
+  match l with
+  | [] -> 0
+  | h :: t ->
+      (match h with
+       | None -> list_of_opts_sum(t)
+       | Some(x) -> x + list_of_opts_sum(t))
+
+fun test_list_of_option(): int =
+  list_of_opts_sum(Some(1) :: None :: Some(3) :: [])

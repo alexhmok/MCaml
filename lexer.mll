@@ -13,6 +13,7 @@ let int = '-'? ['0'-'9']+
 let float = '-'? ['0'-'9']+ '.' ['0'-'9']*
 let id = ['a'-'z' 'A'-'Z' '_'] ['a'-'z' 'A'-'Z' '0'-'9' '_']*
 let selector = '@' ['a' 'e' 'p' 'r' 's'] ('[' [^ ']']* ']')?
+let tyvar = '\'' ['a'-'z' 'A'-'Z' '0'-'9' '_']*  (* G4: decl-side type variable, e.g. 'a — §13.11 decision 3 *)
 
 rule read = parse
   | white    { read lexbuf }
@@ -92,6 +93,7 @@ rule read = parse
   | ":="     { COLEQ }
   | "!"      { BANG }
   | id       { ID (Lexing.lexeme lexbuf) }
+  | tyvar    { TYVAR (Lexing.lexeme lexbuf) }
   | '"'      { read_string (Buffer.create 17) lexbuf }
   | _ { raise (SyntaxError ("Unexpected char: " ^ Lexing.lexeme lexbuf)) }
   | eof      { EOF }

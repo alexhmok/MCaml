@@ -14,6 +14,7 @@ type token =
   | T_DARR
   | T_BOOL
   | T_ARR
+  | TYVAR of (string)
   | TYPE
   | TRUE
   | TO

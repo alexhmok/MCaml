@@ -288,7 +288,7 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
              "codegen_cfg: TArrDyn region returns are not supported in \
               v1 — wrap the array-producing expression with an int-\
               returning reducer or flag to extend the walker set"
-       | Ast.TAdt name ->
+       | Ast.TAdt (name, _) ->
            (* Phase D / D5 settled decision: no generic tag-preserving
               deep-copy walker yet. Same v1 posture as TArrDyn. *)
            failwith

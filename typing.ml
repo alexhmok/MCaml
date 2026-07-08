@@ -22,8 +22,12 @@ let register_global_val (name : string) (ty : typ) : unit =
 
 (* ---- Phase D: nominal ADT environment ------------------------------- *)
 
-(* type name -> constructor list, in declaration order *)
-let adt_decls : (string, constructor list) Hashtbl.t = Hashtbl.create 8
+(* type name -> (param names in decl order, constructor list). G4:
+   the value widened to carry the decl's own type-param list ([] for
+   non-parameterized decls) so ctor use/pattern sites can build the
+   TParam -> actual-arg substitution (§13.11 decision 2/6). *)
+let adt_decls : (string, string list * constructor list) Hashtbl.t =
+  Hashtbl.create 8
 
 (* ctor name -> (owning type, field types, tag).
    Tags are declaration-order indices 0..n-1; D5's decision trees
@@ -107,8 +111,12 @@ let rec string_of_typ (t : typ) : string =
   | TList t -> string_of_typ t ^ " list"
   | TTuple ts ->
       "(" ^ String.concat " * " (List.map string_of_typ ts) ^ ")"
-  | TAdt n -> n
+  | TAdt (n, []) -> n
+  | TAdt (n, [a]) -> string_of_typ a ^ " " ^ n
+  | TAdt (n, args) ->
+      "(" ^ String.concat ", " (List.map string_of_typ args) ^ ") " ^ n
   | TVar r -> tvar_name r
+  | TParam p -> "'" ^ p
 
 let rec occurs (r : typ option ref) (t : typ) : bool =
   match resolve t with
@@ -116,7 +124,8 @@ let rec occurs (r : typ option ref) (t : typ) : bool =
   | TList t | TArrDyn t | TRef t | TArrStatic (t, _) | TMat (t, _, _) ->
       occurs r t
   | TTuple ts -> List.exists (occurs r) ts
-  | TInt | TFloat | TBool | TUnit | TSelector | TPos | TAdt _ -> false
+  | TAdt (_, args) -> List.exists (occurs r) args
+  | TInt | TFloat | TBool | TUnit | TSelector | TPos | TParam _ -> false
 
 exception Unify_fail of typ * typ
 
@@ -139,10 +148,22 @@ let tvar_bindable (t : typ) : string option =
   | TUnit -> Some "unit"
   | TSelector -> Some "selector"
   | TPos -> Some "pos"
+  (* G4: unreachable in practice — unify's TParam intercept (below)
+     fires before a TVar-binding arm could ever see one. Arm exists
+     only because TParam is a new typ constructor (exhaustiveness). *)
+  | TParam _ -> Some "type parameter"
 
 let rec unify (t1 : typ) (t2 : typ) : unit =
   let t1 = resolve t1 and t2 = resolve t2 in
   match t1, t2 with
+  (* G4: a decl-side type param must always be substituted away (by
+     instantiate_ctor / subst_typarams, §13.11 decision 6) before
+     reaching unify. Intercept BEFORE the generic TVar arm below so a
+     TVar-vs-TParam pairing doesn't silently destructive-bind. *)
+  | TParam p, _ | _, TParam p ->
+      raise (Error (Printf.sprintf
+        "internal: unsubstituted type parameter '%s reached \
+         unification — this is a compiler bug" p))
   | TVar r1, TVar r2 when r1 == r2 -> ()
   | TVar r, t | t, TVar r ->
       if occurs r t then
@@ -169,7 +190,9 @@ let rec unify (t1 : typ) (t2 : typ) : unit =
   | TMat (a, r1, c1), TMat (b, r2, c2) when r1 = r2 && c1 = c2 -> unify a b
   | TTuple xs, TTuple ys when List.length xs = List.length ys ->
       List.iter2 unify xs ys
-  | TAdt a, TAdt b when a = b -> ()
+  | TAdt (a, args_a), TAdt (b, args_b)
+    when a = b && List.length args_a = List.length args_b ->
+      List.iter2 unify args_a args_b
   | _ -> raise (Unify_fail (t1, t2))
 
 (* Unify with a legacy error message: every type check that predates
@@ -198,7 +221,8 @@ let rec zonk_default (t : typ) : typ =
   | TArrStatic (t, n) -> TArrStatic (zonk_default t, n)
   | TMat (t, m, n) -> TMat (zonk_default t, m, n)
   | TTuple ts -> TTuple (List.map zonk_default ts)
-  | (TInt | TFloat | TBool | TUnit | TSelector | TPos | TAdt _) as t -> t
+  | TAdt (n, args) -> TAdt (n, List.map zonk_default args)
+  | (TInt | TFloat | TBool | TUnit | TSelector | TPos | TParam _) as t -> t
 
 (* ---- Schemes (§13.10 decision 2: env-side, typ stays scheme-free) --- *)
 
@@ -222,7 +246,8 @@ let rec copy_with (mapping : (typ option ref * typ) list) (t : typ) : typ =
   | TArrStatic (t, n) -> TArrStatic (copy_with mapping t, n)
   | TMat (t, m, n) -> TMat (copy_with mapping t, m, n)
   | TTuple ts -> TTuple (List.map (copy_with mapping) ts)
-  | (TInt | TFloat | TBool | TUnit | TSelector | TPos | TAdt _) as t -> t
+  | TAdt (n, args) -> TAdt (n, List.map (copy_with mapping) args)
+  | (TInt | TFloat | TBool | TUnit | TSelector | TPos | TParam _) as t -> t
 
 let instantiate (s : scheme) : typ =
   match s.qvars with
@@ -230,6 +255,30 @@ let instantiate (s : scheme) : typ =
   | qs ->
       let mapping = List.map (fun q -> (q, fresh_tvar ())) qs in
       copy_with mapping s.sbody
+
+(* ---- G4: decl-side type-parameter substitution (§13.11 decision 6) -- *)
+
+(* Structurally identical recursion to [copy_with], but keyed by
+   string NAME (a decl's own 'a/'b binders) rather than TVar ref
+   physical identity — a genuinely separate substitution axis, not a
+   variant of copy_with. Used to instantiate a ctor's raw (TParam-
+   bearing) field types at every application/pattern/Maranget site. A
+   name absent from [mapping] is left unchanged (should not happen —
+   registration validates every TParam in a decl's fields is one of
+   its own declared params — but this stays total rather than
+   partial). *)
+let rec subst_typarams (mapping : (string * typ) list) (t : typ) : typ =
+  match t with
+  | TParam p ->
+      (match List.assoc_opt p mapping with Some ty -> ty | None -> t)
+  | TList t -> TList (subst_typarams mapping t)
+  | TArrDyn t -> TArrDyn (subst_typarams mapping t)
+  | TRef t -> TRef (subst_typarams mapping t)
+  | TArrStatic (t, n) -> TArrStatic (subst_typarams mapping t, n)
+  | TMat (t, m, n) -> TMat (subst_typarams mapping t, m, n)
+  | TTuple ts -> TTuple (List.map (subst_typarams mapping) ts)
+  | TAdt (n, args) -> TAdt (n, List.map (subst_typarams mapping) args)
+  | TInt | TFloat | TBool | TUnit | TSelector | TPos | TVar _ -> t
 
 (* ---- E3: generalization (scan-the-env, §13.10 decision 1) ----------- *)
 
@@ -241,7 +290,8 @@ let rec free_tvars (acc : typ option ref list) (t : typ)
   | TList t | TArrDyn t | TRef t | TArrStatic (t, _) | TMat (t, _, _) ->
       free_tvars acc t
   | TTuple ts -> List.fold_left free_tvars acc ts
-  | TInt | TFloat | TBool | TUnit | TSelector | TPos | TAdt _ -> acc
+  | TAdt (_, args) -> List.fold_left free_tvars acc args
+  | TInt | TFloat | TBool | TUnit | TSelector | TPos | TParam _ -> acc
 
 let scheme_free_tvars (acc : typ option ref list) (s : scheme)
     : typ option ref list =
@@ -316,6 +366,41 @@ let instantiate_fun (qs, params, ret) : typ list * typ =
 (* ADT ctor fields must be single-scoreboard-int values (§12.1 uniform
    representation): scalars and handles. TArrDyn is a (base, len) vreg
    PAIR per §3.4 so it doesn't fit one cell field — rejected in v1. *)
+(* G4: arity + type-variable-scope validator (§13.11 decision 6). A
+   SEPARATE walk from check_field_type/check_record_field_type (which
+   check representability) — its only job is: does every TAdt
+   application supply the right number of arguments, and does every
+   TParam mention belong to the enclosing decl's own param list
+   ([allowed_params], empty everywhere except while validating a type
+   decl's own ctor fields)? OCaml's exhaustiveness checker cannot find
+   missing call sites for this (a bad-arity type doesn't fail to
+   compile on its own) — call sites are audited by hand:
+   register_type_decl, register_record_decl, and build_sigs (every
+   param/return annotation). *)
+let rec check_typ_ok (allowed_params : string list) (t : typ) : unit =
+  match resolve t with
+  | TAdt (name, args) ->
+      (if Hashtbl.mem adt_decls name || Hashtbl.mem record_decls name then
+         let arity =
+           match Hashtbl.find_opt adt_decls name with
+           | Some (params, _) -> List.length params
+           | None -> 0   (* record type: always arity 0 (decision 5) *)
+         in
+         if List.length args <> arity then
+           raise (Error (Printf.sprintf
+             "type %s expects %d type argument(s), got %d"
+             name arity (List.length args))));
+        (* an unknown name is reported by the representability checker
+           that runs alongside this one; don't duplicate the message *)
+      List.iter (check_typ_ok allowed_params) args
+  | TParam p ->
+      if not (List.mem p allowed_params) then
+        raise (Error (Printf.sprintf "unbound type variable '%s" p))
+  | TList t | TArrDyn t | TRef t | TArrStatic (t, _) | TMat (t, _, _) ->
+      check_typ_ok allowed_params t
+  | TTuple ts -> List.iter (check_typ_ok allowed_params) ts
+  | TInt | TFloat | TBool | TUnit | TSelector | TPos | TVar _ -> ()
+
 let rec check_field_type (decl : string) (cname : string) (ft : typ) : unit =
   match resolve ft with
   | TVar _ -> ()
@@ -325,11 +410,16 @@ let rec check_field_type (decl : string) (cname : string) (ft : typ) : unit =
          Decl-time fields are always annotation-concrete anyway. *)
   | TInt | TFloat | TBool -> ()
   | TList _ -> ()   (* single int handle *)
+  | TParam _ -> ()
+      (* G4: a decl-side type var is representable by construction
+         (every instantiation is one int, §13.1); scope (is this name
+         actually one of THIS decl's own params?) is check_typ_ok's
+         job, run alongside this checker at every registration site. *)
   | TTuple ts ->
       (* D7: a tuple is one objpool handle, so it fits a cell field.
          Its own elements must obey the same rules. *)
       List.iter (check_field_type decl cname) ts
-  | TAdt n ->
+  | TAdt (n, args) ->
       (* D8: record types are TAdt at the type level, so a ctor field
          may reference a declared record too. *)
       if not (Hashtbl.mem adt_decls n) && not (Hashtbl.mem record_decls n)
@@ -338,6 +428,7 @@ let rec check_field_type (decl : string) (cname : string) (ft : typ) : unit =
           "type %s, constructor %s: unknown type '%s' in field — declare \
            it before this type (v1 has no forward references between \
            type declarations)" decl cname n))
+      else List.iter (check_field_type decl cname) args
   | TArrDyn _ ->
       raise (Error (Printf.sprintf
         "type %s, constructor %s: darr fields are not supported in v1 \
@@ -357,17 +448,20 @@ let rec check_field_type (decl : string) (cname : string) (ft : typ) : unit =
         "type %s, constructor %s: ref fields would break purity — \
          rejected" decl cname))
 
-let register_type_decl (name : string) (ctors : constructor list) : unit =
+let register_type_decl (name : string) (params : string list)
+    (ctors : constructor list) : unit =
   if Hashtbl.mem adt_decls name || Hashtbl.mem record_decls name then
     raise (Error ("duplicate type declaration: " ^ name));
   if String.length name = 0
      || not ((name.[0] >= 'a' && name.[0] <= 'z') || name.[0] = '_') then
     raise (Error (Printf.sprintf
       "type name '%s' must start with a lowercase letter" name));
-  (* Register the name before validating fields so self-recursive
-     fields (`type t = Leaf | Node of t * t`) resolve. On any
-     validation error compilation aborts, so partial state is moot. *)
-  Hashtbl.replace adt_decls name ctors;
+  (* Register the name (and its param list/arity) before validating
+     fields so self-recursive/self-applied fields resolve — D3,
+     extended by G4 to the param list too (`type 'a tree = Leaf | Node
+     of 'a * 'a tree` needs tree's own arity in scope while checking
+     its own fields). *)
+  Hashtbl.replace adt_decls name (params, ctors);
   List.iteri (fun tag (cname, fields) ->
     if String.length cname = 0
        || not (cname.[0] >= 'A' && cname.[0] <= 'Z') then
@@ -380,6 +474,7 @@ let register_type_decl (name : string) (ctors : constructor list) : unit =
          share one global namespace" cname
         (let (owner, _, _) = Hashtbl.find ctor_info cname in owner)));
     List.iter (check_field_type name cname) fields;
+    List.iter (check_typ_ok params) fields;
     Hashtbl.replace ctor_info cname (name, fields, tag)
   ) ctors
 
@@ -390,14 +485,20 @@ let check_record_field_type (decl : string) (fname : string) (ft : typ)
   match resolve ft with
   | TVar _ -> ()   (* Phase E: see check_field_type's TVar note *)
   | TInt | TFloat | TBool | TList _ -> ()
+  | TParam _ -> ()
+      (* G4: representable in isolation; parameterized records are
+         deferred (decision 5), so check_typ_ok — called alongside
+         this checker with an EMPTY allowed-param set — is what
+         actually rejects a bare 'a in a record field. *)
   | TTuple ts -> List.iter (check_field_type decl fname) ts
-  | TAdt n ->
+  | TAdt (n, args) ->
       if not (Hashtbl.mem adt_decls n) && not (Hashtbl.mem record_decls n)
       then
         raise (Error (Printf.sprintf
           "type %s, field %s: unknown type '%s' — declare it before \
            this type (v1 has no forward references between type \
            declarations)" decl fname n))
+      else List.iter (check_field_type decl fname) args
   | TArrDyn _ ->
       raise (Error (Printf.sprintf
         "type %s, field %s: darr fields are not supported in v1 \
@@ -442,6 +543,7 @@ let register_record_decl (name : string) (fields : (string * typ) list)
     (* a duplicate inside THIS decl is caught the same way because we
        insert as we go *)
     check_record_field_type name fname ft;
+    check_typ_ok [] ft;   (* G4: parameterized records deferred (decision 5) *)
     Hashtbl.replace record_fields fname (name, idx, ft)
   ) fields
 
@@ -504,13 +606,13 @@ let rec check_pattern (t : typ) (p : pattern) : (string * typ) list =
             | (f0, _) :: _ ->
                 (match Hashtbl.find_opt record_fields f0 with
                  | Some (owner, _, _) ->
-                     unify_msg t (TAdt owner)
+                     unify_msg t (TAdt (owner, []))
                        "record pattern requires a record scrutinee";
-                     check_pattern (TAdt owner) p
+                     check_pattern (TAdt (owner, [])) p
                  | None ->
                      raise (Error (Printf.sprintf
                        "unknown record field %s" f0))))
-       | TAdt name when Hashtbl.mem record_decls name ->
+       | TAdt (name, _) when Hashtbl.mem record_decls name ->
            let decl = Hashtbl.find record_decls name in
            (* dup fields within the pattern *)
            let rec dup = function
@@ -554,23 +656,34 @@ let rec check_pattern (t : typ) (p : pattern) : (string * typ) list =
       (match Hashtbl.find_opt ctor_info c with
        | None ->
            raise (Error ("Unknown constructor in pattern: " ^ c))
-       | Some (adt, fields, _) ->
-           (match resolve t with
-            | TVar _ ->
-                (* Phase E: the ctor names its owning type — pin the
-                   scrutinee. *)
-                unify_msg t (TAdt adt) (Printf.sprintf
-                  "constructor pattern %s requires a scrutinee of type %s"
-                  c adt)
-            | TAdt name when name = adt -> ()
-            | TAdt name ->
-                raise (Error (Printf.sprintf
-                  "constructor %s belongs to type %s but the scrutinee \
-                   has type %s" c adt name))
-            | _ ->
-                raise (Error (Printf.sprintf
-                  "constructor pattern %s requires a scrutinee of type %s"
-                  c adt)));
+       | Some (adt, raw_fields, _) ->
+           (* G4: instantiate the owner's params — mint fresh tvars and
+              pin the scrutinee if it's still unresolved, or reuse the
+              scrutinee's OWN already-known args, then substitute them
+              into raw_fields before recursing (§13.11 decision 6). *)
+           let (owner_params, _) = Hashtbl.find adt_decls adt in
+           let args =
+             match resolve t with
+             | TVar _ ->
+                 let fresh = List.map (fun _ -> fresh_tvar ()) owner_params in
+                 unify_msg t (TAdt (adt, fresh)) (Printf.sprintf
+                   "constructor pattern %s requires a scrutinee of type %s"
+                   c adt);
+                 fresh
+             | TAdt (name, args) when name = adt -> args
+             | TAdt (name, _) ->
+                 raise (Error (Printf.sprintf
+                   "constructor %s belongs to type %s but the scrutinee \
+                    has type %s" c adt name))
+             | _ ->
+                 raise (Error (Printf.sprintf
+                   "constructor pattern %s requires a scrutinee of type %s"
+                   c adt))
+           in
+           let fields =
+             List.map (subst_typarams (List.combine owner_params args))
+               raw_fields
+           in
            if List.length ps <> List.length fields then
              raise (Error (Printf.sprintf
                "constructor %s expects %d argument(s) but the \
@@ -590,12 +703,14 @@ let rec check_tuple_elem (ty : typ) : unit =
          (E8) typeable without a representability hole. *)
   | TInt | TFloat | TBool -> ()
   | TList _ -> ()
+  | TParam _ -> ()   (* G4: see check_field_type's TParam note *)
   | TTuple ts -> List.iter check_tuple_elem ts
-  | TAdt n ->
+  | TAdt (n, args) ->
       if not (Hashtbl.mem adt_decls n) && not (Hashtbl.mem record_decls n)
       then
         raise (Error (Printf.sprintf
           "tuple element of unknown type '%s'" n))
+      else List.iter check_tuple_elem args
   | TArrDyn _ ->
       raise (Error
         "tuple element: darr is not supported in v1 (a dynamic array \
@@ -709,7 +824,19 @@ let rec useful (tys : typ list) (matrix : pattern list list)
   | ty :: trest, qh :: qrest ->
       (match qh with
        | PCtor (c, ps) ->
-           let (_, fields, _) = Hashtbl.find ctor_info c in
+           let (owner, raw_fields, _) = Hashtbl.find ctor_info c in
+           (* G4: substitute the column's ACTUAL instantiation args
+              (from ty, already resolved to TAdt (owner, args) by
+              check_pattern before matrices run) into raw_fields, so
+              witnesses stay concrete (§13.11 decision 6). *)
+           let fields =
+             match resolve ty with
+             | TAdt (name, args) when name = owner ->
+                 let (params, _) = Hashtbl.find adt_decls owner in
+                 List.map (subst_typarams (List.combine params args))
+                   raw_fields
+             | _ -> raw_fields
+           in
            let ar = List.length fields in
            (match useful (fields @ trest)
                     (specialize_ctor c ar matrix) (ps @ qrest) with
@@ -740,7 +867,7 @@ let rec useful (tys : typ list) (matrix : pattern list list)
        | PRecord qfields ->
            let decl =
              match resolve ty with
-             | TAdt n when Hashtbl.mem record_decls n ->
+             | TAdt (n, _) when Hashtbl.mem record_decls n ->
                  Hashtbl.find record_decls n
              | _ ->
                  raise (Error
@@ -783,23 +910,13 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                | PCtor (c, _) :: _ -> Some c
                | _ -> None) matrix
            in
-           let try_ctor (cname, fields) =
-             let ar = List.length fields in
-             match useful (fields @ trest)
-                     (specialize_ctor cname ar matrix)
-                     (wilds ar @ qrest) with
-             | Some w ->
-                 let (wf, wr) = split_at ar w in
-                 Some (PCtor (cname, wf) :: wr)
-             | None -> None
-           in
            (* Phase E: resolve before dispatching on the column type. A
               still-unbound tvar column can only carry wild/var patterns
               (anything stronger would have bound it in check_pattern),
               so it falls to the final catch-all arm — witnesses never
               contain tvars. *)
            (match resolve ty with
-            | TAdt name when Hashtbl.mem record_decls name ->
+            | TAdt (name, _) when Hashtbl.mem record_decls name ->
                 (* D8: record column — a single always-present "ctor",
                    same shape as the TTuple arm below. *)
                 let decl = Hashtbl.find record_decls name in
@@ -824,8 +941,26 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                   (match useful trest (default_matrix matrix) qrest with
                    | Some w -> Some (PWild :: w)
                    | None -> None)
-            | TAdt name when Hashtbl.mem adt_decls name ->
-                let ctors = Hashtbl.find adt_decls name in
+            | TAdt (name, args) when Hashtbl.mem adt_decls name ->
+                let (params, ctors) = Hashtbl.find adt_decls name in
+                (* G4: substitute this column's actual instantiation
+                   args into each ctor's raw field types before
+                   specializing, mirroring E4b's TList-elem threading
+                   (§13.11 decision 6). *)
+                let mapping = List.combine params args in
+                let try_ctor (cname, raw_fields) =
+                  let fields =
+                    List.map (subst_typarams mapping) raw_fields
+                  in
+                  let ar = List.length fields in
+                  match useful (fields @ trest)
+                          (specialize_ctor cname ar matrix)
+                          (wilds ar @ qrest) with
+                  | Some w ->
+                      let (wf, wr) = split_at ar w in
+                      Some (PCtor (cname, wf) :: wr)
+                  | None -> None
+                in
                 let complete =
                   List.for_all
                     (fun (cn, _) -> List.mem cn head_ctor_names) ctors
@@ -935,6 +1070,12 @@ let build_sigs (prog : program) : unit =
   List.iter (fun d ->
     match d with
     | Fun (name, params, ret, _) ->
+        (* G4: fun signatures are the one surface-syntax annotation
+           entry point with no dedicated representability checker
+           (unlike ctor/record fields) — validate arity + type-var
+           scope here (§13.11 decision 6). *)
+        List.iter (fun (_, t) -> check_typ_ok [] t) params;
+        check_typ_ok [] ret;
         Hashtbl.replace fun_sigs name (List.map snd params, ret)
     | Val _ | TypeDecl _ | RecordDecl _ -> ()
   ) prog
@@ -965,7 +1106,12 @@ let rec infer env e =
               (* Phase D: a bare Capitalized name is a nullary ctor
                  (the parser emits Var for it — no dedicated node). *)
               (match Hashtbl.find_opt ctor_info x with
-               | Some (adt, [], _) -> TAdt adt
+               | Some (adt, [], _) ->
+                   (* G4: even a nullary ctor's owner may be
+                      parameterized (`None : 'a option`) — mint fresh
+                      args per mention (§13.11 decision 6). *)
+                   let (params, _) = Hashtbl.find adt_decls adt in
+                   TAdt (adt, List.map (fun _ -> fresh_tvar ()) params)
                | Some (_, fields, _) ->
                    raise (Error (Printf.sprintf
                      "constructor %s expects %d argument(s): write %s(...)"
@@ -1130,7 +1276,16 @@ let rec infer env e =
      top-level fun names are validated lowercase (alpha.ml), so this
      guard can't shadow a real function. *)
   | App (f, args) when Hashtbl.mem ctor_info f ->
-      let (adt, fields, _) = Hashtbl.find ctor_info f in
+      let (adt, raw_fields, _) = Hashtbl.find ctor_info f in
+      (* G4: instantiate — fresh tvars per the owner's declared params,
+         substituted into the raw (TParam-bearing) field types before
+         unifying each argument (§13.11 decision 6; mirrors E4b's
+         Nil/Cons fresh-tvar-then-unify shape). *)
+      let (params, _) = Hashtbl.find adt_decls adt in
+      let fresh = List.map (fun _ -> fresh_tvar ()) params in
+      let fields =
+        List.map (subst_typarams (List.combine params fresh)) raw_fields
+      in
       if List.length args <> List.length fields then
         raise (Error (Printf.sprintf
           "constructor %s expects %d argument(s), got %d"
@@ -1138,7 +1293,7 @@ let rec infer env e =
       List.iter2 (fun a ft ->
         unify_msg (infer env a) ft (Printf.sprintf
           "constructor %s: argument type mismatch" f)) args fields;
-      TAdt adt
+      TAdt (adt, fresh)
 
   | App (f, args) ->
       (* E3: generalized signature first (fresh instantiation per call
@@ -1307,7 +1462,7 @@ let rec infer env e =
                raise (Error (Printf.sprintf
                  "record literal of type %s is missing field %s"
                  owner f))) decl;
-           TAdt owner)
+           TAdt (owner, []))  (* G4/decision 5: records stay monomorphic *)
 
   | Field (e, f) ->
       (* D8: r.x — the 3-cmd single-field read. *)
@@ -1316,14 +1471,14 @@ let rec infer env e =
            raise (Error (Printf.sprintf "unknown record field %s" f))
        | Some (owner, _, ft) ->
            (match resolve (infer env e) with
-            | TAdt n when n = owner -> ft
-            | TAdt n when Hashtbl.mem record_decls n ->
+            | TAdt (n, _) when n = owner -> ft
+            | TAdt (n, _) when Hashtbl.mem record_decls n ->
                 raise (Error (Printf.sprintf
                   "field %s belongs to record type %s but the value \
                    has type %s" f owner n))
             | TVar _ as tv ->
                 (* Phase E: the field names its owner — pin the value. *)
-                unify_msg tv (TAdt owner) (Printf.sprintf
+                unify_msg tv (TAdt (owner, [])) (Printf.sprintf
                   ".%s requires a value of record type %s" f owner);
                 ft
             | _ ->
@@ -1366,7 +1521,7 @@ let rec infer env e =
   | Match (scrut, arms) ->
       let tscrut = infer env scrut in
       (match resolve tscrut with
-       | TAdt name
+       | TAdt (name, _)
          when not (Hashtbl.mem adt_decls name)
               && not (Hashtbl.mem record_decls name) ->
            raise (Error (Printf.sprintf
