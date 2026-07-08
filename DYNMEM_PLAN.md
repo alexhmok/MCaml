@@ -1224,7 +1224,26 @@ self-recursion with source-order generalization.
 - [ ] G1. Mutual recursion: `fun f ... and g ...`
 - [ ] G2. Nested `let rec`
 - [ ] G3. Modules / namespaces / qualified names (requires lexer fix to allow `.` in qualified names, or pick an alternative separator)
-- [ ] G4. Parameterized user type decls (`type 'a option = None | Some of 'a`) — deferred from Phase E per §13.10 decision 4; needs a `'` lexer token (currently illegal char), decl syntax, and arity-checked TAdt application. The D8 record nil-story wants this eventually.
+- [x] G4. Parameterized user type decls (`type 'a option = None | Some of 'a`) — deferred from Phase E per §13.10 decision 4; needs a `'` lexer token (currently illegal char), decl syntax, and arity-checked TAdt application. The D8 record nil-story wants this eventually.
+      (Decisions: §13.11, commit `201b09b`. Implementation: commit
+      `264801b` — `TAdt` widened to `(string, typ list)`, `TParam of
+      string` for decl-side type vars, `TYVAR` lexer token (zero
+      collisions), left-recursive postfix type application on
+      `typ_atom` (`int option`, nested, `(int*int) option`; `list`
+      joins for free, closing the E4b annotation gap), `check_typ_ok`
+      arity/scope validator, `subst_typarams` instantiation at every
+      ctor application/pattern/Maranget site. Runtime/codegen
+      untouched by construction; zero monomorphization of user types
+      (zero-clones grep passes). Baseline + all guardrails green: 5
+      canaries byte-identical, suite 66/66+async, Phase D 40/40, Phase
+      E 42/42, all 8 prior /tmp harnesses, new 22-check
+      `test_param_types` harness (15 positive + 6 rejection probes) —
+      `scripts/test_param_types.mcaml` + `/tmp/mcaml_out/
+      test_param_types.py`. Deferred as follow-ups: multi-param decls
+      like `('a, 'b) either` (G4b) and parameterized record decls like
+      `type 'a cell = { v : 'a }` (G4c) — neither needed by the D8
+      nil-story target, which only needs `node option` as a field
+      type.)
 
 ## 3. Load-bearing design decisions
 
