@@ -395,13 +395,11 @@ let analyze (cfg : cfg_func) : iv_table =
      - Skip a derived IV if any of [stride], [base], or the iv's
        basic-IV record cannot be resolved. *)
 
-(* Per-function counter is reset at the start of each [run] call. *)
 type rewrite_state = {
   defs        : (vreg, instr) Hashtbl.t;
   param_of    : (vreg, int) Hashtbl.t;   (* lv -> N for ICopy(lv, "param_N") in entry *)
   emitted     : (vreg, vreg) Hashtbl.t;  (* memoize materialize results *)
   mutable pre : instr list;              (* preheader instrs accumulated, reversed *)
-  mutable tmp : int;                     (* counter for $t_sr_<k> *)
 }
 
 (* Use the [$ref_*] prefix for materialized preheader temps so every
@@ -412,9 +410,16 @@ type rewrite_state = {
    regalloc would assign the body read a fresh [$rN] slot while the
    preheader keeps writing to the un-renamed name, dropping the
    stride on the floor. *)
-let fresh_tmp (st : rewrite_state) : vreg =
-  let n = st.tmp in
-  st.tmp <- n + 1;
+(* Global counter for preheader temps, paralleling [global_carrier].
+   Must be global (not per-function) because the generated names are
+   global scoreboard slots — if an inner loop's wrapper overwrites
+   [$ref_sr_t0] while an outer loop's body still needs it for its
+   per-iteration increment, the outer loop's stride is corrupted. *)
+let global_tmp = ref 0
+
+let fresh_tmp (_st : rewrite_state) : vreg =
+  let n = !global_tmp in
+  incr global_tmp;
   Printf.sprintf "$ref_sr_t%d" n
 
 (* Recursively reconstruct an [Inv] vreg's value in the preheader.
@@ -479,7 +484,7 @@ let mk_state (cfg : cfg_func) : rewrite_state =
     | _ -> ()
   ) header.instrs;
   { defs; param_of;
-    emitted = Hashtbl.create 16; pre = []; tmp = 0 }
+    emitted = Hashtbl.create 16; pre = [] }
 
 (* Find every block whose terminator is a self [TTail]. These are
    the latches where the carrier needs its per-iteration increment.
