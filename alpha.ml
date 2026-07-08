@@ -8,6 +8,59 @@ let new_name x =
   incr counter;
   Printf.sprintf "%s_%d" x !counter
 
+(* Validate that a top-level `val` or `fun` binder name is a valid
+   Minecraft resource location path segment: `[a-z_][a-z0-9_]*`.
+
+   MCaml's lexer accepts `[a-zA-Z_][a-zA-Z0-9_]*` for identifiers, but
+   codegen uses top-level binder names directly as:
+     - function file names       (<fun>.mcfunction, <val>_get.mcfunction,
+                                  <val>_set.mcfunction, <fun>_callN.mcfunction,
+                                  <fun>__forN__body.mcfunction, …)
+     - storage paths             (mcaml:heap __g_<val>)
+     - init-helper dispatches    (/function mcaml:init etc.)
+
+   Real Minecraft's `/function` command parser rejects any character
+   outside `[a-z0-9/._-]` in the resource location path and bails out
+   with a cryptic "expected whitespace to end one argument, but found
+   trailing data" error. Silently-dropped macro getters are the
+   classic failure mode: `__g_X_get.mcfunction` won't load, dynamic
+   array reads become no-ops, the matmul output reads as zero, and
+   the compiled model produces garbage under real Minecraft while
+   sim.py (which uses Python dict lookups) keeps working.
+
+   This check fails fast at compile time with a specific error so the
+   user doesn't discover the breakage only after packaging and
+   loading the datapack.
+
+   Let-bound names and function parameters are NOT validated here —
+   those only surface inside scoreboard slot names (`$ref_<name>_<N>`)
+   and scoreboard player names accept any non-whitespace char. *)
+let validate_toplevel_name kind name =
+  let is_valid_rest c =
+    (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c = '_'
+  in
+  let is_valid_first c =
+    (c >= 'a' && c <= 'z') || c = '_'
+  in
+  if String.length name = 0 then
+    failwith (Printf.sprintf "top-level %s has an empty name" kind)
+  else if not (is_valid_first name.[0]) then
+    failwith (Printf.sprintf
+      "top-level %s '%s': name must start with [a-z_] to produce a \
+       valid Minecraft resource location. The /function command parser \
+       accepts [a-z0-9_./-] only and silently drops functions with any \
+       uppercase character. Rename '%s' to something like '%s'."
+      kind name name (String.lowercase_ascii name))
+  else
+    String.iter (fun c ->
+      if not (is_valid_rest c) then
+        failwith (Printf.sprintf
+          "top-level %s '%s': name must be [a-z0-9_] only, but contains \
+           '%c'. Minecraft /function parser rejects it. Rename '%s' to \
+           something like '%s'."
+          kind name c name (String.lowercase_ascii name))
+    ) name
+
 (* Rename Expressions *)
 let rec g env e = 
   match e with
@@ -51,13 +104,16 @@ let rec g env e =
 (* Rename Definitions (Top Level) *)
 let h env d =
   match d with
-  | Val (name, e) -> Val (name, g env e) (* We don't rename global values in this MVP *)
+  | Val (name, e) ->
+      validate_toplevel_name "val" name;
+      Val (name, g env e) (* We don't rename global values in this MVP *)
   | Fun (name, params, ret, body) ->
+      validate_toplevel_name "fun" name;
       (* 1. Rename parameters *)
       let (params', env') = List.fold_right (fun (p, t) (ps, acc_env) ->
         let p' = new_name p in
         ((p', t) :: ps, M.add p p' acc_env)
       ) params ([], env) in
-      
+
       (* 2. Rename body using new param names *)
       Fun (name, params', ret, g env' body)
