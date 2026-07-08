@@ -342,7 +342,28 @@ let emit_term (st : state) (prefix : string) (t : terminator) : unit =
         then f ^ "__body"
         else f
       in
-      push_cmds st prefix (cmd_tail_jump target args)
+      (* The dispatch itself is emitted as `return run function …`, NOT a
+         bare `function …`. A bare dispatch does not terminate this
+         function: when the callee returns, Minecraft resumes at the next
+         line of THIS file — the other match arms / merge blocks that
+         follow the tail dispatch in emission order. Those lines are
+         guarded by conds whose physical slots the callee just clobbered
+         (a TTail has no save/restore helper by design), so they can
+         re-execute with stale truth values and corrupt $ret or any slot
+         they write (observed: count_leaves_tco under MCAML_NO_M3A
+         returned 2 instead of 5; optimized builds survived only because
+         their exit arms happened to be idempotent under re-execution).
+         `return run` (MC 1.20.5+, same baseline as tick_guard's
+         `return 0`) makes the dispatch atomically terminate the caller
+         frame, which also stops mid-loop tick_guard yields from
+         replaying every ancestor's exit arm during unwind. *)
+      let cmds =
+        match List.rev (cmd_tail_jump target args) with
+        | dispatch :: rest_rev ->
+            List.rev (("return run " ^ dispatch) :: rest_rev)
+        | [] -> []
+      in
+      push_cmds st prefix cmds
 
 (* ---- block walk ---- *)
 

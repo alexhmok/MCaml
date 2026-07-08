@@ -3308,8 +3308,48 @@ NO_UNROLL + NO_SROA). Every pass kill switch now reads through
 does NOT touch monomorphize (array-param programs need it to compile),
 tick_split, or tick_guard (server-protection mechanisms) — disable the
 tick mechanisms separately on BOTH sides of a comparison if needed.
-All three suites (66 + 40 + 42-check) verified green under sim at
-NO_M3A and at O0; default output byte-identical.
+**[LANDED 2026-07-08, same session — TTail fallthrough miscompile,
+CANARIES INTENTIONALLY MOVED]** Exhaustive O0 verification exposed a
+latent codegen bug: the TTail dispatch was a bare `function mcaml:<f>`
+line, so when the callee returned, execution fell through into the
+guarded exit-arm/merge lines that follow the dispatch in emission
+order — with guard cond slots the callee had clobbered (TTail has no
+save/restore helper). Optimized builds passed only because their exit
+arms were accidentally idempotent under re-execution; under
+MCAML_NO_M3A the phase-D suite's d05_tree_recursion returned 2 instead
+of 5 (minimal repro: count_leaves_tco — the un-copy-propagated Leaf arm
+writes `$r1 = 1` after reading it, so each ancestor frame's replay
+corrupts acc). Fix: codegen_cfg.ml emits every TTail dispatch as
+`return run function mcaml:<f>` (MC 1.20.5+, within the pack_format 41
+baseline; sim.py extended to model `return run <cmd>`). This also stops
+mid-loop tick_guard yields from replaying every ancestor's exit arm
+during unwind. Non-tail direct calls need no change: liveness's
+guard-chain pinning forces any guarded call with guarded successors
+through the save/restore helper path.
+CONSEQUENCE FOR CANARY GATES: every TCO'd function's tail-dispatch line
+gains the `return run ` prefix — that exact prefix is the ONLY change
+(verified: all five canaries + all three suite builds are byte-identical
+after stripping it). `canary_hashes_f_baseline.txt` and any other stored
+hashes must be regenerated once from a post-fix compile.
+VERIFIED (hermetic worktree at 98a5e87 + these edits only): all three
+suites (66 + 40 + 42-check + async + §4.4 post-conditions + grep pins +
+12 rejection probes) green under sim at default, NO_M3A=1, and O0=1;
+O0 output byte-identical to the six flags stacked; each individual flag
+green on the 66-check suite; repro programs correct at all three
+levels.
+IN-GAME VERIFIED 2026-07-08 (post-fix binary incl. Phase F F1–F4): all
+four dist/ packs run manually in real Minecraft — mcaml_test_suite
+(run_all ALL 66 PASSED; async_start PASS, $ret = 1800030000 across
+ticks — the sharpest probe of `return run` dispatch + tick_guard yield
+unwind in the real parser), mcaml_phase_d_suite (run_all_d ALL 40
+PASSED, $objpool_next = 0), mcaml_phase_e_suite (run_all_e ALL 42
+PASSED, $objpool_next = 0), and mcaml_phase_d_o0 (the MCAML_O0=1
+compile of the phase D suite — the exact configuration that
+miscompiled d05_tree_recursion pre-fix — ALL 40 PASSED). The canary
+hash baseline (/tmp/mcaml_out/canary_hashes_f_baseline.txt) was
+regenerated from the post-fix compiler; only test_all /
+demo_classifier / test_arr_set moved (primitives_v1 and
+stress_nested_if contain no TTail dispatches and kept their hashes).
 
 Add these environment flags in the same style as the existing
 `MCAML_NO_*` toggles (CLAUDE.md "Build & run" section):

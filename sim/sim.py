@@ -203,6 +203,14 @@ def _exec_plain(world: World, cmd: str, depth: int, macros: dict | None = None) 
     if cmd == 'return 0':
         raise _ReturnFromFunction(0)
 
+    # return run <command> — execute the command, then return from the
+    # current function (MC 1.20.5+). MCaml emits this for every TTail
+    # dispatch so the caller frame cannot fall through into the guarded
+    # lines that follow the tail call in the file.
+    if cmd.startswith('return run '):
+        _exec_line(world, cmd[len('return run '):], depth, macros)
+        raise _ReturnFromFunction(0)
+
     # say
     if cmd.startswith('say '):
         world.say.append(cmd[4:])

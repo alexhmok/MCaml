@@ -80,7 +80,7 @@ ocamlc -c ast.ml parser.mli lexer.ml parser.ml \
            codegen_helpers.ml cfg.ml cfg_build.ml \
            liveness.ml dominators.ml loop_detect.ml \
            licm.ml unroll.ml sroa.ml \
-           monomorphize.ml inline.ml \
+           monomorphize.ml inline.ml closure_spec.ml \
            const_fold.ml copy_prop.ml local_cse.ml dce.ml \
            strength_reduce.ml cost.ml optimize.ml regalloc_cfg.ml \
            codegen_cfg.ml codegen.ml tick_split.ml tick_guard.ml main.ml
@@ -88,7 +88,7 @@ ocamlc -o mcaml ast.cmo lexer.cmo parser.cmo alpha.cmo typing.cmo \
                 for_lift.cmo knormal.cmo tco.cmo codegen_helpers.cmo \
                 cfg.cmo cfg_build.cmo liveness.cmo dominators.cmo \
                 loop_detect.cmo licm.cmo unroll.cmo sroa.cmo \
-                monomorphize.cmo inline.cmo const_fold.cmo copy_prop.cmo \
+                monomorphize.cmo inline.cmo closure_spec.cmo const_fold.cmo copy_prop.cmo \
                 local_cse.cmo dce.cmo strength_reduce.cmo cost.cmo \
                 optimize.cmo regalloc_cfg.cmo codegen_cfg.cmo codegen.cmo \
                 tick_split.cmo tick_guard.cmo main.cmo
@@ -147,7 +147,7 @@ the project root to keep generated files out of the source tree.
 - Booleans are integers 0/1; `if` compares against `matches 1`.
 - Comparison binops use `execute store success score … if score …`; `Neq` uses `unless score … =`.
 - `And`/`Or` compile to scoreboard `<` (min) / `>` (max) — correct for 0/1 operands.
-- Tail recursion compiles to a direct `function mcaml:<self>` after rewriting `param_N`.
+- Tail recursion compiles to `return run function mcaml:<self>` after rewriting `param_N`. The `return run` (MC 1.20.5+) is load-bearing, not style: a bare `function` dispatch would resume THIS file's remaining lines when the callee returns — the other match arms / merge blocks after the tail call, guarded by cond slots the callee just clobbered (TTail has no save/restore helper by design). Optimized builds historically survived this fallthrough only because their exit arms happened to be idempotent under re-execution; `MCAML_NO_M3A=1` builds miscompiled (count_leaves_tco returned 2 instead of 5) until the `return run` fix landed 2026-07-08. Non-tail direct calls (zero live slots) are safe without it: liveness's guard-chain pinning forces any guarded call with guarded successors through the save/restore helper path.
 - Non-tail calls generate a per-call-site helper file `<fname>_callN.mcfunction` that saves `$r0..$r{slot_count-1}` to a storage frame, makes the call, restores, pops the frame. The caller emits a single `function mcaml:<fname>_callN` line (guard-wrappable).
 
 ## Test programs
@@ -162,7 +162,7 @@ the project root to keep generated files out of the source tree.
 
 ## Simulator
 
-Canonical location: `sim/sim.py` (checked into this repo). Copied to `/tmp/mcaml_out/sim.py` at test time by MineTorch's `validation/_harness.py` (`ensure_sim()`). A Python model of the Minecraft command subset that MCaml emits: `scoreboard players set/operation`, `execute if/unless score … matches N`, `execute store success/result`, `function mcaml:<name> [with storage …]`, `data modify storage …`, macro substitution (`$(key)`), `return 0` (tick_guard exit). Used by every test suite to verify `$ret` values and `say` outputs without running actual Minecraft.
+Canonical location: `sim/sim.py` (checked into this repo). Copied to `/tmp/mcaml_out/sim.py` at test time by MineTorch's `validation/_harness.py` (`ensure_sim()`). A Python model of the Minecraft command subset that MCaml emits: `scoreboard players set/operation`, `execute if/unless score … matches N`, `execute store success/result`, `function mcaml:<name> [with storage …]`, `data modify storage …`, macro substitution (`$(key)`), `return 0` (tick_guard exit), `return run <cmd>` (TTail dispatch). Used by every test suite to verify `$ret` values and `say` outputs without running actual Minecraft.
 
 ## Datapack packaging
 
