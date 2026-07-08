@@ -1,0 +1,453 @@
+(* mc_test_suite_phase_d.mcaml — self-checking in-Minecraft test suite
+   for the FULL Phase D feature surface: ADTs + pattern matching
+   (D1–D5, D9), list patterns (D6), tuples (D7), and records (D8).
+
+   Compiles standalone (no lib/math.mcaml needed):
+
+     ./mcaml -o build_phase_d < scripts/mc_test_suite_phase_d.mcaml
+     python3 tools/pack_datapack.py --input build_phase_d \
+         --name mcaml_phase_d_suite --output dist/mcaml_phase_d_suite.zip
+
+   In game:
+
+     /reload                        (runs mcaml:init)
+     /function mcaml:run_all_d      (synchronous suite, 40 checks)
+     /scoreboard players get $objpool_next vars   (expect 0 — §4.4 reset)
+
+   Conventions match mc_test_suite.mcaml: every check increments $pass
+   or $fail on the `vars` objective and prints `[FAIL] <name>` on
+   failure; run_all_d prints a final tally. Silence-on-pass keeps chat
+   readable. Pre-flight verifier: tools/sim_check_phase_d.py.
+
+   Compile-time behaviors (exhaustiveness/redundancy rejection, arity/
+   field/namespace typing errors, menhir conflict count) are pinned by
+   the D3 probe battery and /tmp/mcaml_out/test_tuples_records.py —
+   they cannot appear here because this file must compile. *)
+
+(* ---------- type declarations (D1–D3, D7, D8) ---------- *)
+
+type color = RedC | GreenC | BlueC
+type shape = Dot | Circle of int | Rect of int * int
+type tree = Leaf of int | Node of tree * tree
+type flagbox = Flag of bool
+type fcell = FCell of float
+type lbox = LBox of list * int
+type pbox = PBox of (int * int)
+type point = { x : int; y : int }
+type rect2 = { tl : point; br : point }
+type fpay = { w : float; scale : int }
+type inv = { slots : list; owner : int }
+type entity = Player of point | Marker
+
+(* ---------- harness helpers ---------- *)
+
+fun pass_one () : int =
+  cmd! "scoreboard players add $pass vars 1";
+  1
+
+fun fail_one () : int =
+  cmd! "scoreboard players add $fail vars 1";
+  0
+
+(* ---------- shared helpers ---------- *)
+
+fun color_code (c : color) : int =
+  match c with RedC -> 1 | GreenC -> 2 | BlueC -> 3
+
+fun area (s : shape) : int =
+  match s with
+  | Dot -> 0
+  | Circle(r) -> 3 * r * r
+  | Rect(w, h) -> w * h
+
+fun tree_sum (t : tree) : int =
+  match t with
+  | Leaf(n) -> n
+  | Node(l, r) -> tree_sum(l) + tree_sum(r)
+
+fun mk_rect (w : int, h : int) : shape = Rect(w, h)
+
+fun sum_list_m (l : list, acc : int) : int =
+  match l with
+  | [] -> acc
+  | h :: t -> sum_list_m(t, acc + h)
+
+fun build3 (a : int, b : int, c : int) : list = a :: b :: c :: []
+
+fun swap (p : int * int) : int * int =
+  match p with (a, b) -> (b, a)
+
+fun shift (p : point, d : int) : point =
+  { x = p.x + d; y = p.y }
+
+fun count_leaves_tco (t : tree, acc : int) : int =
+  match t with
+  | Leaf(_) -> acc + 1
+  | Node(l, r) -> count_leaves_tco(r, count_leaves_tco(l, acc))
+
+(* ---------- D1–D5: ADTs + pattern matching ---------- *)
+
+(* nullary-only enum: uniform {tag:k} cells, 3-way dispatch *)
+fun d01_nullary_enum () : int =
+  let v = color_code(RedC) * 100 + color_code(GreenC) * 10 + color_code(BlueC) in
+  if v = 123 then pass_one()
+  else (cmd! "say [FAIL] d01_nullary_enum"; fail_one())
+
+(* 0/1/2-field ctors through one complete-signature match; the LAST
+   ctor (Rect) is the untested else-branch — all three paths checked *)
+fun d02_ctor_field_dispatch () : int =
+  let v = area(Dot) + area(Circle(2)) + area(Rect(5, 6)) in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d02_ctor_field_dispatch"; fail_one())
+
+(* single-ctor type dispatches with zero tag reads *)
+fun d03_single_ctor () : int =
+  let v = match Flag(true) with Flag(b) -> (if b then 7 else 0) in
+  if v = 7 then pass_one()
+  else (cmd! "say [FAIL] d03_single_ctor"; fail_one())
+
+(* nested ctor-in-ctor decision tree *)
+fun d04_nested_patterns () : int =
+  let t = Node(Node(Leaf(1), Leaf(2)), Leaf(3)) in
+  let v = match t with
+    | Leaf(n) -> n
+    | Node(Leaf(a), Leaf(b)) -> a + b
+    | Node(Node(Leaf(a), Leaf(b)), Leaf(c)) -> a * 100 + b * 10 + c
+    | Node(_, _) -> -1 in
+  if v = 123 then pass_one()
+  else (cmd! "say [FAIL] d04_nested_patterns"; fail_one())
+
+(* recursive walk over a deeper tree (non-tail + tail recursion) *)
+fun d05_tree_recursion () : int =
+  let t = Node(Node(Leaf(4), Leaf(8)), Node(Leaf(15), Node(Leaf(16), Leaf(23)))) in
+  let s = tree_sum(t) in
+  let n = count_leaves_tco(t, 0) in
+  if (s = 66) && (n = 5) then pass_one()
+  else (cmd! "say [FAIL] d05_tree_recursion"; fail_one())
+
+(* int-literal patterns with a variable default arm *)
+fun d06_int_literal_arms () : int =
+  let f = match area(Circle(3)) with
+    | 0 -> 100
+    | 27 -> 200
+    | n -> n in
+  if f = 200 then pass_one()
+  else (cmd! "say [FAIL] d06_int_literal_arms"; fail_one())
+
+(* wildcard fields: binders skip unused positions *)
+fun d07_wildcard_fields () : int =
+  let v = match Rect(6, 7) with
+    | Rect(_, h) -> h
+    | _ -> -1 in
+  if v = 7 then pass_one()
+  else (cmd! "say [FAIL] d07_wildcard_fields"; fail_one())
+
+(* ADT built in a helper, matched here (handle crosses the call) *)
+fun d08_cross_function () : int =
+  let v = area(mk_rect(3, 14)) in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d08_cross_function"; fail_one())
+
+(* match dispatch inside a for loop, fresh cells per iteration *)
+fun d09_match_in_loop () : int =
+  let acc = ref 0 in
+  for i = 0 to 5 do
+    acc := !acc + (match Circle(i) with
+      | Circle(r) -> r * r
+      | _ -> 0)
+  done;
+  (* 0+1+4+9+16 = 30 *)
+  if !acc = 30 then pass_one()
+  else (cmd! "say [FAIL] d09_match_in_loop"; fail_one())
+
+(* bool ctor field survives the cell round-trip *)
+fun d10_bool_field () : int =
+  let a = match Flag(true) with Flag(b) -> (if b then 1 else 0) in
+  let z = match Flag(false) with Flag(b) -> (if b then 1 else 0) in
+  if (a = 1) && (z = 0) then pass_one()
+  else (cmd! "say [FAIL] d10_bool_field"; fail_one())
+
+(* float ctor field: Q16.16 raw value survives the cell round-trip *)
+fun d11_float_field () : int =
+  let v = match FCell(1.5) with FCell(f) -> f in
+  if (v + 2.25) = 3.75 then pass_one()
+  else (cmd! "say [FAIL] d11_float_field"; fail_one())
+
+(* list handle as a ctor field *)
+fun d12_list_in_ctor () : int =
+  let v = match LBox(build3(10, 20, 5), 7) with
+    | LBox(l, n) -> sum_list_m(l, 0) + n in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d12_list_in_ctor"; fail_one())
+
+(* ADT handle as a ctor field of another ADT *)
+fun d13_adt_in_adt () : int =
+  let v = match Node(Leaf(40), Leaf(2)) with
+    | Node(a, b) -> tree_sum(a) + tree_sum(b)
+    | Leaf(n) -> n in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d13_adt_in_adt"; fail_one())
+
+(* ---------- D6: list patterns ---------- *)
+
+(* [] vs :: dispatch on both shapes *)
+fun d14_list_dispatch () : int =
+  let e = match [] with
+    | [] -> 1
+    | _ :: _ -> 0 in
+  let c = match 5 :: [] with
+    | [] -> 0
+    | _ :: _ -> 1 in
+  if (e = 1) && (c = 1) then pass_one()
+  else (cmd! "say [FAIL] d14_list_dispatch"; fail_one())
+
+(* head/tail binders, nested cons chain *)
+fun d15_cons_binders () : int =
+  let v = match build3(4, 30, 8) with
+    | a :: b :: rest -> a + b + sum_list_m(rest, 0)
+    | _ -> -1 in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d15_cons_binders"; fail_one())
+
+(* wildcard tail: only the head cell is read *)
+fun d16_wildcard_tail () : int =
+  let v = match build3(42, 99, 99) with
+    | h :: _ -> h
+    | [] -> -1 in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d16_wildcard_tail"; fail_one())
+
+(* int-literal heads inside list patterns *)
+fun d17_int_literal_heads () : int =
+  let f = match build3(1, 2, 3) with
+    | 9 :: _ -> 100
+    | 1 :: 2 :: t -> 40 + sum_list_m(t, 0) - 1
+    | _ -> -1 in
+  if f = 42 then pass_one()
+  else (cmd! "say [FAIL] d17_int_literal_heads"; fail_one())
+
+(* tail-recursive sum written as a match (TCO fires through the arm) *)
+fun d18_list_sum_tco () : int =
+  let v = sum_list_m(10 :: 11 :: 12 :: 9 :: [], 0) in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d18_list_sum_tco"; fail_one())
+
+(* ---------- D7: tuples ---------- *)
+
+(* build + match round-trip, all fields read *)
+fun d19_tuple_roundtrip () : int =
+  let v = match (3, 4, 35) with (a, b, c) -> a + b + c in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d19_tuple_roundtrip"; fail_one())
+
+(* tuple as fun param AND return *)
+fun d20_tuple_swap () : int =
+  let (x, y) = swap((5, 47)) in
+  if x - y = 42 then pass_one()
+  else (cmd! "say [FAIL] d20_tuple_swap"; fail_one())
+
+(* destructuring let *)
+fun d21_destructuring_let () : int =
+  let (a, b) = (6, 7) in
+  if a * b = 42 then pass_one()
+  else (cmd! "say [FAIL] d21_destructuring_let"; fail_one())
+
+(* nested tuple: inner handle stored as an outer field *)
+fun d22_nested_tuple () : int =
+  let v = match ((20, 1), 21) with ((a, b), c) -> a + b + c in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d22_nested_tuple"; fail_one())
+
+(* tuple as ONE ctor field: `of (int * int)` *)
+fun d23_tuple_in_ctor () : int =
+  let v = match PBox((40, 2)) with
+    | PBox(p) -> (match p with (a, b) -> a + b) in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d23_tuple_in_ctor"; fail_one())
+
+(* ctors inside a tuple: tag dispatch under the tuple unfold *)
+fun d24_ctor_in_tuple () : int =
+  let v = match (Circle(2), Dot) with
+    | (Circle(r), Dot) -> 30 + r * r * 3
+    | (_, _) -> -1 in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d24_ctor_in_tuple"; fail_one())
+
+(* wildcard component: value correctness with elided reads *)
+fun d25_tuple_wildcard () : int =
+  let v = match (99, 42) with (_, b) -> b in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d25_tuple_wildcard"; fail_one())
+
+(* mixed element types: (list, float, int) in one cell *)
+fun d26_tuple_mixed_types () : int =
+  let v = match (build3(10, 20, 10), 1.5, 2) with
+    | (l, f, n) ->
+        (if (f + f) = 3.0 then sum_list_m(l, 0) + n else -1) in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d26_tuple_mixed_types"; fail_one())
+
+(* source-order evaluation of tuple elements (observable via ref) *)
+fun d27_tuple_eval_order () : int =
+  let c = ref 0 in
+  let t = ((c := !c + 1; !c * 10), (c := !c + 1; !c)) in
+  let v = match t with (a, b) -> a * 100 + b in
+  (* first element evaluated first: a = 10, b = 2 *)
+  if v = 1002 then pass_one()
+  else (cmd! "say [FAIL] d27_tuple_eval_order"; fail_one())
+
+(* ---------- D8: records ---------- *)
+
+(* literal + field access *)
+fun d28_record_access () : int =
+  let p = { x = 2; y = 40 } in
+  if p.x + p.y = 42 then pass_one()
+  else (cmd! "say [FAIL] d28_record_access"; fail_one())
+
+(* permuted literal stores decl-order fields *)
+fun d29_record_permuted_lit () : int =
+  let p = { y = 40; x = 2 } in
+  if p.x * 21 = 42 then pass_one()
+  else (cmd! "say [FAIL] d29_record_permuted_lit"; fail_one())
+
+(* permuted pattern fields *)
+fun d30_record_pattern () : int =
+  let v = match { x = 6; y = 36 } with { y = b; x = a } -> a + b in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d30_record_pattern"; fail_one())
+
+(* omitted fields = implicit wildcards *)
+fun d31_record_omit_fields () : int =
+  let v = match { x = 99; y = 42 } with { y = b } -> b in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d31_record_omit_fields"; fail_one())
+
+(* record as fun param AND return *)
+fun d32_record_cross_fn () : int =
+  let q = shift({ x = 2; y = 30 }, 10) in
+  if q.x + q.y = 42 then pass_one()
+  else (cmd! "say [FAIL] d32_record_cross_fn"; fail_one())
+
+(* record handle as a ctor field *)
+fun d33_record_in_ctor () : int =
+  let v = match Player({ x = 50; y = 8 }) with
+    | Player(p) -> p.x - p.y
+    | Marker -> -1 in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d33_record_in_ctor"; fail_one())
+
+(* record inside a tuple *)
+fun d34_record_in_tuple () : int =
+  let v = match ({ x = 40; y = 1 }, 1) with
+    | (p, n) -> p.x + p.y + n in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d34_record_in_tuple"; fail_one())
+
+(* record-in-record + chained field access r.tl.x *)
+fun d35_nested_record () : int =
+  let r = { tl = { x = 2; y = 4 }; br = { x = 40; y = 44 } } in
+  let w = r.br.x - r.tl.x in
+  let h = r.br.y - r.tl.y in
+  if (w = 38) && (h = 40) then pass_one()
+  else (cmd! "say [FAIL] d35_nested_record"; fail_one())
+
+(* float record field via r.w *)
+fun d36_record_float_field () : int =
+  let f = { w = 2.5; scale = 4 } in
+  if (f.w + 0.75) = 3.25 then pass_one()
+  else (cmd! "say [FAIL] d36_record_float_field"; fail_one())
+
+(* list record field *)
+fun d37_record_list_field () : int =
+  let i = { slots = build3(15, 20, 5); owner = 2 } in
+  let v = sum_list_m(i.slots, 0) + i.owner in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d37_record_list_field"; fail_one())
+
+(* source-order evaluation of a permuted record literal *)
+fun d38_record_eval_order () : int =
+  let c = ref 0 in
+  let p = { y = (c := !c + 1; !c * 10); x = (c := !c + 1; !c) } in
+  (* y's expr ran first (source order): y = 10, x = 2 *)
+  if p.x * 100 + p.y = 210 then pass_one()
+  else (cmd! "say [FAIL] d38_record_eval_order"; fail_one())
+
+(* ---------- interactions / pool stress ---------- *)
+
+(* interleaved allocation of all three cell kinds in one scope: list
+   cells, ADT cells, tuple cells, record cells share one objpool and
+   the handles stay straight *)
+fun d39_pool_interleave () : int =
+  let l1 = 1 :: [] in
+  let s = Circle(3) in
+  let t = (10, 11) in
+  let p = { x = 5; y = 6 } in
+  let l2 = 2 :: l1 in
+  let v = sum_list_m(l2, 0)          (* 3 *)
+        + area(s)                     (* 27 *)
+        + (match t with (a, b) -> b - a)   (* 1 *)
+        + p.y + p.x + area(Dot) in    (* 11 *)
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] d39_pool_interleave"; fail_one())
+
+(* match arms that themselves allocate: build a record/tuple inside an
+   arm body and consume it *)
+fun d40_alloc_in_arms () : int =
+  let v = match Circle(4) with
+    | Dot -> 0
+    | Circle(r) -> (let q = { x = r; y = r * r } in q.x + q.y * 2 - (match (q.y, 1) with (a, b) -> a - b * 5))
+    | Rect(_, _) -> -1 in
+  (* q = {4, 16}; 4 + 32 - (16 - 5) = 25 *)
+  if v = 25 then pass_one()
+  else (cmd! "say [FAIL] d40_alloc_in_arms"; fail_one())
+
+(* ---------- driver ---------- *)
+
+fun run_all_d () : int =
+  cmd! "say [MCaml phase D suite] running 40 checks...";
+  cmd! "scoreboard players set $pass vars 0";
+  cmd! "scoreboard players set $fail vars 0";
+  d01_nullary_enum();
+  d02_ctor_field_dispatch();
+  d03_single_ctor();
+  d04_nested_patterns();
+  d05_tree_recursion();
+  d06_int_literal_arms();
+  d07_wildcard_fields();
+  d08_cross_function();
+  d09_match_in_loop();
+  d10_bool_field();
+  d11_float_field();
+  d12_list_in_ctor();
+  d13_adt_in_adt();
+  d14_list_dispatch();
+  d15_cons_binders();
+  d16_wildcard_tail();
+  d17_int_literal_heads();
+  d18_list_sum_tco();
+  d19_tuple_roundtrip();
+  d20_tuple_swap();
+  d21_destructuring_let();
+  d22_nested_tuple();
+  d23_tuple_in_ctor();
+  d24_ctor_in_tuple();
+  d25_tuple_wildcard();
+  d26_tuple_mixed_types();
+  d27_tuple_eval_order();
+  d28_record_access();
+  d29_record_permuted_lit();
+  d30_record_pattern();
+  d31_record_omit_fields();
+  d32_record_cross_fn();
+  d33_record_in_ctor();
+  d34_record_in_tuple();
+  d35_nested_record();
+  d36_record_float_field();
+  d37_record_list_field();
+  d38_record_eval_order();
+  d39_pool_interleave();
+  d40_alloc_in_arms();
+  cmd! "tellraw @a [{\"text\":\"[MCaml phase D suite] pass: \",\"color\":\"green\"},{\"score\":{\"name\":\"$pass\",\"objective\":\"vars\"}},{\"text\":\"  fail: \"},{\"score\":{\"name\":\"$fail\",\"objective\":\"vars\"}}]";
+  cmd! "execute if score $fail vars matches 0 if score $pass vars matches 40 run say [MCaml phase D suite] ALL 40 PASSED";
+  cmd! "execute unless score $fail vars matches 0 run say [MCaml phase D suite] FAILURES - see [FAIL] lines above";
+  0
