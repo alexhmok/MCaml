@@ -1595,6 +1595,102 @@ matches <tag>`, decision-tree arithmetic assumes floor / and %) together
 with D9 tests.
 ```
 
+### 8.9 Phase D session 3 kickoff (D5 + D9 — pattern compiler and tests)
+
+```
+Read /Users/alexmok/MCaml/DYNMEM_PLAN.md — §2 for current status, §3 and
+§13.5 for settled design decisions, §§4–5 for the runtime ABI (§§3.2,
+4.1, 4.3–4.5, 5.1 are post-D4: unified objpool, tagged cells), §13 for
+escalation triggers. Read CLAUDE.md for the pipeline layout and the
+manual rebuild command. D4 landed in commit 1b63cd6; verify §2 agrees
+and `git status` is clean before starting.
+
+This session is D5 (pattern compiler) together with D9 (tests).
+D6/D7/D8 are OUT of scope even if they look easy from here.
+
+Settled decisions — do not relitigate:
+- Cell layout is D4's: `{tag: <ctor id>, f0, f1, ...}` in
+  `mcaml:objpool cells`, one `$objpool_next` counter. Tags are
+  per-type (D3's ctor_info assigns 0..n-1 in decl order) and are only
+  interpreted under the scrutinee's static type. Ctor tags are
+  codegen-time constants, so allocation writes the tag inside the
+  `append value {...}` literal — NO separate tag-write command (the
+  D4 precedent; ICons stayed at 5 cmds this way).
+- Match compilation reads the scrutinee's tag ONCE into a scoreboard
+  slot via a macro getter (cons_head-style single-line helper reading
+  cells[$(idx)].tag), then dispatches entirely with `execute if score
+  ... matches <tag>` — never one storage read per arm. Any arithmetic
+  the decision tree emits assumes floor / and % (vanilla-measured).
+- Typing already did exhaustiveness + redundancy (D3, full Maranget);
+  the lowering may therefore assume every match it sees is exhaustive
+  and irredundant. A defensive final else-arm falling through to the
+  last arm's body (OCaml's warning-then-bind behavior is NOT wanted —
+  matches are total by construction) or a loud in-game `say` trap is
+  acceptable; pick one and document it.
+- Lists stay on their B4–B8 fast path (ICons/IHead/ITail, nil = -1,
+  is_nil unchanged). Retiring TList onto the general ADT machinery is
+  D6, not this session.
+- Region returns of TAdt values fail loudly at codegen, exactly like
+  TArrDyn does today. The generic tag-preserving walker is future
+  work; do not attempt it here.
+
+New IR surface (this is the session that adds it — D4 added none):
+- ADT allocation, tag read, and field read need IR ops (working names
+  IAdtAlloc / ITagGet / IFieldGet; knormal kexprs to match). Follow
+  the B4/C3 checklist: side-effecting flags in dce (alloc bumps the
+  counter and writes NBT; tag/field reads share IArrGet's hidden
+  $arr_result write), identity-passthrough arms in copy_prop, inline,
+  monomorphize, unroll, regalloc_cfg, const_fold (kill dest), sroa
+  (note_use on handle operands), cost, string_of_instr. local_cse
+  rides the instr_def fallback.
+- Command budgets: IAdtAlloc = 3 + <#fields> cmds (mirrors ICons: 5 =
+  3 + 2 fields); ITagGet / IFieldGet = EXACTLY 3 each via the macro-
+  getter pattern (§5.2). Field getters are per-index files
+  (obj_f0.mcfunction, obj_f1.mcfunction, ...) plus one obj_tag file,
+  deduped by filename in main.ml like cons_head/cons_tail. Exceeding
+  any of these budgets is a §13 escalation.
+- Nullary ctors: decide the representation FIRST and document it in
+  §13.5 — the simple option is to allocate a one-field cell {tag: k}
+  uniformly (costs 3 cmds per mention, keeps tag-read uniform); the
+  optimization (immediate small-int encoding, no cell) breaks
+  tag-read uniformity and is NOT worth it unless a concrete blocker
+  appears. If you diverge from allocate-uniformly, stop and flag it.
+
+D9 scope: scripts/test_adts.mcaml + /tmp/mcaml_out/test_adts.py (same
+uncommitted-harness convention; the four existing harnesses were
+regenerated pool-name-agnostic in the D4 session and are available).
+Cover: multi-ctor variants with 0/1/2+ fields, nested patterns
+(ctor-in-ctor), wildcard and variable binders, int-literal patterns,
+match-in-function-body driven cross-function, ADT values passed to and
+returned from helpers (handle convention), and a match inside a for
+loop. Exhaustiveness/redundancy REJECTION is a typing-time behavior
+already pinned by D3's probe battery — include one compile-fail probe
+in the session log but the .py harness only runs well-typed programs.
+
+Guardrails:
+- Baseline BEFORE the first edit: rebuild per CLAUDE.md, suite green
+  (66 checks), hash the five canaries; the four /tmp harnesses must
+  be green (regenerate per §2 D4's note if /tmp was cleared again).
+- The five canaries stay byte-identical — none declare types or match.
+- Suite + all existing harnesses stay green; cons/region command
+  sequences must NOT change (D5 adds ops, it must not perturb B/C
+  lowerings): ICons 5, IHead/ITail 3, region budgets per §5.6.
+- Verify new-op budgets by CFG dump / command count on a probe
+  program before writing the D9 harness.
+- knormal's D1 ctor/Match stubs must be GONE at session end — no
+  loud-stub path may survive into a commit that claims D5 done.
+
+After the task: update §2 (and §13.5's nullary-ctor note) and commit
+with the task IDs (D5, D9 — separate commits). If you hit any §13
+escalation trigger, stop and tell me. Before writing code, confirm
+the lowering strategy (decision-tree shape, nullary representation,
+helper-file naming) and outline the planned file edits.
+
+Session 4 is then D6 (retire the TList special case onto the ADT
+machinery, or explicitly decide to keep the int-list fast path) —
+do not start it in this session.
+```
+
 ## 9. Rollback and A/B flags
 
 Add these environment flags in the same style as the existing
