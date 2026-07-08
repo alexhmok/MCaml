@@ -2632,6 +2632,171 @@ whether multi-param decls and parameterized records were deferred
 (they become G4b/G4c bullets if so).
 ```
 
+### 8.15 Phase F session 2 kickoff (F1 + F2 — lambda parser/AST + closure-conversion IR)
+
+Re-pasteable across sessions: check §2 for which F tasks are open.
+
+```
+Read /Users/alexmok/MCaml/DYNMEM_PLAN.md — §2 for current status (all
+of Phases A–E, M/N/Math, and G4 are closed; Phase F decisions landed
+in §13.12, commit `dc4f32c` — decisions ONLY, zero code changed yet).
+Read §13.12 in full before writing any code — it settles all five
+headline decisions (TFun of typ list * typ, n-ary, NO partial
+application; v1 lambda scope = first-class everywhere except stored
+in a Tuple/Record/ADT-ctor field; fun_sigs/fun_schemes need no new
+table, F4 folds into Monomorphize's existing clone key rather than a
+new phase; closure tag -2; IApply costing + MCAML_STRICT_HOT living in
+optimize.ml) with file:line citations into the current typing.ml/
+ast.ml/main.ml/cost.ml. Do NOT relitigate these. Also read §13.6
+(specialize-aggressively/fall-back-gracefully, unchanged), §13.5
+(closure cell layout {tag: -2, code, env_0, ...} in the existing
+objpool), §13.10 (Phase E decisions this builds on, esp. the tvar
+single-int amendment — a closure handle IS one int, so `'a -> 'b`
+stays sound), §13.11 (G4's TAdt/TParam widening — TFun is a THIRD
+sibling constructor, not a replacement for either), and §13 (bottom)
+for escalation triggers. Read CLAUDE.md for the pipeline and the
+manual rebuild command. Verify `git status` is clean before starting.
+
+This session is F1 + F2 ONLY — do not start F3 even if it looks easy
+from here. Everything lambda-shaped stays REJECTED at knormal/codegen
+by the end of this session (a loud stub, same posture Phase D's D1
+used for Match before D5 landed) so the full battery — main suite,
+Phase D suite, Phase E suite, all nine /tmp harnesses, five canaries —
+stays green throughout with ZERO behavioral change for lambda-free
+programs.
+
+F1 scope: `fun (params) -> e` lambda EXPRESSIONS (not top-level defs —
+`Fun` already exists), a new `Lambda` expr node, and `TFun` threaded
+through the type system. F2 scope: one uniform closure-conversion IR
+representation that treats every lambda identically (no Known/
+Escaping distinction yet — that's F3's job) — this is the shape F3's
+escape analysis will consume and F4/F5 will lower differently per
+classification.
+
+Three sub-decisions §13.12 left open (F1-implementation-time scope
+cuts, same D5/D6 protocol — settle these FIRST, document alongside
+the F1 commit, before writing the grammar):
+
+  1. Lambda parameter representation. The original F1 task line says
+     `Lambda of pattern list * expr` (destructuring params like
+     `fun (a, b) -> ...`), but every existing pattern-bearing construct
+     in this codebase (Match, destructuring-let) already needs
+     irrefutability/exhaustiveness machinery that a lambda param would
+     also need (a refutable lambda param has no failure branch to fall
+     into — there's no runtime pattern-match failure in this
+     language). Recommend the same scope cut §13.12 decision 1 made
+     for partial application: v1 lambda params are bare `(string *
+     typ) list` var binders ONLY, mirroring `Fun`'s own param grammar
+     and reusing its optional-annotation convention (E4's `ID |
+     ID COLON typ`) verbatim. Defer pattern-destructuring lambda
+     params to a mechanical follow-up. Decide and document either way
+     — if you instead implement full pattern params, you must also
+     decide irrefutability checking (probably: reuse destructuring-
+     let's existing "Maranget exhaustiveness check rejects refutable
+     patterns" path, D7 precedent).
+  2. Grammar shape. `parser.mly:116-121` shows `Fun`'s existing
+     `FUN name = ID LPAREN params = param_list RPAREN (COLON ret_type
+     = typ)? EQUAL body` production. Recommend mirroring it exactly
+     for the expr-level lambda: `FUN LPAREN params = param_list RPAREN
+     ARROW body = expr` (reusing `param_list` verbatim, no new
+     nonterminal). Check this against the EXISTING special-cased
+     region syntax at `parser.mly:273`: `REGION LPAREN FUN LPAREN
+     RPAREN ARROW body = seq_expr RPAREN { Region (ref TUnit, body) }`
+     — this already hand-unwraps a zero-param `fun () -> body` into
+     bare `body` for `Region`'s AST shape. Decide: does the new general
+     `Lambda` production subsume this (region's rule becomes `REGION
+     LPAREN e = expr RPAREN` and `main.ml`/`knormal.ml` unwrap a
+     `Lambda ([], body)` shape specially for Region), or does the
+     region rule stay a fully separate literal token sequence
+     untouched? Either way, run menhir and confirm ZERO new conflicts
+     — do not assume, per the G4 precedent (§13.11 decision 4's own
+     wording).
+  3. F2's free-variable/capture analysis vs. `for_lift.ml`.
+     `for_lift.ml` already computes free variables and lifts a nested
+     scope (a `for`-loop body) into a synthetic top-level helper by
+     threading captured variables as extra params — structurally very
+     close to what closure conversion needs to do for a lambda body.
+     Decide: does F2 reuse/extend `for_lift.ml`'s existing free-
+     variable walk (a lambda is lifted to a synthetic top-level
+     function taking its captures as extra leading params, exactly
+     like a for-loop helper, with the closure-conversion IR wrapping
+     that synthetic function name + captured values into a cell), or
+     is it a wholly separate new pass/module (e.g. `closure_convert.ml`)
+     that duplicates the free-variable computation? Recommend
+     investigating reuse first — if `for_lift.ml`'s walk cleanly
+     generalizes, it avoids a second free-variable analysis existing
+     in the codebase with its own edge cases. Document the choice and
+     why before implementing F2's IR.
+
+Facts already gathered this phase (avoid re-deriving — cite directly):
+current `typ`/`expr`/`def` full definitions, the exhaustive bodies of
+`occurs`/`tvar_bindable`/`unify`/`zonk_default`/`copy_with`/
+`free_tvars`/`string_of_typ`/`check_field_type`/`check_record_field_
+type`/`check_tuple_elem`, `fun_sigs`/`fun_schemes` population + the
+App lookup order, `main.ml`'s full phase order and the `fn_table`
+handoff between `Inline.run`/`Monomorphize.run`, `cost.ml`'s `ICall`
+pricing, `tick_guard.ml`/`tick_split.ml` summaries, the ADT tag
+numbering scheme, and the reserved-slot list — all captured with
+file:line citations in §13.12 and its drafting research; re-read
+§13.12 rather than re-running a fresh sweep.
+
+Behaviors that MUST survive (restated from §13.12's closing list):
+every §13.10/§13.11 decision incl. the tvar single-int amendment; zero
+clones for value-polymorphic non-lambda functions; the §4.4
+public-entry contract and every §4.1 reserved slot; ICons/IHead/ITail
+budgets; the D5 decision-tree shapes; the region-walker domain staying
+`TList TInt` only (verified: `TFun` automatically falls into
+`codegen_cfg.ml`'s existing untyped catch-all at line ~300/310 — a
+lambda escaping via region-return already fails loudly with zero new
+code, confirmed by direct read this phase); `for_lift`'s oracle
+degraded mode and the two-pass `main.ml` driver.
+
+Guardrails (the full battery, now carrying forward all nine /tmp
+harnesses):
+- Baseline BEFORE the first edit — already verified clean as of commit
+  `dc4f32c`; re-verify in the fresh session: rebuild per CLAUDE.md;
+  `cat lib/math.mcaml scripts/mc_test_suite.mcaml | ./mcaml -o
+  build_suite && python3 tools/sim_check_suite.py build_suite` (66/66
+  + async); `python3 tools/sim_check_phase_d.py` (40/40); `python3
+  tools/sim_check_phase_e.py` (42/42 + 12 probes); hash the five
+  canaries (`diff -rq` against a fresh compile is sufficient, no need
+  to reinvent a hashing scheme); all nine /tmp harnesses
+  (test_dyn_array, test_cons, test_regions, test_fixed_point,
+  test_adts, test_list_match, test_tuples_records, test_polymorphism,
+  test_param_types — each is self-compiling/self-running via `python3
+  /tmp/mcaml_out/<name>.py`, regenerate from its `scripts/*.mcaml`
+  source if /tmp was cleared).
+- Five canaries stay byte-identical through F1/F2 — lambda-free
+  programs must not change AT ALL (lambdas are purely additive; any
+  drift is stop-and-investigate, not a thing to special-case around).
+- Zero new menhir conflicts (verified by actually running menhir).
+- `Lambda`/`TFun` must be threaded (or deliberately, loudly rejected)
+  through every pass CLAUDE.md's module layout lists — alpha.ml,
+  for_lift.ml, typing.ml (12 functions per §13.12 decision 1),
+  knormal.ml (loud stub: "Lambda: lowering lands in F2/F3" — same
+  pattern D1 used for Match), cfg_build.ml (no change needed if
+  knormal fully stubs it). If F2 lands a real closure-conversion IR
+  form, knormal's stub moves to wherever closure conversion doesn't
+  yet handle escape classification (i.e., codegen_cfg.ml gets the
+  loud "not supported until F5" stub instead).
+- The Maranget/pattern-compiler battery (D3/D5/D6 exhaustiveness) must
+  stay untouched — lambda params are NOT patterns in v1 per
+  sub-decision 1 above (unless you deliberately chose otherwise and
+  documented why).
+
+If closure conversion or the `for_lift.ml` reuse question forces a §3
+decision to bend (e.g. §3.6 "new IR ops are opaque to all existing
+passes"), STOP and flag per §13 — do not special-case through it.
+
+After the session: update §2 with commit hashes (sub-decision
+documentation commit separate from implementation commits, same
+discipline as every prior phase), leave the tree green, and note in
+§2 which of the three open sub-decisions above were settled and how.
+Session 3 is then F3 + F4 (escape analysis between Inline and
+Monomorphize; specialization folded into Monomorphize's existing clone
+key, per §13.12 decision 3).
+```
+
 ## 9. Rollback and A/B flags
 
 Add these environment flags in the same style as the existing
