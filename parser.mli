@@ -57,6 +57,7 @@ type token =
   | EQUAL
   | EOF
   | ELSE
+  | DOT
   | DONE
   | DO
   | DIV
