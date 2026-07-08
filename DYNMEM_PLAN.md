@@ -368,7 +368,13 @@ here are load-bearing design decisions; §13 has the full rationale.
       `i ∈ [0, 10)`. Validated through `sim.py` with one extension
       (Java-style semantics for the new `%=` op: result sign matches
       dividend, truncation toward zero, matching Minecraft's own
-      `scoreboard players operation %=`). All five canaries
+      `scoreboard players operation %=`).
+      **[CORRECTED 2026-07-07]**: the trunc assumption above was
+      wrong — in-game measurement on 1.21.x (mc_test_suite t05/t08)
+      proved vanilla `/=` is floorDiv and `%=` is floorMod. sim.py
+      and const_fold.ml now implement floor; MCaml's `/` and `%` are
+      floor semantics by definition. See TODO.md "RESOLVED
+      2026-07-07" and CLAUDE.md runtime conventions. All five canaries
       byte-identical vs. pre-Phase-M HEAD; all 15 pre-existing Python
       exit-suite tests still green.
 
@@ -535,8 +541,12 @@ here are load-bearing design decisions; §13 has the full rationale.
       exact `(a * b) lsr 16`:
         - FMult: `(ka / 256) * (kb / 256)`  (matches N6 pre-shift)
         - FDiv:  `((ka * 256) / kb) * 256`  (matches N7 scale-up)
-      Both use OCaml integer division which truncates toward zero,
-      same as Java / Minecraft. Int32 overflow at any step skips the
+      Both originally used OCaml integer division (truncating).
+      **[CORRECTED 2026-07-07]**: vanilla `/=` floors (measured
+      in-game, mc_test_suite t05/t08), so these fold arms — and the
+      integer Div/Mod arms — now use `floor_div`/`floor_mod` in
+      const_fold.ml, preserving the fold/runtime byte-parity
+      invariant. Int32 overflow at any step skips the
       fold (since OCaml's 63-bit int would produce a value the
       runtime couldn't represent); the runtime instruction then fires
       as usual.
@@ -1321,6 +1331,60 @@ check whether the task's file hooks (§6) show partial edits.
 Do not assume the previous session's mental model. Re-derive from §§3–5
 what the task requires, compare against what's actually in the code, and
 tell me what you find before making any new edits.
+```
+
+### 8.7 Phase D kickoff (ADTs and pattern matching)
+
+```
+Read /Users/alexmok/MCaml/DYNMEM_PLAN.md — §2 for current status, §3 and
+§12 for settled design decisions, §§4–5 for the runtime ABI, §13 for
+escalation triggers. Read CLAUDE.md for the pipeline layout and the manual
+rebuild command. Phases A/B/C/M/N/G/Math are all complete and MineTorch is
+unblocked; verify §2 agrees and `git status` is clean before starting.
+
+We are starting Phase D: ADTs and pattern matching (tasks D1–D9).
+
+Settled decisions — do not relitigate:
+- D4 pool layout is Option (a) from §13.5: ONE unified
+  `mcaml:objpool cells` pool with tag-discriminated compound cells
+  `{tag: <ctor id>, f0, f1, ...}`, one `$objpool_next` counter, one
+  arena-reset path. The conspool→objpool migration (cons becomes
+  `{tag, h, t}`) happens in D4 itself, NOT in this session.
+- Integer `/` and `%` are FLOOR semantics (vanilla-measured; see
+  CLAUDE.md runtime conventions). Any decision-tree arithmetic the
+  pattern compiler emits must assume floor.
+- Match compilation (D5) reads the scrutinee's tag ONCE into a
+  scoreboard slot via the macro getter, then dispatches entirely with
+  `execute if score ... matches N` — never one storage read per arm.
+
+This session's scope is the FRONTEND ONLY — D1, D2, D3:
+- D1: ast.ml — `TypeDecl of string * constructor list`,
+  `Match of expr * (pattern * expr) list`, pattern variants.
+- D2: parser.mly/lexer.mll — `type t = A | B of int | C of t * t` and
+  `match e with | p -> e | ...`. Watch the seq_expr/expr split; run
+  menhir and confirm zero new conflicts.
+- D3: typing.ml — nominal type environment for declared ADTs, pattern
+  typing, exhaustiveness + redundancy checks with clear errors.
+Follow the B4/C1 stub convention: knormal.ml gets a loud failwith
+("Match: lowering lands in D5") so any Match/TypeDecl reaching the
+middle end fails fast. Add inert structural arms in alpha.ml and
+for_lift.ml (both free_vars and walk).
+
+Guardrails for this session:
+- Zero edits to knormal lowering, cfg, codegen, or any runtime file.
+- All existing outputs stay byte-identical: rebuild per CLAUDE.md, then
+  run `cat lib/math.mcaml scripts/mc_test_suite.mcaml | ./mcaml -o
+  build_suite && python3 tools/sim_check_suite.py build_suite` (must
+  print SUITE PASSED, 66 checks) plus the five canaries from §7.
+- Probe programs: a type decl + match that parses and types, an
+  inexhaustive match that fails typing with a useful message, a
+  redundant arm that warns/fails, and a well-typed match that reaches
+  the D5 knormal stub and fails loudly there.
+
+After each task: update §2 of DYNMEM_PLAN.md and commit with the task ID
+in the message. If you hit any §13 escalation trigger, stop and tell me.
+Before writing code, confirm which task you're starting and outline the
+planned file edits.
 ```
 
 ## 9. Rollback and A/B flags

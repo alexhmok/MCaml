@@ -1,0 +1,684 @@
+(* mc_test_suite.mcaml — self-checking in-Minecraft test suite for the
+   full MCaml feature surface.
+
+   Compile CONCATENATED after lib/math.mcaml (the math tests call
+   exp_fixed / log_fixed / sigmoid_fixed / tanh_fixed / gelu_fixed /
+   relu_f):
+
+     cat lib/math.mcaml scripts/mc_test_suite.mcaml | ./mcaml -o build_suite
+     python3 tools/pack_datapack.py --input build_suite \
+         --name mcaml_test_suite --output dist/mcaml_test_suite.zip
+
+   In game:
+
+     /reload                      (runs mcaml:init + __globals_init)
+     /function mcaml:run_all      (synchronous suite, 66 checks)
+     /function mcaml:async_start  (cross-tick tick_guard test)
+
+   Every check increments $pass or $fail on the `vars` objective and
+   prints `[FAIL] <name>` on failure. run_all prints a final tally and
+   an ALL PASSED / FAILURES line. Silence-on-pass keeps chat readable.
+
+   Design constraints honored here:
+   - Region blocks only appear inside run_all itself (regions are
+     restricted to public-entry functions in v1; run_all is never
+     called by another function).
+   - Every loop stays far below the per-loop tick_guard iteration
+     budget, so the whole of run_all completes synchronously in one
+     tick and every `let v = tNN() in` read of a callee result is
+     safe.
+   - MCaml's integer / and % are FLOOR semantics (floorDiv/floorMod),
+     matching vanilla scoreboard /= and %= as measured in-game
+     2026-07-07 on 1.21.x. t04/t05 and t07/t08 are fold/runtime parity
+     pairs: the folded variant pins the constant folder's answer and
+     the runtime variant routes the same operands through an
+     optimizer-opaque dynamic array so the scoreboard operator
+     actually executes. t61/t62 do the same for the Q16.16 fmul/fdiv
+     lowerings, whose internal pre-shift divisions also floor. If any
+     member of a pair fails, folded and runtime code paths have
+     diverged — a real compiler bug. *)
+
+(* ---------- global vals (Phase G) ---------- *)
+
+val gvlut = [| 10; 20; 30; 40; 50 |]
+
+val gvflut = [| 0.5; 1.0; 2.0; 4.0 |]
+
+(* ---------- harness helpers ---------- *)
+
+fun pass_one () : int =
+  cmd! "scoreboard players add $pass vars 1";
+  1
+
+fun fail_one () : int =
+  cmd! "scoreboard players add $fail vars 1";
+  0
+
+(* tolerance check for Q16.16 math-library results *)
+fun within_f (v: float, lo: float, hi: float) : int =
+  if (v >= lo) && (v <= hi) then 1 else 0
+
+(* ---------- shared test helpers ---------- *)
+
+fun add2 (a: int, b: int) : int = a + b
+
+fun mul2x (a: int) : int = a * 2
+
+fun fortytwo () : int = 42
+
+fun inc (x: int) : int = x + 1
+
+fun dbl (x: int) : int = x * 2
+
+fun classify3 (x: int) : int =
+  if x < 10 then (if x < 5 then 1 else 2)
+  else (if x < 100 then 3 else 4)
+
+fun fib (n: int) : int =
+  if n < 2 then n else fib(n - 1) + fib(n - 2)
+
+fun sum_to (n: int, acc: int) : int =
+  if n = 0 then acc else sum_to(n - 1, acc + n)
+
+fun dotp (a: arr[int, 4], b: arr[int, 4]) : int =
+  let r = ref 0 in
+  for i = 0 to 4 do
+    r := !r + (a[i] * b[i])
+  done;
+  !r
+
+fun sum_darr (a: darr, n: int) : int =
+  let acc = ref 0 in
+  for j = 0 to n do
+    acc := !acc + array_get(a, j)
+  done;
+  !acc
+
+fun fill_darr (a: darr, n: int) : int =
+  for i = 0 to n do
+    array_set(a, i, i)
+  done;
+  0
+
+fun sum_list (l: list, acc: int) : int =
+  if is_nil(l) then acc
+  else sum_list(tail(l), acc + head(l))
+
+fun build3 (a: int, b: int, c: int) : list =
+  a :: b :: c :: []
+
+fun accumf (i: int, acc: float) : float =
+  if i >= 10 then acc else accumf(i + 1, acc + 0.5)
+
+(* ==================================================================
+   integers and arithmetic
+   ================================================================== *)
+
+fun t01_arith_precedence () : int =
+  if (2 + (3 * 4)) = 14 then pass_one()
+  else (cmd! "say [FAIL] t01_arith_precedence"; fail_one())
+
+fun t02_sub_negative_result () : int =
+  if (5 - 12) = -7 then pass_one()
+  else (cmd! "say [FAIL] t02_sub_negative_result"; fail_one())
+
+fun t03_div_trunc_pos () : int =
+  if (7 / 2) = 3 then pass_one()
+  else (cmd! "say [FAIL] t03_div_trunc_pos"; fail_one())
+
+(* PARITY: compile-time-folded negative division must floor
+   (floorDiv(-7, 2) = -4), matching vanilla /=. *)
+fun t04_div_neg_folded () : int =
+  if ((-7) / 2) = -4 then pass_one()
+  else (cmd! "say [FAIL] t04_div_neg_folded (const_fold not flooring?)"; fail_one())
+
+(* PARITY: runtime scoreboard /= on negative dividend. Operands are
+   routed through a dynamic array so no optimizer pass can fold the
+   division at compile time. Vanilla floors: -7 / 2 = -4. *)
+fun t05_div_neg_runtime () : int =
+  let d = array_make(2, 0) in
+  array_set(d, 0, -7);
+  array_set(d, 1, 2);
+  if (array_get(d, 0) / array_get(d, 1)) = -4 then pass_one()
+  else (cmd! "say [FAIL] t05_div_neg_runtime (runtime /= not flooring?)"; fail_one())
+
+fun t06_mod_pos () : int =
+  if (17 % 5) = 2 then pass_one()
+  else (cmd! "say [FAIL] t06_mod_pos"; fail_one())
+
+(* PARITY: compile-time-folded negative modulo must floor
+   (floorMod(-7, 3) = 2, sign of the divisor), matching vanilla %=. *)
+fun t07_mod_neg_folded () : int =
+  if ((-7) % 3) = 2 then pass_one()
+  else (cmd! "say [FAIL] t07_mod_neg_folded (const_fold not flooring?)"; fail_one())
+
+(* PARITY: runtime scoreboard %= on negative dividend. Vanilla
+   floors: -7 % 3 = 2. *)
+fun t08_mod_neg_runtime () : int =
+  let d = array_make(2, 0) in
+  array_set(d, 0, -7);
+  array_set(d, 1, 3);
+  if (array_get(d, 0) % array_get(d, 1)) = 2 then pass_one()
+  else (cmd! "say [FAIL] t08_mod_neg_runtime (runtime %= not flooring?)"; fail_one())
+
+fun t09_mul_large () : int =
+  if (1234 * 5678) = 7006652 then pass_one()
+  else (cmd! "say [FAIL] t09_mul_large"; fail_one())
+
+(* ==================================================================
+   booleans and comparisons
+   ================================================================== *)
+
+fun t10_cmp_all_ops () : int =
+  if ((3 < 5) && (5 <= 5)) && (((6 > 2) && (2 >= 2)) && ((4 = 4) && (4 != 5)))
+  then pass_one()
+  else (cmd! "say [FAIL] t10_cmp_all_ops"; fail_one())
+
+fun t11_and_or () : int =
+  if ((1 = 2) || (2 = 2)) && ((3 = 3) || (3 = 4)) then pass_one()
+  else (cmd! "say [FAIL] t11_and_or"; fail_one())
+
+(* ==================================================================
+   control flow
+   ================================================================== *)
+
+fun t12_nested_if () : int =
+  if (((classify3(3) = 1) && (classify3(7) = 2))
+      && ((classify3(50) = 3) && (classify3(500) = 4)))
+  then pass_one()
+  else (cmd! "say [FAIL] t12_nested_if"; fail_one())
+
+fun t13_let_shadow () : int =
+  let x = 1 in
+  let x = x + 1 in
+  if x = 2 then pass_one()
+  else (cmd! "say [FAIL] t13_let_shadow"; fail_one())
+
+fun t14_seq_value () : int =
+  let v = (cmd! "scoreboard players set $t14_probe vars 1"; 5) in
+  if v = 5 then pass_one()
+  else (cmd! "say [FAIL] t14_seq_value"; fail_one())
+
+(* ==================================================================
+   functions, recursion, TCO
+   ================================================================== *)
+
+fun t15_call_chain () : int =
+  if add2(mul2x(5), mul2x(7)) = 24 then pass_one()
+  else (cmd! "say [FAIL] t15_call_chain"; fail_one())
+
+fun t16_fib_nontail () : int =
+  if fib(10) = 55 then pass_one()
+  else (cmd! "say [FAIL] t16_fib_nontail"; fail_one())
+
+fun t17_tco_sum () : int =
+  if sum_to(100, 0) = 5050 then pass_one()
+  else (cmd! "say [FAIL] t17_tco_sum"; fail_one())
+
+fun t18_zero_arg_call () : int =
+  if fortytwo() = 42 then pass_one()
+  else (cmd! "say [FAIL] t18_zero_arg_call"; fail_one())
+
+(* ==================================================================
+   for loops and refs
+   ================================================================== *)
+
+fun t19_for_sum () : int =
+  let acc = ref 0 in
+  for i = 0 to 10 do
+    acc := !acc + i
+  done;
+  if !acc = 45 then pass_one()
+  else (cmd! "say [FAIL] t19_for_sum"; fail_one())
+
+fun t20_ref_rmw () : int =
+  let c = ref 0 in
+  c := !c + 1;
+  c := !c + 1;
+  c := !c + 1;
+  if !c = 3 then pass_one()
+  else (cmd! "say [FAIL] t20_ref_rmw"; fail_one())
+
+fun t21_nested_for () : int =
+  let acc = ref 0 in
+  for i = 0 to 3 do
+    for j = 0 to 3 do
+      acc := !acc + (i * j)
+    done
+  done;
+  if !acc = 9 then pass_one()
+  else (cmd! "say [FAIL] t21_nested_for"; fail_one())
+
+(* upper bound is exclusive: `for i = 5 to 5` must run zero times *)
+fun t22_for_zero_iters () : int =
+  let acc = ref 7 in
+  for i = 5 to 5 do
+    acc := !acc + 100
+  done;
+  if !acc = 7 then pass_one()
+  else (cmd! "say [FAIL] t22_for_zero_iters"; fail_one())
+
+(* ==================================================================
+   static arrays and matrices
+   ================================================================== *)
+
+fun t23_arr_static_get () : int =
+  let a = [| 10; 20; 30; 40 |] in
+  if a[2] = 30 then pass_one()
+  else (cmd! "say [FAIL] t23_arr_static_get"; fail_one())
+
+(* 20 iterations exceeds the default unroll cap of 16, so the i % 4
+   index stays dynamic at runtime and exercises the macro getter. *)
+fun t24_arr_dyn_get () : int =
+  let a = [| 10; 20; 30; 40 |] in
+  let acc = ref 0 in
+  for i = 0 to 20 do
+    acc := !acc + a[i % 4]
+  done;
+  if !acc = 500 then pass_one()
+  else (cmd! "say [FAIL] t24_arr_dyn_get"; fail_one())
+
+fun t25_arr_static_set () : int =
+  let a = [| 0; 0; 0; 0 |] in
+  a[0] := 10;
+  a[1] := 20;
+  a[2] := 30;
+  a[3] := 40;
+  if (a[0] + a[1] + a[2] + a[3]) = 100 then pass_one()
+  else (cmd! "say [FAIL] t25_arr_static_set"; fail_one())
+
+(* dynamic-index store through the macro setter (loop too long to unroll) *)
+fun t26_arr_dyn_set () : int =
+  let a = [| 0; 0; 0; 0 |] in
+  for i = 0 to 20 do
+    a[i % 4] := i
+  done;
+  if (a[0] + a[1] + a[2] + a[3]) = 70 then pass_one()
+  else (cmd! "say [FAIL] t26_arr_dyn_set"; fail_one())
+
+fun t27_arr_rmw () : int =
+  let a = [| 0; 1; 2; 3 |] in
+  for i = 0 to 4 do
+    a[i] := a[i] + 1
+  done;
+  if (a[0] + a[1] + a[2] + a[3]) = 10 then pass_one()
+  else (cmd! "say [FAIL] t27_arr_rmw"; fail_one())
+
+(* array literal with non-constant elements (KArrLitDyn path) *)
+fun t28_arr_lit_dyn () : int =
+  let r = ref 21 in
+  let a = [| !r; (!r) * 2 |] in
+  if (a[0] + a[1]) = 63 then pass_one()
+  else (cmd! "say [FAIL] t28_arr_lit_dyn"; fail_one())
+
+fun t29_float_arr () : int =
+  let fa = [| 0.5; 1.5 |] in
+  if (fa[0] + fa[1]) = 2.0 then pass_one()
+  else (cmd! "say [FAIL] t29_float_arr"; fail_one())
+
+fun t30_mat_static () : int =
+  let m = [| [| 0; 0 |]; [| 0; 0 |] |] in
+  m[0, 0] := 1;
+  m[0, 1] := 2;
+  m[1, 0] := 3;
+  m[1, 1] := 1;
+  if (m[0, 0] + m[0, 1] + m[1, 0] + m[1, 1]) = 7 then pass_one()
+  else (cmd! "say [FAIL] t30_mat_static"; fail_one())
+
+fun t31_mat_dyn () : int =
+  let m = [| [| 0; 1 |]; [| 2; 3 |] |] in
+  let acc = ref 0 in
+  for i = 0 to 2 do
+    for j = 0 to 2 do
+      acc := !acc + m[i, j]
+    done
+  done;
+  if !acc = 6 then pass_one()
+  else (cmd! "say [FAIL] t31_mat_dyn"; fail_one())
+
+(* two call sites with distinct array literals force two monomorphized
+   clones of dotp *)
+fun t32_dotp_mono_a () : int =
+  let u = [| 1; 2; 3; 4 |] in
+  let v = [| 5; 6; 7; 8 |] in
+  if dotp(u, v) = 70 then pass_one()
+  else (cmd! "say [FAIL] t32_dotp_mono_a"; fail_one())
+
+fun t33_dotp_mono_b () : int =
+  let p = [| 2; 4; 6; 8 |] in
+  let q = [| 1; 3; 5; 7 |] in
+  if dotp(p, q) = 100 then pass_one()
+  else (cmd! "say [FAIL] t33_dotp_mono_b"; fail_one())
+
+(* ==================================================================
+   dynamic arrays (Phase A)
+   ================================================================== *)
+
+fun t34_darr_rw () : int =
+  let a = array_make(3, 0) in
+  array_set(a, 0, 10);
+  array_set(a, 1, 20);
+  array_set(a, 2, 30);
+  if (array_get(a, 0) + (array_get(a, 1) + array_get(a, 2))) = 60 then pass_one()
+  else (cmd! "say [FAIL] t34_darr_rw"; fail_one())
+
+fun t35_darr_cross_func () : int =
+  let a = array_make(10, 0) in
+  let _ = fill_darr(a, 10) in
+  if sum_darr(a, 10) = 45 then pass_one()
+  else (cmd! "say [FAIL] t35_darr_cross_func"; fail_one())
+
+(* ==================================================================
+   cons lists (Phase B)
+   ================================================================== *)
+
+fun t36_cons_head () : int =
+  let l = 1 :: 2 :: 3 :: [] in
+  if head(l) = 1 then pass_one()
+  else (cmd! "say [FAIL] t36_cons_head"; fail_one())
+
+fun t37_tail_traverse () : int =
+  let l = 10 :: 20 :: 30 :: [] in
+  if head(tail(tail(l))) = 30 then pass_one()
+  else (cmd! "say [FAIL] t37_tail_traverse"; fail_one())
+
+fun t38_is_nil_both () : int =
+  let e = [] in
+  let l = 5 :: [] in
+  let score = (if is_nil(e) then 1 else 0) + (if is_nil(l) then 0 else 2) in
+  if score = 3 then pass_one()
+  else (cmd! "say [FAIL] t38_is_nil_both"; fail_one())
+
+fun t39_list_sum_tco () : int =
+  let l = 1 :: 2 :: 3 :: 4 :: 5 :: [] in
+  if sum_list(l, 0) = 15 then pass_one()
+  else (cmd! "say [FAIL] t39_list_sum_tco"; fail_one())
+
+fun t40_list_from_helper () : int =
+  let l = build3(7, 8, 9) in
+  if sum_list(l, 0) = 24 then pass_one()
+  else (cmd! "say [FAIL] t40_list_from_helper"; fail_one())
+
+(* ==================================================================
+   global vals (Phase G)
+   ================================================================== *)
+
+fun t41_global_static_idx () : int =
+  if gvlut[3] = 40 then pass_one()
+  else (cmd! "say [FAIL] t41_global_static_idx (did __globals_init run on /reload?)"; fail_one())
+
+(* 20 iterations > unroll cap, so the i % 5 read goes through the
+   __g_gvlut_get macro getter at runtime *)
+fun t42_global_dyn_sum () : int =
+  let acc = ref 0 in
+  for i = 0 to 20 do
+    acc := !acc + gvlut[i % 5]
+  done;
+  if !acc = 600 then pass_one()
+  else (cmd! "say [FAIL] t42_global_dyn_sum"; fail_one())
+
+fun t43_global_float () : int =
+  if (gvflut[1] + gvflut[2]) = 3.0 then pass_one()
+  else (cmd! "say [FAIL] t43_global_float"; fail_one())
+
+(* ==================================================================
+   Q16.16 fixed point (Phase N)
+   ================================================================== *)
+
+fun t44_fadd () : int =
+  if (1.5 + 2.25) = 3.75 then pass_one()
+  else (cmd! "say [FAIL] t44_fadd"; fail_one())
+
+fun t45_fsub () : int =
+  if (5.0 - 1.25) = 3.75 then pass_one()
+  else (cmd! "say [FAIL] t45_fsub"; fail_one())
+
+fun t46_fneg () : int =
+  if raw_of_float(neg_f(3.5)) = -229376 then pass_one()
+  else (cmd! "say [FAIL] t46_fneg"; fail_one())
+
+fun t47_fmul_exact () : int =
+  if fmul(1.5, 2.0) = 3.0 then pass_one()
+  else (cmd! "say [FAIL] t47_fmul_exact"; fail_one())
+
+(* pre-shift precision loss is part of the spec: 0.1*0.1 -> raw 625 *)
+fun t48_fmul_lossy () : int =
+  if raw_of_float(fmul(0.1, 0.1)) = 625 then pass_one()
+  else (cmd! "say [FAIL] t48_fmul_lossy"; fail_one())
+
+fun t49_fdiv_exact () : int =
+  if fdiv(6.0, 2.0) = 3.0 then pass_one()
+  else (cmd! "say [FAIL] t49_fdiv_exact"; fail_one())
+
+fun t50_fdiv_nonexact () : int =
+  if raw_of_float(fdiv(10.0, 3.0)) = 218368 then pass_one()
+  else (cmd! "say [FAIL] t50_fdiv_nonexact"; fail_one())
+
+fun t51_float_conversions () : int =
+  if (to_int(fmul(2.5, 4.0)) = 10) && (raw_of_float(to_float(7)) = 458752)
+  then pass_one()
+  else (cmd! "say [FAIL] t51_float_conversions"; fail_one())
+
+fun t52_fcmp () : int =
+  if (1.5 < 2.5) && (neg_f(1.0) > neg_f(2.0)) then pass_one()
+  else (cmd! "say [FAIL] t52_fcmp"; fail_one())
+
+fun t53_faccum_tco () : int =
+  if accumf(0, 0.0) = 5.0 then pass_one()
+  else (cmd! "say [FAIL] t53_faccum_tco"; fail_one())
+
+(* ==================================================================
+   math library (lib/math.mcaml, Phase Math)
+   ================================================================== *)
+
+fun t54_relu () : int =
+  if (relu_f(1.5) = 1.5) && (relu_f(-2.0) = 0.0) then pass_one()
+  else (cmd! "say [FAIL] t54_relu"; fail_one())
+
+fun t55_sigmoid () : int =
+  if (within_f(sigmoid_fixed(0.0), 0.49, 0.51) = 1)
+     && (within_f(sigmoid_fixed(-2.0), 0.11, 0.13) = 1)
+  then pass_one()
+  else (cmd! "say [FAIL] t55_sigmoid"; fail_one())
+
+fun t56_tanh () : int =
+  if within_f(tanh_fixed(1.0), 0.75, 0.775) = 1 then pass_one()
+  else (cmd! "say [FAIL] t56_tanh"; fail_one())
+
+fun t57_gelu () : int =
+  if within_f(gelu_fixed(1.0), 0.83, 0.855) = 1 then pass_one()
+  else (cmd! "say [FAIL] t57_gelu"; fail_one())
+
+fun t58_exp () : int =
+  if (within_f(exp_fixed(1.0), 2.70, 2.74) = 1)
+     && (within_f(exp_fixed(0.0), 0.99, 1.01) = 1)
+  then pass_one()
+  else (cmd! "say [FAIL] t58_exp"; fail_one())
+
+fun t59_log () : int =
+  if within_f(log_fixed(2.0), 0.685, 0.70) = 1 then pass_one()
+  else (cmd! "say [FAIL] t59_log"; fail_one())
+
+(* ==================================================================
+   pipe operator
+   ================================================================== *)
+
+fun t60_pipe () : int =
+  if (5 |> inc |> dbl) = 12 then pass_one()
+  else (cmd! "say [FAIL] t60_pipe"; fail_one())
+
+(* ==================================================================
+   Q16.16 fold/runtime parity on negative operands. fmul's pre-shift
+   and fdiv's scale-up both divide via scoreboard /=, which floors,
+   so the folded results must floor identically:
+     fmul(-0.1, 0.1): floor(-6554/256) * floor(6554/256)
+                    = -26 * 25 = raw -650
+     fdiv(-10.0, 3.0): floor(-655360*256 / 196608) * 256
+                     = -854 * 256 = raw -218624
+   The runtime side routes raw operands through a dynamic array so
+   the lowered command sequence actually executes.
+   ================================================================== *)
+
+fun t61_fmul_neg_parity () : int =
+  let d = array_make(2, 0) in
+  array_set(d, 0, raw_of_float(-0.1));
+  array_set(d, 1, raw_of_float(0.1));
+  let rt = fmul(float_of_raw(array_get(d, 0)), float_of_raw(array_get(d, 1))) in
+  if (raw_of_float(rt) = -650) && (raw_of_float(fmul(-0.1, 0.1)) = -650)
+  then pass_one()
+  else (cmd! "say [FAIL] t61_fmul_neg_parity (fmul fold/runtime diverge on negatives)"; fail_one())
+
+fun t62_fdiv_neg_parity () : int =
+  let d = array_make(2, 0) in
+  array_set(d, 0, raw_of_float(-10.0));
+  array_set(d, 1, raw_of_float(3.0));
+  let rt = fdiv(float_of_raw(array_get(d, 0)), float_of_raw(array_get(d, 1))) in
+  if (raw_of_float(rt) = -218624) && (raw_of_float(fdiv(-10.0, 3.0)) = -218624)
+  then pass_one()
+  else (cmd! "say [FAIL] t62_fdiv_neg_parity (fdiv fold/runtime diverge on negatives)"; fail_one())
+
+(* ==================================================================
+   master runner — 62 test functions + 4 inline region checks = 66
+   ================================================================== *)
+
+fun run_all () : int =
+  cmd! "say [MCaml suite] running 66 checks...";
+  cmd! "scoreboard players set $pass vars 0";
+  cmd! "scoreboard players set $fail vars 0";
+  t01_arith_precedence();
+  t02_sub_negative_result();
+  t03_div_trunc_pos();
+  t04_div_neg_folded();
+  t05_div_neg_runtime();
+  t06_mod_pos();
+  t07_mod_neg_folded();
+  t08_mod_neg_runtime();
+  t09_mul_large();
+  t10_cmp_all_ops();
+  t11_and_or();
+  t12_nested_if();
+  t13_let_shadow();
+  t14_seq_value();
+  t15_call_chain();
+  t16_fib_nontail();
+  t17_tco_sum();
+  t18_zero_arg_call();
+  t19_for_sum();
+  t20_ref_rmw();
+  t21_nested_for();
+  t22_for_zero_iters();
+  t23_arr_static_get();
+  t24_arr_dyn_get();
+  t25_arr_static_set();
+  t26_arr_dyn_set();
+  t27_arr_rmw();
+  t28_arr_lit_dyn();
+  t29_float_arr();
+  t30_mat_static();
+  t31_mat_dyn();
+  t32_dotp_mono_a();
+  t33_dotp_mono_b();
+  t34_darr_rw();
+  t35_darr_cross_func();
+  t36_cons_head();
+  t37_tail_traverse();
+  t38_is_nil_both();
+  t39_list_sum_tco();
+  t40_list_from_helper();
+  t41_global_static_idx();
+  t42_global_dyn_sum();
+  t43_global_float();
+  t44_fadd();
+  t45_fsub();
+  t46_fneg();
+  t47_fmul_exact();
+  t48_fmul_lossy();
+  t49_fdiv_exact();
+  t50_fdiv_nonexact();
+  t51_float_conversions();
+  t52_fcmp();
+  t53_faccum_tco();
+  t54_relu();
+  t55_sigmoid();
+  t56_tanh();
+  t57_gelu();
+  t58_exp();
+  t59_log();
+  t60_pipe();
+  t61_fmul_neg_parity();
+  t62_fdiv_neg_parity();
+
+  (* -------- regions (Phase C) — inline because region blocks are
+     only legal in public-entry functions in v1 -------- *)
+
+  (* r01: region returning a primitive *)
+  let rg1 = region (fun () ->
+    let l = 1 :: 2 :: 3 :: 4 :: 5 :: [] in
+    sum_list(l, 0)) in
+  (if rg1 = 15 then pass_one()
+   else (cmd! "say [FAIL] r01_region_int"; fail_one()));
+
+  (* r02: region returning a list — Strategy-B deep-copy walker *)
+  let copied = region (fun () -> 10 :: 20 :: 30 :: []) in
+  (if sum_list(copied, 0) = 60 then pass_one()
+   else (cmd! "say [FAIL] r02_region_list_copyout"; fail_one()));
+
+  (* r03: nested regions (depth 0 and 1 save slots) *)
+  let rg3 = region (fun () ->
+    100 + region (fun () ->
+      let l = 7 :: 8 :: 9 :: [] in
+      sum_list(l, 0))) in
+  (if rg3 = 124 then pass_one()
+   else (cmd! "say [FAIL] r03_region_nested"; fail_one()));
+
+  (* r04: two sequential regions — second must not see stale handles *)
+  let sa = region (fun () ->
+    let l = 1 :: 2 :: 3 :: [] in
+    sum_list(l, 0)) in
+  let sb = region (fun () ->
+    let l = 4 :: 5 :: 6 :: [] in
+    sum_list(l, 0)) in
+  (if (sa + sb) = 21 then pass_one()
+   else (cmd! "say [FAIL] r04_region_sequential"; fail_one()));
+
+  (* -------- final tally -------- *)
+  cmd! "tellraw @a [\"[MCaml suite] pass=\",{\"score\":{\"name\":\"$pass\",\"objective\":\"vars\"}},\" fail=\",{\"score\":{\"name\":\"$fail\",\"objective\":\"vars\"}},\" (expected pass=66 fail=0)\"]";
+  cmd! "execute if score $fail vars matches 0 if score $pass vars matches 66 run say [MCaml suite] ALL 66 CHECKS PASSED";
+  cmd! "execute if score $fail vars matches 1.. run say [MCaml suite] FAILURES DETECTED - scroll up for [FAIL] lines";
+  cmd! "execute if score $fail vars matches 0 if score $pass vars matches ..65 run say [MCaml suite] WARNING: fewer than 66 checks ran - suite aborted early";
+  0
+
+(* ==================================================================
+   asynchronous tick_guard test — run separately from run_all.
+
+   sum(1..60000) = 1800030000. The loop body costs ~10 commands, so
+   with the default MCAML_TICK_COMMANDS=60000 budget the guard yields
+   roughly every 6000 iterations: the loop takes ~10 game ticks,
+   re-scheduling itself each time via `schedule ... 1t`. The final
+   iteration self-checks the sum and prints PASS/FAIL, and $async_done
+   flips 0 -> 1 so you can observe that the work really did span
+   multiple ticks.
+   ================================================================== *)
+
+(* The say lines below are gated on `$async_done matches 0` and the
+   done-flag is set afterwards, so the message prints exactly once.
+   Without the gate it would print once per stacked frame: codegen
+   emits the loop's exit-branch commands AFTER the self-call line, so
+   when the innermost frame takes the exit branch, every enclosing
+   frame re-executes the (guard-wrapped, now-true) exit commands as
+   the call stack unwinds. All other exit-branch effects here are
+   idempotent, so the re-execution is otherwise harmless. *)
+fun async_sum (i: int, acc: int) : int =
+  if i > 60000 then (
+    (if acc = 1800030000 then
+       cmd! "execute if score $async_done vars matches 0 run say [MCaml async] PASS: sum(1..60000) = 1800030000 across ticks"
+     else
+       cmd! "execute if score $async_done vars matches 0 run say [MCaml async] FAIL: wrong final sum - run /scoreboard players get $ret vars");
+    cmd! "scoreboard players set $async_done vars 1";
+    acc)
+  else async_sum(i + 1, acc + i)
+
+fun async_start () : int =
+  cmd! "say [MCaml async] starting sum(1..60000); yields across ticks...";
+  cmd! "scoreboard players set $async_done vars 0";
+  async_sum(1, 0)

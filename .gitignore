@@ -8,3 +8,5 @@ mcaml_noalloc
 build/
 *.mcfunction
 .DS_Store
+dist/
+__pycache__/
