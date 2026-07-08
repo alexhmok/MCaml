@@ -2021,6 +2021,54 @@ enum in a hot loop shows up in profiling (that case degenerates to ints
 and could skip the pool entirely — a typing-level optimization, not a
 cell-layout change).
 
+**[D6 list/ADT unification]**: keep the fast path, extend the pattern
+compiler to lists (option b of the D6 kickoff). The TList runtime is
+NOT retired: nil stays the free `-1` sentinel (§4.2), cons cells stay
+`{tag:1,h,t}`, ICons/IHead/ITail keep their 5/3/3 budgets (§5.1–5.2),
+`head`/`tail`/`is_nil` builtins stay for straight-line code, and the C5
+region walkers are untouched. What changes is surface only: `[]` and
+`h :: t` become valid PATTERNS on a TList scrutinee.
+
+Full retirement (option a — Nil/Cons as ordinary ctors of a declared
+list type) was rejected because it regresses committed budgets: every
+`[]` mention would allocate a `{tag:0}` cell (3 cmds + pool growth per
+mention, including once per iteration in list-building loops), `is_nil`
+would go from a 2-cmd handle compare to a 3-cmd tag read + 2-cmd
+compare, and the nil-terminated C5 walkers (which terminate on -1 with
+no cell read) would need a rewrite — a §13 escalation with no
+compensating win.
+
+Decision-tree lowering for a TList column: the two-ctor signature
+{[], ::} is discriminated by the existing Eq-against--1 compare on the
+HANDLE — no tag read, ever. A non-nil TList handle always points at a
+tag-1 cell, so the nil test alone is complete. The cons case reads its
+sub-occurrences through the existing KHead/KTail (they ARE the field
+getters, 3 cmds each), and only for sub-patterns that inspect or bind
+(a `_ :: t` pattern emits no head read — same used-fields filter as
+IFieldGet). Nil arm cost = the same 2-cmd IConst+Eq sequence is_nil
+compiles to today; the 1-cmd `matches -1` form remains the same future
+peephole B7 documented.
+
+Representation choice: dedicated `PNil` / `PCons of pattern * pattern`
+AST variants, NOT magic `PCtor ("[]"/"::")` names. Registering Nil/Cons
+in `ctor_info` would let them leak into expression typing's ctor
+fallback and allocate `{tag:0}` cells behind the sentinel ABI's back;
+dedicated variants keep the builtin list type out of the nominal-ADT
+namespace entirely, and OCaml's exhaustiveness warnings enumerate every
+pass needing a new arm (alpha, for_lift, typing, knormal).
+Exhaustiveness/redundancy go through the same Maranget matrices: TList
+columns get specialize_nil / specialize_cons (arity 0 / arity 2 with
+field types [TInt; TList TInt] — v1 monomorphic) and a two-ctor
+complete-signature test (complete iff both a `[]` and a `::` head
+appear). `match` subsumes the head/tail/is_nil idiom; the builtins
+remain as the cheaper choice only when a single field is needed
+without dispatch.
+
+Scope note: ctor-in-list patterns (`Circle(r) :: t`) are untypeable in
+v1 — B2's monomorphic int lists reject non-int heads at `::`, so no
+such list can be constructed. List-in-ctor (a TList ctor field, D3)
+works. Revisit when Phase E makes `'a list` real.
+
 Closures reuse this pool in F5. Closure cells are `{tag: $CLOSURE, code, env_field_0, env_field_1, ...}`.
 
 ### 13.6 Lambdas: specialize aggressively, fall back gracefully
