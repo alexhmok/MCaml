@@ -2390,8 +2390,8 @@ codegen so the battery stays trivially green), then F3/F4
 (escape analysis + specialization — this alone makes literal-lambda
 HOFs work end-to-end), then F5 (apply-dispatch runtime), then F6/F7.
 
-Make the DECISIONS first and document them in a new §13.11 before
-writing code (D5/D6 protocol):
+Make the DECISIONS first and document them in a new §13.12 before
+writing code (D5/D6 protocol) — §13.11 is now taken by G4's decisions:
 
   1. Arrow types — HM needs `TFun of typ list * typ` (or curried
      equivalent) in Ast.typ. Decide: n-ary uncurried (matches the
@@ -3128,6 +3128,222 @@ never contain tvars, and no '_weak1' can print. Diagnostics gain a
 messages (E8 quality checks); every PRE-EXISTING error string is
 preserved byte-for-byte by catching `Unify_fail` at each legacy call
 site and re-raising the legacy message.
+
+### 13.11 G4 decisions (parameterized user type declarations)
+
+Settled before the first edit, per the D5/D6 protocol, from a full-file
+map of typing.ml's ADT machinery (adt_decls/ctor_info/unify/occurs/
+free_tvars/copy_with/zonk_default/string_of_typ/check_pattern/useful),
+a lexer/parser grammar audit, and an exhaustive `TAdt`-occurrence sweep
+of every other module. The six decisions from the §8.14 kickoff, in
+order:
+
+**1. AST representation — widen `TAdt of string` to `TAdt of string *
+typ list`.** Confirmed by direct sweep: outside typing.ml/ast.ml,
+`TAdt` appears in exactly two places — `codegen_cfg.ml:291` (the C5
+region-return walker's "not supported in v1" `failwith` arm, where the
+name is only interpolated into a diagnostic string) and
+`parser.mly:184`/`parser.ml:2197` (the construction site, upstream of
+typing.ml). Every other pass (`knormal.ml`, `tco.ml`, `cfg_build.ml`,
+`cfg.ml`, `monomorphize.ml`, `inline.ml`, every optimizer pass,
+`regalloc_cfg.ml`, `codegen_cfg.ml`'s other arms, `codegen_helpers.ml`,
+`codegen.ml`, `alpha.ml`, `for_lift.ml`) has zero `TAdt` occurrences —
+dispatch is entirely by ctor tag (from `ctor_info`) or field count,
+never by inspecting the type's name or args. So the blast radius is:
+one mechanical `TAdt name -> TAdt (name, _)` edit in codegen_cfg.ml,
+real grammar work in parser.mly (decision 4), and the full
+typing.ml rewrite (decision 6). Inside typing.ml, 22 non-comment code
+sites reference `TAdt` today; every one becomes a `TAdt (n, args)` or
+`TAdt (n, _)` arm. Five of them — `occurs:119`, `tvar_bindable:134`,
+`zonk_default:201`, `copy_with:225`, `free_tvars:244` — currently read
+`TAdt _` as a payload wildcard that *already compiles* against the
+widened type without edits (OCaml's `_` swallows the new tuple field
+too), which means the exhaustiveness checker will NOT force fixing
+them. They must be found by grep (`grep -n "TAdt _" typing.ml`) and
+edited deliberately: `occurs`/`free_tvars`/`copy_with`/`zonk_default`
+need a real `TAdt (_, args) -> List.exists/fold_left/map (recurse)
+args` arm (mirroring the existing `TTuple ts` arms) instead of the
+no-op catch-all, or a generalized function's args silently stop
+scanning for free tvars / stop getting zonked. `tvar_bindable` stays a
+true wildcard (`TAdt _ -> None` — always representable, args
+irrelevant, since every instantiation is one handle per §13.1).
+
+**2. Decl-side type variables — dedicated `TParam of string`, NOT a
+reused `TVar ref`.** `'a` in `Some of 'a` is a binder scoped to its
+own decl, not a unification variable — destructively binding a shared
+`TVar ref` across every use of `Some` would corrupt the decl for every
+other call site. `TParam` is legal only where a substitution pass
+(below) is guaranteed to eliminate it before the value reaches `unify`;
+`unify` gets an explicit arm `TParam _, _ | _, TParam _ -> raise
+(Error "internal: unsubstituted type parameter reached unification —
+this is a compiler bug")` immediately before the catch-all
+`Unify_fail`, so a substitution bug fails loudly with a distinct
+message instead of a confusing generic mismatch. `tvar_bindable` and
+the three representability checkers (`check_field_type`,
+`check_record_field_type`, `check_tuple_elem`) accept `TParam _`
+unconditionally where legal (single-int amendment guarantees
+soundness) and reject it via the new arity/scope checker (decision 6)
+everywhere it is NOT legal.
+
+`adt_decls`' value widens from `constructor list` to `string list *
+constructor list` (params in declared order, `[]` for today's
+non-parameterized decls) — no new parallel table, per the kickoff's
+own framing. `register_type_decl` registers the (params, ctors) pair
+BEFORE the field-validation loop (unchanged D3 self-reference
+ordering), so a self-referential application (`type 'a tree = Leaf |
+Node of 'a * 'a tree`) resolves `tree`'s own arity while validating its
+own fields.
+
+**3. Lexer — `TYVAR of string`, zero collisions found.** Audited every
+use of `'` in lexer.mll: string-literal rules key on `"` exclusively,
+`cmd!` is a bare keyword match, selector's `[^ ']']` is a bracket-close
+char literal not an apostrophe, and FLOAT/DOT don't reference `'` at
+all. The character is simply unhandled today (falls to the `_`
+catch-all raising `SyntaxError`), and ocamllex's longest-match
+semantics mean a new rule wins regardless of where it's declared. New
+rule: `let tyvar = '\'' ['a'-'z' 'A'-'Z' '0'-'9' '_']*` (reusing ID's
+own continuation class verbatim) plus `| tyvar { TYVAR (Lexing.lexeme
+lexbuf) }` beside the `id` arm; `%token <string> TYVAR` beside `ID`/
+`STRING`/`SELECTOR` in parser.mly. The token payload keeps the leading
+quote (`"'a"`); parser actions strip it (`String.sub tv 1 (String.length
+tv - 1)`) when building `TParam`/the decl's param-name list, so stored
+names are bare (`"a"`) and comparisons (`List.mem p allowed_params`)
+stay consistent.
+
+**4. Type application surface syntax — left-recursive postfix on
+`typ_atom`, single param only, `list` joins it.** `typ_atom` gains two
+new left-recursive arms: `t = typ_atom; name = ID { TAdt (name, [t]) }`
+(user-type application) and `t = typ_atom; T_LIST { TList t }` (closes
+the E4b annotation gap — decision 5, folded in here since it's the
+same grammar shape), alongside the existing bare arms (`name = ID {
+TAdt (name, []) }`, `T_LIST { TList TInt }` for back-compat) and a new
+terminal arm `v = TYVAR { TParam (strip v) }`. Because `ctor_typs` and
+`star_typ_list`/`typ` both bottom out in `typ_atom` already (confirmed
+by grammar audit — `ctor_typs: typ_atom (TIMES typ_atom)*`, `typ :=
+star_typ_list := typ_atom (TIMES typ_atom)*`), this single grammar
+change covers ctor fields (`Some of 'a`, `Box of 'a option`), record
+fields, tuple elements (`(int * int) option` via the existing `LPAREN
+typ RPAREN` atom), and fun signatures for free — no separate arm
+needed per position. Nesting (`int option option`) and parenthesized
+compound args (`(int * int) option`) fall out of the same left
+recursion with zero extra grammar. The type DECL's own AST widens:
+`TypeDecl of string * constructor list` -> `TypeDecl of string *
+string list * constructor list` (param names in decl order, `[]` for
+non-parameterized decls); LHS grammar gains `TYPE tv = TYVAR name = ID
+EQUAL opt_bar ctors = ctor_list { TypeDecl (name, [strip tv], ctors)
+}` beside the existing 0-param production. v1 scope: **single param
+only** — `('a, 'b) either`-style multi-param decls and multi-arg
+application (`(int, bool) t`) are OUT OF SCOPE, deferred as a
+mechanical follow-up (G4b). One consequence worth naming: because each
+postfix step contributes at most one argument, there is no v1-legal
+syntax for "supplying 2 args to a 1-ary type" (true N-ary
+over-application needs the deferred multi-arg surface) — the
+over-application exit-test probe is realized instead as supplying an
+argument to an ARITY-0 type (e.g. `int color` where `color` has no
+declared params), which the decision-6 arity checker rejects the same
+way. Zero-new-menhir-conflicts is verified at implementation time (two
+new left-recursive `typ_atom` arms distinguished from the existing
+TIMES-recursion by trailing token — ID/T_LIST vs TIMES — should
+LALR(1)-disambiguate on one token of lookahead, but this is confirmed
+by actually running menhir, not assumed).
+
+**5. `list` joins the postfix grammar now; parameterized records are
+deferred.** Folded into decision 4 above: `T_LIST`'s existing hardwire
+to `TList TInt` stays for the bare keyword (back-compat — every
+existing `list`-annotated program keeps meaning `int list`), and the
+new postfix arm makes `float list`/`bool list`/`t list` writable,
+closing the E4b probe gap where `shape list` was unparseable.
+Parameterized RECORD decls (`type 'a cell = { v : 'a }`) are
+explicitly DEFERRED — `register_record_decl`'s field-validation loop
+calls the decision-6 arity/scope checker with an EMPTY allowed-param
+set, so any `'a` mentioned in a record field type is rejected with the
+same "type variable not allowed here" message as any other non-decl
+context. This is sufficient for the D8 nil-story target
+(`type node = { v : int; next : node option }` needs `option` to be
+generic, not `node` — `node` itself stays a monomorphic record, which
+already works once ADT application lands).
+
+**6. Typing mechanics.**
+- **Arity + scope validation**: new recursive `check_typ_ok
+  (allowed_params : string list) (t : typ) : unit`. `TAdt (name,
+  args)` arm: existing unknown-name check (unchanged message), then
+  arity = `match Hashtbl.find_opt adt_decls name with Some (ps, _) ->
+  List.length ps | None -> 0` (covers records and the not-found case,
+  which the unknown-name check already rejected), `List.length args <>
+  arity` raises `"type %s expects %d type argument(s), got %d"`
+  (mirrors the existing ctor-arity message at :1135-1137), then
+  recurses `check_typ_ok` into each arg. `TParam p` arm: `List.mem p
+  allowed_params` else raise `"unbound type variable '%s"`. Every
+  other constructor (`TList`/`TArrDyn`/`TRef`/`TArrStatic`/`TMat`/
+  `TTuple`) recurses into its wrapped type(s); scalars/`TVar` are a
+  no-op. Call sites: `register_type_decl`'s field loop passes THIS
+  decl's own param names as `allowed_params` (so self-application and
+  the decl's own `'a` both validate); `register_record_decl`'s field
+  loop and `build_sigs`'s per-param/return-type calls (typing.ml:938)
+  both pass `[]`. This is a genuinely NEW validation axis (arity was
+  structurally impossible to get wrong before TAdt carried args), so
+  unlike the mechanical `TAdt` pattern-arm churn, OCaml's exhaustiveness
+  checker cannot find missing call sites — audit every place a
+  parser-produced `typ` enters the system (ctor fields, record fields,
+  fun params/return; tuple/ctor-application-inferred types are
+  excluded, since those are built FROM already-validated types and
+  can't smuggle in a bad arity) and confirm via the exit-test
+  rejection probes, not via compiler errors.
+- **Ctor APPLICATION** (`Some(e)`, and the bare-nullary-ctor `Var`
+  case): new `instantiate_ctor (owner : string) (fields : typ list) :
+  typ list * typ list` — `let (params, _) = Hashtbl.find adt_decls
+  owner in let fresh = List.map (fun _ -> TVar (ref None)) params in
+  (List.map (subst_typarams (List.combine params fresh)) fields,
+  fresh)`. Both call sites (`infer`'s ctor-`App` arm :1132-1141 and the
+  nullary-ctor `Var` arm :966-972) replace the raw `fields`/bare `TAdt
+  adt` with the substituted fields / `TAdt (adt, fresh)`, mirroring
+  E4b's `Cons`/`Nil` fresh-tvar-then-unify shape exactly (E4b is the
+  precedent: `Nil -> TList (fresh_tvar ())`, generalized here from
+  TList's one hardcoded slot to N user-declared params).
+- **Ctor PATTERN** (`PCtor`, check_pattern:553-579): mint-and-unify
+  when the scrutinee is an unresolved `TVar` (same fresh-tvar
+  instantiation as above, then `unify scrutinee (TAdt (adt, fresh))`),
+  or reuse-in-place when the scrutinee already resolves to `TAdt (name,
+  args)` with `name = adt` (`List.combine params args` directly, no
+  minting — this is the scrutinee's ALREADY-KNOWN instantiation).
+  Either way, `fields` gets substituted before the existing
+  `List.map2 check_pattern fields ps` recursion, so `Some(x)` against
+  an `int option` scrutinee binds `x : int`, not the generic `'a`.
+- **`subst_typarams`**: new function, `(string * typ) list -> typ ->
+  typ`, structurally mirroring `copy_with`'s recursion shape (scalars/
+  `TVar` unchanged, `TList`/`TTuple`/etc. recurse) but keyed by string
+  NAME (`List.assoc`) rather than `TVar option ref` physical identity
+  — a genuinely separate function from `copy_with`, not a variant of
+  it, because the two substitution axes (scheme qvars vs. decl
+  params) are unrelated. `TAdt (n, args) -> TAdt (n, List.map (subst
+  mapping) args)` — decl params can appear nested inside another
+  applied type (`Box of 'a option`).
+- **Maranget** (`useful`): the `PCtor` arm (:710-719) and the
+  `PWild|PVar`/`TAdt` branch (:827-850) both currently thread
+  `ctor_info`'s raw, unsubstituted `fields` straight through — same
+  gap E4b closed for `TList` by binding `elem` right at the `TList
+  elem ->` match arm and threading it into `specialize_nil`/
+  `specialize_cons`. Here: the column's type `ty` is already resolved
+  to `TAdt (name, args)`; build `List.combine (fst (Hashtbl.find
+  adt_decls name)) args` and `subst_typarams` it into `fields` before
+  passing to `specialize_ctor`/the recursive `useful` call, so
+  witnesses stay concrete (`Some(_)` against `int option`, never
+  `Some('a)`). The complete-signature test (:829-831) is UNCHANGED —
+  it keys on ctor NAMES from `adt_decls`, and a type's constructor set
+  doesn't change with instantiation args.
+- **Records stay monomorphic** (decision 5): every record
+  construction/pattern/field-access site keeps building `TAdt (owner,
+  [])` — a literal empty list, never inferred — so D7/D8's existing
+  zero-tag-read dispatch guarantees are untouched by construction.
+
+Behaviors pinned unchanged: every §13.10/§13.5 decision, zero
+monomorphization of user types (a generalized function using `'a
+option` compiles once — no per-instantiation clones, verified by the
+same zero-clones grep E8's harness already runs), tags stay
+decl-order-per-type, D5's decision-tree shapes, one global ctor/field
+namespace, D3's decl-before-use ordering, and every pre-existing error
+message byte-for-byte (arity/unbound-tyvar errors are NEW messages,
+not replacements).
 
 ## 13. Escalation triggers
 
