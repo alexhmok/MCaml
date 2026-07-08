@@ -1078,8 +1078,37 @@ default to TInt at the knormal boundary, annotations optional-but-
 checked (return annotations become CHECKED — a strengthening), monotype
 self-recursion with source-order generalization.
 
-- [ ] E1. `ast.ml`: extend `typ` with `TVar of typ option ref` (schemes stay OUT of typ per §13.10 decision 2)
-- [ ] E2. `typing.ml`: rewrite `infer` as unification-based, replacing the current equality checker (annotations still required; every behavior + error string preserved; battery green + canaries byte-identical)
+- [x] E1. `ast.ml`: extend `typ` with `TVar of typ option ref` (schemes stay OUT of typ per §13.10 decision 2)
+      (One-line variant addition, commit `634a792` together with E2.
+      Zero non-exhaustive-match fallout outside typing.ml — every
+      downstream pass matches typ with catch-alls, confirming the
+      "knormal and below never see a TVar" boundary needs no new
+      defensive arms.)
+- [x] E2. `typing.ml`: rewrite `infer` as unification-based, replacing the current equality checker (annotations still required; every behavior + error string preserved; battery green + canaries byte-identical)
+      (Commit `634a792`. Engine: `resolve` (path compression), `occurs`,
+      `unify` + `Unify_fail`, `unify_msg` (legacy-string preservation),
+      `unify_types` (E8-quality default naming both types),
+      `zonk_default` (deep resolve, unbound → TInt — the E6 boundary
+      helper, already wired into the Region typ-ref write),
+      `string_of_typ` with stable 'a/'b tvar naming, env-side
+      `scheme`/`mono`/`instantiate` with a shadowing public `infer`
+      wrapper so main.ml/for_lift signatures are untouched. Every
+      equality check in infer/check_pattern routed through unify with
+      its exact pre-E error string (ten-message probe battery verified,
+      incl. both D3 witness shapes). check_pattern + `useful` resolve
+      types before dispatch; TVar-scrutinee pinning arms added for
+      ctor/record/tuple patterns and `r.x` (inert until E4 — no surface
+      syntax mints a tvar yet). One internal-op arm: FMult/FDiv BinOps
+      keep the generic rejection the old catch-all gave them.
+      **§13.10 amendment (documented in-code and below)**: tvars only
+      bind to single-scoreboard-int types — `tvar_bindable` rejects
+      TArrDyn/TArrStatic/TMat/TRef/TUnit/TSelector/TPos with an
+      annotate-explicitly message, closing the "generalized
+      `fun pair_up(x) = (x, 0)` applied to a darr silently drops the
+      length vreg" miscompile hole; non-uniform params keep requiring
+      annotations exactly as today. Full battery green: suite 66/66 +
+      async, Phase D 40/40, all seven /tmp harnesses, five canaries
+      byte-identical.)
 - [ ] E3. Let-generalization at `let` bindings; instantiation at uses (syntactic-value restriction per §13.10 decision 3)
 - [ ] E4. Annotations on `fun` params and return types become optional (parser: `param := ID | ID COLON typ`, optional return; omitted → `TVar (ref None)`; zero new menhir conflicts; return annotations become checked)
 - [ ] E4b. Lift B2's monomorphic-list restriction to 'a list (Nil/Cons/head/tail/is_nil generic; PCons/PNil + Maranget list column carry the element type; `list` annotation keyword still means `TList TInt`; region-return of `TList` non-int keeps failing loudly at codegen)
@@ -2738,6 +2767,22 @@ are minted fresh per oracle call and the AST carries no types — the
 one shared mutable (the Region typ ref) is unreachable inside for
 bodies because region-in-helper is already rejected at main.ml
 (C3 public-entry check).
+
+**Amendment (discovered in E2): tvars range over single-int types
+only.** Uniform representation (§13.1) covers scalars and handles, but
+NOT `TArrDyn` (a base+len vreg PAIR), `TArrStatic`/`TMat` (compile-time
+storage and the monomorphize template trigger), `TRef` (global slot,
+second-class), or `TUnit`/`TSelector`/`TPos`. If a tvar could bind to
+those, a generalized `fun pair_up(x) = (x, 0)` applied to a darr would
+type-check and then silently drop the length vreg at the KAdtAlloc.
+`unify`'s bind case therefore rejects those types with "cannot infer a
+polymorphic type for a &lt;kind&gt; value … annotate the parameter
+explicitly". Consequence: darr/static-array/matrix/ref params keep
+requiring explicit annotations (exactly as they do today — `darr`, `arr
+[int, n]`, `ref int` keywords), and the three representability checkers
+(ctor fields, record fields, tuple elements) can soundly accept an
+unbound tvar, which is what keeps E8's tuple-polymorphic swap typeable
+without a representability hole.
 
 **Match analysis under tvars (D3 preservation).** check_pattern becomes
 unification-based (a PInt column unifies the scrutinee type with TInt,
