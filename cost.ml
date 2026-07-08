@@ -14,6 +14,21 @@
 
 open Cfg
 
+(* Phase F / F5: whole-program constant for the IApply cost formula
+   (§13.12 decision 5: "4 + 2 * K_max_captured"). Set once by main.ml
+   right after closure_layout.ml computes it (which itself runs right
+   after Closure_spec.run, before the Phase 3 loop that consults this
+   module) — every [estimate]/[estimate_block]/[estimate_func] call
+   during Phase 3 then sees the correct value. Stays 0 (the pre-F5
+   placeholder) for any program with no closures at all, matching the
+   old hardcoded constant on every canary. This is the one piece of
+   mutable state in an otherwise pure cost model; a program-wide
+   constant computed once before Phase 3 and read (never rewritten)
+   for the rest of the run is the same shape as [Cfg.o0]/[pass_disabled]
+   already use elsewhere, just local to this module because nothing
+   else needs it. *)
+let k_max_captured = ref 0
+
 let is_comparison (op : Ast.binop) : bool =
   let open Ast in
   match op with
@@ -76,22 +91,24 @@ let estimate (i : instr) : int =
      placeholder estimate here is 3 for the exit. *)
   | IRegionEnter _              -> 2
   | IRegionExit _               -> 3
-  (* Phase F closure ops. IClosureMake commits to no runtime allocation
-     of its own at this IR level (see cfg.ml) — costed at 0 here; any
-     instance surviving to codegen is Escaping and F5 will need to give
-     it a real cost once it has a real lowering. IApply's decision-5
+  (* Phase F closure ops (F5). IClosureMake now has a real, exactly-known
+     lowering (cmd_closure_make) whenever an instance survives to
+     codegen — priced identically to IAdtAlloc just above (3 + #fields),
+     since a closure cell IS an objpool alloc, just with env_<k> fields
+     instead of f<k> and a fixed tag. Whether an instance survives at
+     all is closure_spec.ml's call (Known instances get rewritten away
+     before this model ever runs on them, same as before F5); this arm
+     only prices what's actually left in the block. IApply's decision-5
      price is "4 + 2 * K_max_captured", a single whole-program constant
      over every Escaping closure's *capture count* (invisible at an
      individual IApply site — captures live inside the closure cell,
      not in this op's own arg list, so args here are ordinary call
-     arguments and must not be conflated with captures). Computing
-     K_max_captured is F5's job (it requires enumerating every
-     surviving Escaping closure shape first); a fixed conservative
-     placeholder of 4 (K_max_captured=0) stands in until then — this
-     arm exists for exhaustiveness only, since closure_spec.ml's F3+F4
-     resolves every lambda this session's test battery reaches. *)
-  | IClosureMake _               -> 0
-  | IApply _                     -> 4
+     arguments and must not be conflated with captures). K_max_captured
+     is set once by main.ml (via [k_max_captured] above) right after
+     closure_layout.ml enumerates every surviving Escaping closure
+     shape. *)
+  | IClosureMake (_, _, caps)    -> 3 + List.length caps
+  | IApply _                     -> 4 + 2 * !k_max_captured
 
 (* Terminator cost. [TTail] lowers to [len(args)] param renames plus
    one [function mcaml:<f>] dispatch. The other terminators are

@@ -224,6 +224,42 @@ let () =
     let no_closure_spec = Cfg.pass_disabled "MCAML_NO_CLOSURE_SPEC" in
     if not no_closure_spec then Closure_spec.run fn_table;
 
+    (* Phase F5: whole-program closure-shape table. Computed right after
+       Closure_spec.run per §13.12 decision 5's own framing ("after F3's
+       whole-program escape analysis has enumerated every Escaping
+       closure shape") — every IClosureMake still in fn_table at this
+       point is either genuinely Escaping or budget-exceeded; Known
+       instances were already rewritten away above. Ordering relative to
+       Monomorphize.run below doesn't matter (monomorphize never touches
+       TFun/closure machinery, decision 3). Empty (zero codes) on any
+       program with no closures at all — every downstream consumer treats
+       that as a no-op, so canary programs are unaffected.
+
+       Deliberately NOT computed post-DCE (a tempting-looking refinement
+       that would let a program whose lambdas are all Known emit zero
+       apply/apply_dispatch_<N> files instead of a few harmless dead
+       ones): DCE only happens per-function inside Optimize.run, which
+       main.ml's Phase 3 loop runs interleaved with regalloc/codegen one
+       function at a time via Codegen.compile_cfg_to_files. Pulling
+       Optimize.run out into a separate whole-table pre-pass (so this
+       table could be computed from a post-DCE snapshot) was tried and
+       reverted — it changed unroll.ml's cross-function caller-constant
+       resolution timing enough to make scripts/test_arr_set.mcaml (one
+       of the five canaries) unroll differently, a real behavior change
+       for a program that doesn't even use closures. Per §13's own
+       escalation trigger ("an existing test changes its output or
+       command count"), that risk isn't worth taking for a purely
+       cosmetic win. The accepted cost: a handful of dead
+       (unreachable-but-emitted) apply_dispatch_<N> files can appear for
+       an all-Known-lambda program — harmless, since the actual compiled
+       function bodies still contain zero apply-dispatch references
+       either way (F3+F4's zero-cost claim is about what a Known
+       closure's OWN call sites compile to, not about whether some other,
+       unrelated Escaping shape elsewhere in the same program leaves a
+       same-named dead file behind). *)
+    let closure_layout = Closure_layout.compute fn_table in
+    Cost.k_max_captured := closure_layout.Closure_layout.k_max_captured;
+
     (* Phase 2b: monomorphize array-parameterized templates. After this
        the table still contains the templates but they're marked
        is_template=true and skipped during emit. *)
@@ -381,7 +417,7 @@ let () =
     List.iter (fun name ->
       let cfg = Hashtbl.find fn_table name in
       if cfg.Cfg.is_template then () else
-      let files = Codegen.compile_cfg_to_files ~fn_table cfg in
+      let files = Codegen.compile_cfg_to_files ~fn_table ~closure_layout cfg in
       let files =
         if !any_dyn_heap_use && is_public_entry name
         then append_reset name files
@@ -449,6 +485,29 @@ let () =
          ) globals
        in
        all_files := !all_files @ [("__globals_init", cmds)]);
+
+    (* Phase F5: shared apply-dispatch runtime. Emitted once per program
+       (not per function) iff at least one closure shape survived
+       Closure_spec.run — programs with no closures get zero new files,
+       so canary byte-diffs are unaffected. [apply.mcfunction] is the
+       whole-program $code dispatch chain (§13.12 decision 2: one shared
+       function, not one per call-site shape); each
+       [apply_dispatch_<code>.mcfunction] is that shape's env-unpack
+       trampoline (decision 3). *)
+    (if Array.length closure_layout.Closure_layout.by_code > 0 then begin
+       let shapes = Array.to_list closure_layout.Closure_layout.by_code in
+       let codes = List.map (fun s -> s.Closure_layout.code) shapes in
+       let apply_file = ("apply", Codegen_helpers.apply_dispatch_body codes) in
+       let trampolines =
+         List.map (fun s ->
+           (Printf.sprintf "apply_dispatch_%d" s.Closure_layout.code,
+            Codegen_helpers.apply_dispatch_trampoline_body
+              s.Closure_layout.n_captured s.Closure_layout.n_args
+              s.Closure_layout.fname))
+           shapes
+       in
+       all_files := !all_files @ (apply_file :: trampolines)
+     end);
 
     (* Phase 4: tick-split straight-line overflows into __cont<N> chains
        (plan §1.4). Helper files (_call<N>, _get) are preserved

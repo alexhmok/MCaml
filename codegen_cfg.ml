@@ -96,6 +96,16 @@ type state = {
      cons_head / cons_tail internally, so emit_cons_head /
      emit_cons_tail are also flagged when this is set. *)
   mutable emit_region_walker_list : bool;
+  (* Phase F / F5: whole-program closure-shape table (fname -> code),
+     computed once in main.ml right after Closure_spec.run and threaded
+     down through Codegen.compile_cfg_to_files. Only consulted by
+     IClosureMake's lowering (to embed the right `code:<N>` in the cell
+     literal); IApply's lowering never needs it — it dispatches through
+     the shared mcaml:apply function, which reads $code from the cell
+     itself at runtime. Defaults to Closure_layout.empty for callers
+     that never construct a closure (every lookup would be dead code in
+     that case, since no IClosureMake instruction could ever reach it). *)
+  closure_layout : Closure_layout.t;
 }
 
 let fresh_helper_name (st : state) : string =
@@ -145,6 +155,16 @@ let is_reserved_slot (s : string) : bool =
      destructible scratch copy of the second operand so v2 stays live
      for any consumer after the FMult instruction. *)
   s = "$c256" || s = "$fmul_t" ||
+  (* Phase F / F5: apply-dispatch scratch. $code holds the closure
+     cell's shape discriminant during mcaml:apply's dispatch; the
+     $apply_arg_* bank stages a call site's own (non-captured)
+     arguments ahead of the runtime-resolved capture-count offset (see
+     codegen_helpers.ml's cmd_apply / apply_dispatch_trampoline_body
+     doc comments). Prefix-matched like $ref_ below since the count is
+     a whole-program constant (K_max_apply_args) sized by
+     closure_layout.ml, not a small fixed set like the region levels. *)
+  s = "$code" ||
+  (String.length s >= 11 && String.sub s 0 11 = "$apply_arg_") ||
   (String.length s >= 5 && String.sub s 0 5 = "$ref_") ||
   (String.length s > 6
    && String.sub s 0 6 = "param_"
@@ -240,19 +260,34 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
       failwith
         "codegen_cfg: runtime-n Array.make (IHeapAlloc vreg-form) not \
          yet implemented — use Array.make(<int-literal>, 0)"
-  | IClosureMake (_, fname, _) ->
-      failwith
-        (Printf.sprintf
-           "codegen_cfg: closure construction (helper %s) reached codegen \
-            still unresolved — this closure is Escaping (or exceeded \
-            MCAML_SPECIALIZE_LIMIT); the objpool cell + mcaml:apply \
-            dispatch runtime lands in F5" fname)
-  | IApply (_, _, _) ->
-      failwith
-        "codegen_cfg: apply-dispatch through a runtime closure value is \
-         not yet lowered — this call site is Escaping (or exceeded \
-         MCAML_SPECIALIZE_LIMIT); the objpool cell + mcaml:apply dispatch \
-         runtime lands in F5"
+  | IClosureMake (d, fname, caps) ->
+      let code = Closure_layout.code_of st.closure_layout fname in
+      push_cmds st prefix (cmd_closure_make d code caps)
+  | IApply (d_opt, cl, args) ->
+      (* Same save/restore obligation as ICall (§7 above): physical
+         scoreboard slots are one flat global namespace, so dispatching
+         through mcaml:apply into an arbitrary lifted lambda helper can
+         clobber any of THIS function's other live slots exactly like an
+         ordinary function call can — the lambda helper has no idea it's
+         being invoked via apply and freely reuses $r0, $r1, ... for its
+         own locals. Missing this save/restore was caught empirically:
+         a self-tail loop forwarding a captured closure across its own
+         back-edge silently clobbered the carried closure handle on the
+         second iteration (a real bug found and fixed while adding F5's
+         escaping-shape test coverage, not a hypothetical). *)
+      let slots = slots_live_across_call st b i d_opt in
+      if slots = [] then
+        push_cmds st prefix (cmd_apply cl args)
+      else begin
+        let helper = fresh_helper_name st in
+        let helper_body = cmd_apply_helper_body ~slots ~cl ~args in
+        st.helpers <- (helper, helper_body) :: st.helpers;
+        push_cmd st prefix (Printf.sprintf "function mcaml:%s" helper)
+      end;
+      (match d_opt with
+       | Some d when d <> "$ret" ->
+           push_cmd st prefix (cmd_score_copy d "$ret")
+       | _ -> ())
   | ICons (d, h, t) ->
       push_cmds st prefix (cmd_cons d h t)
   | IHead (d, c) ->
@@ -405,7 +440,7 @@ let emit_block (st : state) (b : block) : unit =
 
 (* ---- entry point ---- *)
 
-let emit (cfg : cfg_func) : (string * string list) list =
+let emit ?(closure_layout = Closure_layout.empty) (cfg : cfg_func) : (string * string list) list =
   let liveness = Liveness.analyze cfg in
   let st = {
     cfg;
@@ -423,6 +458,7 @@ let emit (cfg : cfg_func) : (string * string list) list =
     obj_field_indices = [];
     region_exit_levels = [];
     emit_region_walker_list = false;
+    closure_layout;
   } in
   let order = reverse_postorder cfg in
   List.iter (fun l -> emit_block st cfg.blocks.(l)) order;

@@ -80,7 +80,7 @@ ocamlc -c ast.ml parser.mli lexer.ml parser.ml \
            codegen_helpers.ml cfg.ml cfg_build.ml \
            liveness.ml dominators.ml loop_detect.ml \
            licm.ml unroll.ml sroa.ml \
-           monomorphize.ml inline.ml closure_spec.ml \
+           monomorphize.ml inline.ml closure_spec.ml closure_layout.ml \
            const_fold.ml copy_prop.ml local_cse.ml dce.ml \
            strength_reduce.ml cost.ml optimize.ml regalloc_cfg.ml \
            codegen_cfg.ml codegen.ml tick_split.ml tick_guard.ml main.ml
@@ -88,7 +88,7 @@ ocamlc -o mcaml ast.cmo lexer.cmo parser.cmo alpha.cmo typing.cmo \
                 for_lift.cmo knormal.cmo tco.cmo codegen_helpers.cmo \
                 cfg.cmo cfg_build.cmo liveness.cmo dominators.cmo \
                 loop_detect.cmo licm.cmo unroll.cmo sroa.cmo \
-                monomorphize.cmo inline.cmo closure_spec.cmo const_fold.cmo copy_prop.cmo \
+                monomorphize.cmo inline.cmo closure_spec.cmo closure_layout.cmo const_fold.cmo copy_prop.cmo \
                 local_cse.cmo dce.cmo strength_reduce.cmo cost.cmo \
                 optimize.cmo regalloc_cfg.cmo codegen_cfg.cmo codegen.cmo \
                 tick_split.cmo tick_guard.cmo main.cmo

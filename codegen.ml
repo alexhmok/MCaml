@@ -24,10 +24,10 @@ let compile_def_to_cfg (d : def) : Cfg.cfg_func option =
       Some (Cfg_build.of_kexpr name params optimized)
 
 let compile_cfg_to_files
-    ?fn_table (cfg : Cfg.cfg_func) : (string * string list) list =
+    ?fn_table ?closure_layout (cfg : Cfg.cfg_func) : (string * string list) list =
   Optimize.run ?fn_table cfg;
   Regalloc_cfg.alloc cfg;
-  Codegen_cfg.emit cfg
+  Codegen_cfg.emit ?closure_layout cfg
 
 let compile_def (d : def) : (string * string list) list =
   match compile_def_to_cfg d with

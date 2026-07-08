@@ -396,6 +396,114 @@ let obj_field_body (k : int) : string =
     "$execute store result score $arr_result %s run data get storage mcaml:objpool cells[$(idx)].f%d 1"
     obj_name k
 
+(* ---- Phase F closure ops (F5) ---- *)
+
+(* IClosureMake — 3 + <#captures> commands inline, mirrors cmd_adt_alloc
+   exactly except the tag is fixed to -2 (§13.12 decision 4) and fields
+   are named env_0, env_1, ... instead of f0, f1, .... [code] is this
+   lambda helper's dense whole-program closure-shape index, assigned by
+   closure_layout.ml (F5 decision: a new global table, lambda-helper name
+   -> code, NOT a hash/intern of the name). *)
+let cmd_closure_make (d : string) (code : int) (caps : string list) : string list =
+  let lit =
+    "{tag:-2,code:" ^ string_of_int code
+    ^ String.concat ""
+        (List.mapi (fun i _ -> Printf.sprintf ",env_%d:0" i) caps)
+    ^ "}"
+  in
+  ("data modify storage mcaml:objpool cells append value " ^ lit)
+  :: List.mapi
+       (fun i v ->
+          Printf.sprintf
+            "execute store result storage mcaml:objpool cells[-1].env_%d int 1 run scoreboard players get %s %s"
+            i v obj_name)
+       caps
+  @ [ Printf.sprintf "scoreboard players operation %s %s = $objpool_next %s"
+        d obj_name obj_name;
+      Printf.sprintf "scoreboard players add $objpool_next %s 1" obj_name ]
+
+(* IApply call-site lowering (F5 decision: one shared [mcaml:apply]
+   dispatch function program-wide, not one per call-site shape — see
+   [apply_dispatch_body] below). Stages the closure handle into the
+   shared macro-args idx slot (same convention as cons_head/obj_f<k>),
+   stages each of THIS call site's own (non-captured) arguments into the
+   reserved [$apply_arg_<i>] bank, then dispatches to [mcaml:apply].
+   Captures are unpacked from the cell by the per-shape
+   [apply_dispatch_<code>] trampoline instead of here, because the
+   offset those captures land at in the target's param array depends on
+   which concrete closure shape [$code] turns out to be at runtime —
+   not knowable at this call site. 2 + <#args> commands; the [$ret]
+   read-back (when the result is used) is pushed separately by the
+   caller, mirroring ICall's own convention. *)
+let cmd_apply (cl : string) (args : string list) : string list =
+  let idx_line =
+    Printf.sprintf
+      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get %s %s"
+      cl obj_name
+  in
+  let arg_stages =
+    List.mapi (fun i a ->
+      Printf.sprintf "scoreboard players operation $apply_arg_%d %s = %s %s"
+        i obj_name a obj_name)
+      args
+  in
+  (idx_line :: arg_stages) @ [ "function mcaml:apply with storage mcaml:tmp args" ]
+
+(* Body of the shared [apply.mcfunction] (F5 decision 2: ONE dispatch
+   chain covering every closure-typed call site program-wide, not one
+   synthesized per call-site shape). Reads [$code] out of the closure
+   cell via the standard $(idx) macro-getter convention (mirrors
+   obj_tag), then chains one guarded dispatch per known shape. Each
+   branch uses `return run`, the same TTail idiom codegen_cfg.ml already
+   relies on (see its emit_term doc comment) so a matching branch
+   terminates this function instead of falling through to test the
+   remaining codes. [codes] must be every code value closure_layout.ml
+   assigned, in any order (rendered in ascending order here only for
+   readable output — dispatch is a flat if-chain, not a jump table, so
+   order has no correctness effect). *)
+let apply_dispatch_body (codes : int list) : string list =
+  let get_code =
+    Printf.sprintf
+      "$execute store result score $code %s run data get storage mcaml:objpool cells[$(idx)].code 1"
+      obj_name
+  in
+  let branches =
+    List.map (fun code ->
+      Printf.sprintf
+        "execute if score $code %s matches %d run return run function mcaml:apply_dispatch_%d with storage mcaml:tmp args"
+        obj_name code code)
+      (List.sort compare codes)
+  in
+  get_code :: branches
+
+(* Body of one [apply_dispatch_<code>.mcfunction] trampoline (F5 decision
+   3: the env-unpack prelude lives HERE, as a per-shape thin wrapper, not
+   duplicated inline inside the shared [apply] dispatcher). Unpacks
+   env_0..env_{n_captured-1} from the closure cell (same $(idx) as the
+   caller) into param_0..param_{n_captured-1}, copies this call's own
+   args out of the [$apply_arg_*] bank into the trailing param slots,
+   then tail-dispatches to the concrete lifted lambda helper. Mirrors
+   for_lift's own "captures-as-leading-params" convention
+   (`helper_params = fv_list @ params`, for_lift.ml) — a direct ICall
+   never needs to reconstruct that split because the caller already has
+   every argument positioned correctly; the apply boundary is the one
+   place a runtime shape lookup stands between the two. n_captured +
+   n_args + 1 commands. *)
+let apply_dispatch_trampoline_body
+    (n_captured : int) (n_args : int) (target : string) : string list =
+  let env_reads =
+    List.init n_captured (fun i ->
+      Printf.sprintf
+        "$execute store result score param_%d %s run data get storage mcaml:objpool cells[$(idx)].env_%d 1"
+        i obj_name i)
+  in
+  let arg_copies =
+    List.init n_args (fun i ->
+      Printf.sprintf "scoreboard players operation param_%d %s = $apply_arg_%d %s"
+        (n_captured + i) obj_name i obj_name)
+  in
+  env_reads @ arg_copies @ [ Printf.sprintf "return run function mcaml:%s" target ]
+
 (* ---- function calls ---- *)
 
 (* Tail jump (no save/restore): param_i := arg_i for each arg, then
@@ -426,14 +534,19 @@ let cmd_tail_jump (f : string) (args : string list) : string list =
      lazy-init storage list
      push empty frame
      save each named slot into frames[-1].fK
-     param_i := arg_i
-     function mcaml:<target>
+     <call_cmds>
      restore each named slot from frames[-1].fK
-     pop frame                                                    *)
-let cmd_call_helper_body_narrow
+     pop frame
+
+   Factored as [call_cmds] rather than a fixed "param_i := arg_i; function
+   mcaml:<target>" shape so the same save/restore scaffolding can wrap
+   IApply's staged-args dispatch too (F5: [cmd_apply_helper_body] below) —
+   physical scoreboard slots are a single global namespace, so a call
+   through a runtime closure value can clobber a live caller slot exactly
+   like an ordinary call can, and needs the identical protection. *)
+let cmd_call_helper_body_generic
     ~(slots : string list)
-    ~(target : string)
-    ~(args : string list) : string list =
+    ~(call_cmds : string list) : string list =
   let init =
     "execute unless data storage mcaml:stk frames run \
      data modify storage mcaml:stk frames set value []"
@@ -446,12 +559,6 @@ let cmd_call_helper_body_narrow
          run scoreboard players get %s %s"
         i s obj_name) slots
   in
-  let param_sets =
-    List.mapi (fun i a ->
-      Printf.sprintf "scoreboard players operation param_%d %s = %s %s"
-        i obj_name a obj_name) args
-  in
-  let call = Printf.sprintf "function mcaml:%s" target in
   let restores =
     List.mapi (fun i s ->
       Printf.sprintf
@@ -460,7 +567,28 @@ let cmd_call_helper_body_narrow
         s obj_name i) slots
   in
   let pop = "data remove storage mcaml:stk frames[-1]" in
-  [init; push] @ saves @ param_sets @ [call] @ restores @ [pop]
+  [init; push] @ saves @ call_cmds @ restores @ [pop]
+
+let cmd_call_helper_body_narrow
+    ~(slots : string list)
+    ~(target : string)
+    ~(args : string list) : string list =
+  let param_sets =
+    List.mapi (fun i a ->
+      Printf.sprintf "scoreboard players operation param_%d %s = %s %s"
+        i obj_name a obj_name) args
+  in
+  let call = Printf.sprintf "function mcaml:%s" target in
+  cmd_call_helper_body_generic ~slots ~call_cmds:(param_sets @ [call])
+
+(* IApply save/restore variant (F5): identical framing to
+   [cmd_call_helper_body_narrow], with [cmd_apply]'s idx+$apply_arg-bank
+   staging in place of "param_i := arg_i; function mcaml:<target>". *)
+let cmd_apply_helper_body
+    ~(slots : string list)
+    ~(cl : string)
+    ~(args : string list) : string list =
+  cmd_call_helper_body_generic ~slots ~call_cmds:(cmd_apply cl args)
 
 (* ---- Phase C region enter / exit + truncation helpers ---- *)
 
