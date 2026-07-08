@@ -1212,8 +1212,112 @@ self-recursion with source-order generalization.
       through the entire phase.)
 
 ### Phase F — First-class lambdas (specialization + escape-analysis fallback)
-- [ ] F1. Parser/AST: `fun x -> e`, partial application, `Lambda of pattern list * expr` AST node
-- [ ] F2. Closure conversion IR: one form pre-analysis, treats every lambda the same
+- [x] F1. Parser/AST: `fun x -> e`, `Lambda of (string * typ) list * expr` AST node,
+      `TFun of typ list * typ` threaded through the type system (§13.12
+      decisions). NO partial application (decision 1, unchanged).
+      (Session 2, commit `f492835`. Sub-decision 1
+      (lambda params): bare `(string * typ) list` var binders, exactly
+      as recommended — no pattern-destructuring lambda params in v1.
+      Sub-decision 2 (grammar): `FUN LPAREN params = param_list RPAREN
+      ARROW body = expr %prec BELOW_BAR { Lambda(params, body) }` —
+      mirrors Fun's production, body at `expr` (not `seq_expr`) with
+      the SAME `%prec BELOW_BAR` match_arm already uses, which turned
+      out to be REQUIRED, not cosmetic: without it menhir reports 18
+      shift/reduce conflicts (ARROW has no declared precedence, so the
+      reduce action of a bare `FUN ... ARROW expr` rule is unresolved
+      against a shift of any following operator). Region's own literal
+      `REGION LPAREN FUN LPAREN RPAREN ARROW ...` production stays a
+      fully separate, untouched token sequence (it never builds through
+      `expr`, so it cannot interact with the new rule) — confirmed zero
+      new conflicts by actually running menhir both before and after.
+      **New 4th scope cut discovered during implementation** (not one
+      of the 3 the kickoff flagged): arrow-type ANNOTATION surface
+      syntax (`f: int -> int`, distinct from the Lambda EXPRESSION
+      grammar, which needs none) is scoped to **arity 0 and 1 only**
+      this session — `t -> r` and `() -> r` — mirroring G4's own
+      single-param scope cut for type application (§13.11 decision 4).
+      A true n-ary `(t1, t2) -> r` surface form would need `LPAREN
+      nonempty_typ_comma_list RPAREN ARROW typ`, which shares a
+      `LPAREN typ` prefix with the existing grouping atom `LPAREN typ
+      RPAREN` and cannot be disambiguated by menhir's LALR(1) lookahead
+      at the decision point; deferred as a mechanical follow-up. A
+      2+-ary LAMBDA EXPRESSION (`fun (x, y) -> ...`) is fully usable
+      regardless — only an EXPLICIT annotation for a 2+-ary function
+      TYPE is out of v1 scope. `TFun` right-associates (`int -> int ->
+      int` = a function returning a function), needed no extra grammar.
+      Typing: all 12 functions from decision 1 got their TFun arm
+      (`occurs`, `tvar_bindable`, `unify`, `zonk_default`, `copy_with`,
+      `free_tvars`, `string_of_typ`, `check_typ_ok`, `subst_typarams`
+      recurse; `check_field_type`/`check_record_field_type`/
+      `check_tuple_elem` reject, per decision 2). `infer` gained a
+      `Lambda` arm (`TFun(param_types, infer body)` — exists mainly to
+      serve for_lift's own degraded-mode oracle call, since the REAL
+      Phase 1 pass never sees a raw Lambda; F2 converts every one) and
+      a NEW "value application" `App` arm inserted before the
+      ctor_info/global cascade: when the callee name resolves in the
+      LOCAL scheme env to a TFun scheme, the call type-checks as a
+      value application (arity-checked, args unified against the
+      TFun's params) instead of falling through to the global-function
+      lookup. This requires alpha.ml to rename an `App`'s callee too
+      when it resolves as a local binder (previously alpha never
+      touched `App`'s function-name string at all — call position
+      always meant "the literal global function", so a local variable
+      could never be invoked via `f(x)` syntax); proven safe for every
+      existing program because the rename only fires when `f` is
+      found in the alpha env, which no lambda-free program's App
+      callee ever is (top-level Fun names are never added to that
+      env).)
+- [x] F2. Closure conversion IR: one form pre-analysis, treats every lambda
+      the same. (Session 2, commit `f492835`. Sub-decision 3: YES, reuses/extends
+      for_lift.ml's existing free-variable walk rather than a new
+      module — a lambda is lifted exactly like a for-loop helper
+      (captures as leading params, `for_lift.ml`'s existing TRef-capture
+      filtering reused verbatim), with the ONE structural difference
+      that a lambda is a VALUE (may be stored/returned/passed) so its
+      occurrence is replaced by a new `Closure of string * expr list`
+      AST node (fname + captured-value exprs) rather than an immediate
+      call. New `Ast.expr` variant, NOT a new IR layer — this IS "the
+      one uniform closure-conversion IR representation" the F2 task
+      line asks for: every Lambda, known or escaping, becomes exactly
+      one Closure node with zero distinction (F3's job, next session).
+      Lambda-lifted helpers are named `<parent>__lam<N>` (deliberately
+      NOT containing "__for", so `for_lift.is_synthetic_name`'s
+      substring check doesn't mistake them for a for-helper and skip
+      their real typing — unlike for-helpers, a lambda helper takes
+      every capture as an explicit param and needs ordinary top-level
+      typing). `typing.ml` gained a `Closure` arm: looks up the
+      helper's already-registered `fun_sigs` entry (populated by
+      `build_sigs`, which runs after for_lift appends the helper —
+      confirmed by main.ml's phase order), splits its flat param-type
+      list at `List.length captured_exprs`, unifies each capture
+      against its slot, and types the whole node `TFun(own_param_types,
+      ret_type)`. Everything below typing stays a LOUD STUB, same
+      posture Phase D's D1 used for Match before D5: `knormal.ml` gained
+      a `closure_env` side table (seeded from a TFun-typed param in
+      `normalize_fun`, mirroring `dyn_env`'s existing pattern) so
+      calling a closure-typed local fails immediately with a clear
+      message instead of silently emitting a bogus `KCall` against a
+      nonexistent global function named after the vreg; constructing a
+      `Closure` (i.e. any lambda actually reaching a `Let`/return/arg
+      position) ALSO fails immediately with a clear message. Verified
+      by direct smoke test (not just theory): a HOF passing/calling a
+      lambda literal types successfully end-to-end and fails loudly at
+      knormal exactly at the call; a lambda stored in a tuple is
+      rejected at TYPING with the decision-2 message; a closure handle
+      that is only ever passed through (never called or constructed in
+      that function) compiles and emits real `.mcfunction` files with
+      zero stub firing — confirming a closure handle is inert, opaque
+      scalar plumbing everywhere except at construction/call, exactly
+      as decision 1 intends. `cfg_build.ml` needed NO changes (TFun
+      params fall into the existing scalar-copy `_` prelude arm, and
+      `is_template`'s TArrStatic/TMat check is unaffected) — confirmed
+      by direct read before touching it, per the guardrail's own
+      framing. Full battery reverified green with ZERO code changes to
+      any file outside {ast.ml, parser.mly/parser.ml, alpha.ml,
+      for_lift.ml, typing.ml, knormal.ml}: main suite 66/66+async,
+      Phase D 40/40, Phase E 42/42+12 probes, all nine `/tmp` harnesses,
+      five canaries byte-identical (verified against
+      `canary_hashes_f_baseline.txt`).)
 - [ ] F3. Escape analysis pass over `fn_table` (runs between Phase 2a inline and Phase 2b monomorphize). Produces per-lambda classification `{Known | Escaping of reason}`
 - [ ] F4. Specialization pass: whole-program defunctionalization for `Known` lambdas; clone HOFs per unique closure that flows in. Respects `MCAML_SPECIALIZE_LIMIT` (default K=8) and falls back to apply-dispatch when the budget is hit
 - [ ] F5. Apply-dispatch runtime for escaping lambdas: a closure objpool (reuse Phase D's objpool), the `mcaml:apply` macro-dispatch function, env-unpack prelude at lifted function entry
