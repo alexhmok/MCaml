@@ -1171,6 +1171,30 @@ self-recursion with source-order generalization.
       `dotp__arr10_arr11` / `dotp__arr12_arr13` clones; primitives_v1
       canary (arr-param templates throughout) byte-identical through
       the whole phase.)
+> Phase E exhaustive self-checking suite (post-E8):
+> `scripts/mc_test_suite_phase_e.mcaml` — 42 checks covering the full
+> phase surface (core inference incl. partial/checked annotations, TCO
+> + non-tail recursion under inference, residual TInt defaulting; id/
+> swap/pair/fst/len/append/last instantiated across int/bool/float/
+> list/tuple/ADT/record; let-generalization proper; the whole 'a-list
+> surface incl. ctor-in-list, tuple/record lists, list-of-lists,
+> generic head/tail/is_nil; tvar pinning through field access and
+> record/tuple/ctor patterns; darr+for_lift shared-tvar helpers; the
+> E7 template path with an inferred scalar param; a deliberate forward
+> call; match-in-for-loop; pool interleaving; two inline region checks
+> incl. walker copy-out of an inferred-int appended list). Pre-flight:
+> `tools/sim_check_phase_e.py` — runs the suite under sim (42/42 +
+> §4.4 post-conditions), greps the zero-clones guarantee for all seven
+> polymorphic helpers + the dotp3__arr* template clones + the
+> obj_tag/obj_f1 elision pins, and fires 12 compile-time rejection
+> probes (value restriction, both annotation mismatches, occurs check,
+> tvar uniform restriction, N5 float-`*` asymmetry, exhaustiveness/
+> redundancy under inferred scrutinees incl. the `(_ :: _)` witness,
+> decision-7 poly-use-before-decl, bool comparison, cons element
+> mismatch naming both types). Packs clean via pack_datapack.py for
+> the in-game run (`/function mcaml:run_all_e`, expect ALL 42 PASSED
+> and `$objpool_next` = 0 after).
+
 - [x] E8. Tests: `scripts/test_polymorphism.mcaml` + /tmp harness
       (Commit `ab19836`. 10 int-returning entries per §4.4: id at
       int/bool/list/tuple/ADT, len at three element types, swap at two

@@ -1,0 +1,443 @@
+(* mc_test_suite_phase_e.mcaml — self-checking in-Minecraft test suite
+   for the FULL Phase E feature surface: HM unification (E2),
+   let-generalization + instantiation (E3), optional/checked
+   annotations (E4), 'a list (E4b), for_lift under shared tvars (E5),
+   residual-TInt defaulting (E6), template-path preservation (E7) —
+   plus every Phase A–D feature exercised THROUGH inference.
+
+   Compiles standalone (no lib/math.mcaml needed):
+
+     ./mcaml -o build_phase_e < scripts/mc_test_suite_phase_e.mcaml
+     python3 tools/pack_datapack.py --input build_phase_e \
+         --name mcaml_phase_e_suite --output dist/mcaml_phase_e_suite.zip
+
+   In game:
+
+     /reload                        (runs mcaml:init)
+     /function mcaml:run_all_e      (synchronous suite, 42 checks)
+     /scoreboard players get $objpool_next vars   (expect 0 — §4.4 reset)
+
+   Conventions match mc_test_suite.mcaml / the Phase D suite: every
+   check increments $pass or $fail on the `vars` objective and prints
+   `[FAIL] <name>` on failure; run_all_e prints a final tally.
+   Pre-flight verifier: tools/sim_check_phase_e.py — it also carries
+   the compile-time REJECTION probes (value restriction, annotation
+   mismatch, occurs check, both-types diagnostics, tvar uniform
+   restriction, N5 float-`*` asymmetry, poly-use-before-decl), which
+   cannot appear here because this file must compile.
+
+   Most functions below are deliberately UNANNOTATED — inference is
+   the feature under test. §13.10 decision 7: polymorphic helpers are
+   declared before their uses (forward calls see a monotype); e37
+   deliberately forward-calls a later monomorphic helper. *)
+
+(* ---------- type declarations ---------- *)
+
+type shape = Dot | Circle of int | Rect of int * int
+type tree = Leaf of int | Node of tree * tree
+type point = { x : int; y : int }
+
+(* ---------- harness helpers ---------- *)
+
+fun pass_one () : int =
+  cmd! "scoreboard players add $pass vars 1";
+  1
+
+fun fail_one () : int =
+  cmd! "scoreboard players add $fail vars 1";
+  0
+
+(* ---------- polymorphic core (decl before all polymorphic uses) ----
+   Each of these compiles ONCE (§13.1 uniform representation) — the
+   pre-flight greps the build dir to pin zero per-type clones. *)
+
+fun id (x) = x
+
+fun swap (p) = match p with (a, b) -> (b, a)
+
+fun pair (a, b) = (a, b)
+
+(* wildcard component: pre-flight pins that fst_p emits NO obj_f1 *)
+fun fst_p (p) = match p with (a, _) -> a
+
+fun len (l) = match l with [] -> 0 | _ :: t -> 1 + len(t)
+
+fun app (l1, l2) =
+  match l1 with [] -> l2 | h :: t -> h :: app(t, l2)
+
+fun last_or (l, d) =
+  match l with
+  | [] -> d
+  | h :: [] -> h
+  | _ :: t -> last_or(t, d)
+
+(* ---------- inference-pinning helpers (each pins a tvar through a
+   different Phase E arm) ---------- *)
+
+(* Field access pins r to the owning record type (E2 TVar-Field arm) *)
+fun getx (r) = r.x
+
+(* record PATTERN pins the scrutinee (check_pattern PRecord TVar arm);
+   pre-flight pins zero obj_tag reads in the compiled dispatch *)
+fun norm1 (r) = match r with { x = a; y = b } -> a + b
+
+(* ctor pattern pins the scrutinee to shape (PCtor TVar arm) *)
+fun shape_code (s) =
+  match s with Dot -> 1 | Circle(_) -> 2 | Rect(_, _) -> 3
+
+(* destructuring-let = one-arm tuple match (PTuple TVar arm);
+   pre-flight pins zero obj_tag reads *)
+fun sum2 (p) = let (a, b) = p in a + b
+
+(* ctor-in-list patterns — E4b, the D6 scope note come due *)
+fun first_area (l) =
+  match l with
+  | [] -> 0
+  | Circle(r) :: _ -> r * r
+  | Rect(w, h) :: _ -> w * h
+  | Dot :: _ -> 1
+
+(* element type pinned int by `+` *)
+fun suml (l) = match l with [] -> 0 | h :: t -> h + suml(t)
+
+(* list of lists — untypeable before E4b *)
+fun sum_ll (ll) =
+  match ll with [] -> 0 | inner :: rest -> suml(inner) + sum_ll(rest)
+
+(* params pinned bool through if scrutinee + branch types *)
+fun xor_b (a, b) = if a then (if b then false else true) else b
+
+(* E4: partial annotation — a annotated, b inferred float via `+` *)
+fun mix (a : float, b) = a + b
+
+fun scale (a, b) = a * b + a
+
+(* E4: unannotated param + annotated CHECKED return *)
+fun gt3 (x) : bool = x > 3
+
+(* TCO'd self-recursion under inference (monotype self-call) *)
+fun sum_to_p (n, acc) =
+  if n = 0 then acc else sum_to_p(n - 1, acc + n)
+
+(* unannotated non-tail recursion over a user ADT *)
+fun tree_sum (t) =
+  match t with Leaf(n) -> n | Node(l, r) -> tree_sum(l) + tree_sum(r)
+
+(* E5: darr stays annotated (tvar uniform restriction); n inferred int
+   through the for-loop bound — the lifted helper shares n's tvar ref *)
+fun dsum (a : darr, n) =
+  let acc = ref 0 in
+  for i = 0 to n do
+    acc := !acc + array_get(a, i)
+  done;
+  !acc
+
+(* E7: static-array template with an inferred scalar param mixed in —
+   monomorphize must still clone per aid pair (pre-flight greps the
+   clone files exist) *)
+fun dotp3 (a : arr[int, 3], b : arr[int, 3], k) =
+  (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) * k
+
+(* E6: z is never constrained — residual tvar defaults to TInt at the
+   knormal boundary; the function still compiles and runs *)
+fun const7 (z) = 7
+
+(* ---------- A. core inference (E2/E4/E6) ---------- *)
+
+fun e01_infer_arith () =
+  if scale(6, 6) = 42 then pass_one()
+  else (cmd! "say [FAIL] e01_infer_arith"; fail_one())
+
+fun e02_infer_bool_ops () =
+  let v = (if xor_b(true, false) then 1000 else 0)
+        + (if xor_b(false, true) then 100 else 0)
+        + (if xor_b(true, true) then 10 else 0)
+        + (if xor_b(false, false) then 1 else 0) in
+  if v = 1100 then pass_one()
+  else (cmd! "say [FAIL] e02_infer_bool_ops"; fail_one())
+
+fun e03_checked_ret_annotation () =
+  let v = (if gt3(5) then 10 else 0) + (if gt3(2) then 0 else 32) in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] e03_checked_ret_annotation"; fail_one())
+
+fun e04_tco_inference () =
+  if sum_to_p(10, 0) = 55 then pass_one()
+  else (cmd! "say [FAIL] e04_tco_inference"; fail_one())
+
+fun e05_let_chain_shadowing () =
+  let a = 5 in
+  let a = a * 2 in
+  if a + 1 = 11 then pass_one()
+  else (cmd! "say [FAIL] e05_let_chain_shadowing"; fail_one())
+
+fun e06_partial_annotation_float () =
+  if raw_of_float(mix(1.5, 2.25)) = 245760 then pass_one()
+  else (cmd! "say [FAIL] e06_partial_annotation_float"; fail_one())
+
+fun e07_residual_default () =
+  if const7(0) + 35 = 42 then pass_one()
+  else (cmd! "say [FAIL] e07_residual_default"; fail_one())
+
+(* ---------- B. polymorphic instantiation (E3) ---------- *)
+
+fun e08_id_int () =
+  if id(41) + 1 = 42 then pass_one()
+  else (cmd! "say [FAIL] e08_id_int"; fail_one())
+
+fun e09_id_bool () =
+  if (if id(true) then 7 else 0) = 7 then pass_one()
+  else (cmd! "say [FAIL] e09_id_bool"; fail_one())
+
+fun e10_id_float () =
+  if raw_of_float(id(0.5)) = 32768 then pass_one()
+  else (cmd! "say [FAIL] e10_id_float"; fail_one())
+
+fun e11_id_list () =
+  if suml(id(1 :: 2 :: 3 :: [])) = 6 then pass_one()
+  else (cmd! "say [FAIL] e11_id_list"; fail_one())
+
+fun e12_id_tuple () =
+  let (a, b) = id((30, 12)) in
+  if a + b = 42 then pass_one()
+  else (cmd! "say [FAIL] e12_id_tuple"; fail_one())
+
+fun e13_id_adt () =
+  let v = match id(Circle(42)) with Circle(r) -> r | _ -> 0 in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] e13_id_adt"; fail_one())
+
+fun e14_id_record () =
+  if getx(id({ x = 40; y = 2 })) + 2 = 42 then pass_one()
+  else (cmd! "say [FAIL] e14_id_record"; fail_one())
+
+fun e15_id_nullary_ctor () =
+  if shape_code(id(Dot)) = 1 then pass_one()
+  else (cmd! "say [FAIL] e15_id_nullary_ctor"; fail_one())
+
+fun e16_swap_two_shapes () =
+  let (n, flag) = swap((true, 5)) in
+  let (p, q) = swap((1, 2)) in
+  if (if flag then n * 2 else 0) * 4 + p + q * 100 = 142 then pass_one()
+  else (cmd! "say [FAIL] e16_swap_two_shapes"; fail_one())
+
+fun e17_pair_two_shapes () =
+  let p1 = pair(6, true) in
+  let p2 = pair(false, 5) in
+  let v1 = (match p1 with (n, f) -> (if f then n * 7 else 0)) in
+  let v2 = (match p2 with (f2, m) -> (if f2 then 0 else m)) in
+  if v1 + v2 = 47 then pass_one()
+  else (cmd! "say [FAIL] e17_pair_two_shapes"; fail_one())
+
+fun e18_fst_wildcard_two_shapes () =
+  let v = (if fst_p((false, 1)) then 0 else fst_p((42, true))) in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] e18_fst_wildcard_two_shapes"; fail_one())
+
+fun e19_len_three_elem_types () =
+  let v = len(1 :: 2 :: 3 :: []) * 100 + len(true :: []) * 10
+        + len(Dot :: []) in
+  if v = 311 then pass_one()
+  else (cmd! "say [FAIL] e19_len_three_elem_types"; fail_one())
+
+fun e20_let_generalization () =
+  let n = [] in
+  if len(1 :: n) + len(true :: n) * 10 = 11 then pass_one()
+  else (cmd! "say [FAIL] e20_let_generalization"; fail_one())
+
+fun e21_append_poly () =
+  let v = suml(app(1 :: 2 :: [], 3 :: [])) * 10
+        + len(app(true :: [], false :: [])) in
+  if v = 62 then pass_one()
+  else (cmd! "say [FAIL] e21_append_poly"; fail_one())
+
+fun e22_last_or_poly () =
+  let n = last_or(1 :: 2 :: 9 :: [], 0) in
+  let b = last_or(false :: true :: [], false) in
+  if n * 4 + (if b then 6 else 0) = 42 then pass_one()
+  else (cmd! "say [FAIL] e22_last_or_poly"; fail_one())
+
+(* ---------- C. 'a list surface (E4b) ---------- *)
+
+fun e23_bool_list_dispatch () =
+  let v = match false :: true :: [] with
+    | [] -> 0
+    | h :: _ -> (if h then 1 else 2) in
+  if v = 2 then pass_one()
+  else (cmd! "say [FAIL] e23_bool_list_dispatch"; fail_one())
+
+fun e24_ctor_in_list () =
+  if first_area(Rect(6, 7) :: Circle(3) :: []) = 42 then pass_one()
+  else (cmd! "say [FAIL] e24_ctor_in_list"; fail_one())
+
+fun e25_tuple_list () =
+  let v = match (3, 4) :: (5, 6) :: [] with
+    | [] -> 0
+    | (a, b) :: _ -> a * 10 + b in
+  if v = 34 then pass_one()
+  else (cmd! "say [FAIL] e25_tuple_list"; fail_one())
+
+fun e26_list_of_lists () =
+  if sum_ll((1 :: 2 :: []) :: (3 :: 4 :: []) :: []) = 10 then pass_one()
+  else (cmd! "say [FAIL] e26_list_of_lists"; fail_one())
+
+fun e27_record_list () =
+  let v = match { x = 42; y = 0 } :: [] with
+    | [] -> 0
+    | r :: _ -> getx(r) in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] e27_record_list"; fail_one())
+
+fun e28_generic_head_tail () =
+  let bl = true :: false :: [] in
+  let v = (if head(bl) then (if head(tail(bl)) then 0 else 21) else 0) in
+  if v * 2 = 42 then pass_one()
+  else (cmd! "say [FAIL] e28_generic_head_tail"; fail_one())
+
+fun e29_generic_is_nil () =
+  let v = (if is_nil([]) then 1 else 0)
+        + (if is_nil(Dot :: []) then 0 else 2) in
+  if v = 3 then pass_one()
+  else (cmd! "say [FAIL] e29_generic_is_nil"; fail_one())
+
+fun e30_nested_cons_int_heads () =
+  let v = match 1 :: 2 :: 7 :: [] with
+    | 1 :: 2 :: x :: [] -> x * 6
+    | _ -> 0 in
+  if v = 42 then pass_one()
+  else (cmd! "say [FAIL] e30_nested_cons_int_heads"; fail_one())
+
+(* ---------- D. tvar-pinning through pattern/field arms ---------- *)
+
+fun e31_field_access_pins () =
+  if getx({ x = 40; y = 2 }) + 2 = 42 then pass_one()
+  else (cmd! "say [FAIL] e31_field_access_pins"; fail_one())
+
+fun e32_record_pattern_pins () =
+  if norm1({ x = 20; y = 22 }) = 42 then pass_one()
+  else (cmd! "say [FAIL] e32_record_pattern_pins"; fail_one())
+
+fun e33_tuple_destructure_pins () =
+  if sum2((20, 22)) = 42 then pass_one()
+  else (cmd! "say [FAIL] e33_tuple_destructure_pins"; fail_one())
+
+fun e34_adt_recursion_inferred () =
+  let t = Node(Node(Leaf(20), Leaf(15)), Leaf(7)) in
+  if tree_sum(t) = 42 then pass_one()
+  else (cmd! "say [FAIL] e34_adt_recursion_inferred"; fail_one())
+
+(* ---------- E. interaction with Phases A/M/N (E5/E7) ---------- *)
+
+fun e35_darr_forlift_shared_tvar () =
+  let a = array_make(5, 0) in
+  array_set(a, 0, 10);
+  array_set(a, 1, 12);
+  array_set(a, 3, 20);
+  if dsum(a, 5) = 42 then pass_one()
+  else (cmd! "say [FAIL] e35_darr_forlift_shared_tvar"; fail_one())
+
+fun e36_template_with_inferred_param () =
+  let u = [| 1; 2; 3 |] in
+  let v = [| 4; 5; 6 |] in
+  let w = [| 7; 8; 9 |] in
+  let z = [| 1; 1; 1 |] in
+  if dotp3(u, v, 1) + dotp3(w, z, 1) = 56 then pass_one()
+  else (cmd! "say [FAIL] e36_template_with_inferred_param"; fail_one())
+
+fun e37_forward_call_monotype () =
+  if fwd_double(21) = 42 then pass_one()
+  else (cmd! "say [FAIL] e37_forward_call_monotype"; fail_one())
+
+(* deliberately declared AFTER its caller: the forward call above
+   pins x through the shared fun_sigs monotype (§13.10 decision 7) *)
+fun fwd_double (x) = x * 2
+
+fun e38_match_in_for_loop () =
+  let acc = ref 0 in
+  for i = 0 to 5 do
+    let s = (if i % 2 = 0 then Circle(i) else Rect(i, 2)) in
+    acc := !acc + shape_code(s)
+  done;
+  if !acc = 12 then pass_one()
+  else (cmd! "say [FAIL] e38_match_in_for_loop"; fail_one())
+
+fun e39_pool_interleave_inferred () =
+  let v = suml(1 :: 2 :: []) + sum2((3, 4)) + getx({ x = 5; y = 0 })
+        + (match Circle(6) with Circle(r) -> r | _ -> 0)
+        + len(true :: []) in
+  if v = 22 then pass_one()
+  else (cmd! "say [FAIL] e39_pool_interleave_inferred"; fail_one())
+
+fun e40_poly_alloc_in_arms () =
+  let v = match id((2, 3)) with
+    | (a, b) -> suml(a :: b :: app(1 :: [], [])) in
+  if v = 6 then pass_one()
+  else (cmd! "say [FAIL] e40_poly_alloc_in_arms"; fail_one())
+
+(* ---------- driver ---------- *)
+
+fun run_all_e () : int =
+  cmd! "say [MCaml phase E suite] running 42 checks...";
+  cmd! "scoreboard players set $pass vars 0";
+  cmd! "scoreboard players set $fail vars 0";
+  e01_infer_arith();
+  e02_infer_bool_ops();
+  e03_checked_ret_annotation();
+  e04_tco_inference();
+  e05_let_chain_shadowing();
+  e06_partial_annotation_float();
+  e07_residual_default();
+  e08_id_int();
+  e09_id_bool();
+  e10_id_float();
+  e11_id_list();
+  e12_id_tuple();
+  e13_id_adt();
+  e14_id_record();
+  e15_id_nullary_ctor();
+  e16_swap_two_shapes();
+  e17_pair_two_shapes();
+  e18_fst_wildcard_two_shapes();
+  e19_len_three_elem_types();
+  e20_let_generalization();
+  e21_append_poly();
+  e22_last_or_poly();
+  e23_bool_list_dispatch();
+  e24_ctor_in_list();
+  e25_tuple_list();
+  e26_list_of_lists();
+  e27_record_list();
+  e28_generic_head_tail();
+  e29_generic_is_nil();
+  e30_nested_cons_int_heads();
+  e31_field_access_pins();
+  e32_record_pattern_pins();
+  e33_tuple_destructure_pins();
+  e34_adt_recursion_inferred();
+  e35_darr_forlift_shared_tvar();
+  e36_template_with_inferred_param();
+  e37_forward_call_monotype();
+  e38_match_in_for_loop();
+  e39_pool_interleave_inferred();
+  e40_poly_alloc_in_arms();
+
+  (* -------- regions — inline because region blocks are only legal
+     in public-entry functions in v1 (same rule as mc_test_suite) --- *)
+
+  (* r41: polymorphic calls inside a region body, primitive exit *)
+  let rg1 = region (fun () ->
+    len(true :: false :: []) + suml(4 :: [])) in
+  (if rg1 = 6 then pass_one()
+   else (cmd! "say [FAIL] e41_region_poly_primitive"; fail_one()));
+
+  (* r42: region returning a list built by polymorphic append — the
+     C5 walker copy-out path with the element type INFERRED int *)
+  let cl = region (fun () -> app(10 :: [], 20 :: 30 :: [])) in
+  (if suml(cl) = 60 then pass_one()
+   else (cmd! "say [FAIL] e42_region_append_copyout"; fail_one()));
+
+  cmd! "tellraw @a [\"[MCaml phase E suite] pass=\",{\"score\":{\"name\":\"$pass\",\"objective\":\"vars\"}},\" fail=\",{\"score\":{\"name\":\"$fail\",\"objective\":\"vars\"}},\" (expected pass=42 fail=0)\"]";
+  cmd! "execute if score $fail vars matches 0 if score $pass vars matches 42 run say [MCaml phase E suite] ALL 42 PASSED";
+  cmd! "execute unless score $fail vars matches 0 run say [MCaml phase E suite] FAILURES - see [FAIL] lines above";
+  cmd! "execute if score $fail vars matches 0 if score $pass vars matches ..41 run say [MCaml phase E suite] WARNING: fewer than 42 checks ran - suite aborted early";
+  0
