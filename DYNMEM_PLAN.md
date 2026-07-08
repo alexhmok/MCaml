@@ -1901,6 +1901,116 @@ Session 5 is then D7+D8 (tuples and records as single-ctor ADT sugar,
 both parse-time desugarings) — do not start them in this session.
 ```
 
+### 8.11 Phase D session 5 kickoff (D7 + D8 — tuples and records)
+
+```
+Read /Users/alexmok/MCaml/DYNMEM_PLAN.md — §2 for current status, §3
+and §13.5 for settled design decisions (especially the D6 note: its
+"dedicated variants, not namespace entries" precedent applies here),
+§§4–5 for the runtime ABI, §13 for escalation triggers. Read CLAUDE.md
+for the pipeline layout and the manual rebuild command. D6 landed in
+e0d86d8 (decision) + 6cdb455 (implementation); verify §2 agrees and
+`git status` is clean before starting.
+
+This session is D7+D8: tuples and records as single-constructor ADT
+sugar. Both should be zero-runtime-change tasks — at runtime a tuple
+or record is just a single-ctor ADT cell ({tag:0, f0, f1, ...}),
+allocated by the existing IAdtAlloc (3+n cmds) and read by the
+existing IFieldGet (3 cmds), and D5's single-ctor complete-signature
+rule already dispatches matches on them with ZERO tag reads. Expect
+zero new IR ops and zero codegen/optimizer/sim edits. Phase E
+(polymorphism), G3 (modules), and first-class field names are OUT of
+scope.
+
+Make the representation DECISIONS first and document them in §13.5
+before writing code (D5/D6 protocol). The §2 task lines say "desugar
+at parse time to ctor applications", but they predate D6, whose
+lesson was that dedicated variants beat namespace tricks. Weigh:
+
+  D7 tuples — (a) parse-time desugar `(a, b)` → a synthesized nominal
+      ctor. Problem: nominal decls are monomorphic and keyed by ctor
+      name, but tuple SHAPES vary per use site ((int, int) vs
+      (list, int)); the parser can't know field types, and per-arity
+      int-only decls would mistype every non-int field. (b — evaluate
+      first) structural: `TTuple of typ list` in typ, dedicated
+      `Tuple of expr list` expr + `PTuple of pattern list` pattern —
+      the D6 precedent, keeping tuples out of the user ctor namespace
+      entirely. Typing checks fields exactly; the Maranget column
+      case for TTuple is an always-complete single-ctor signature
+      (specialize = unfold the fields; exhaustive iff sub-patterns
+      are). knormal lowers Tuple → KAdtAlloc with tag 0 and PTuple
+      columns → KFieldGet reads under the D5 used-fields filter — no
+      tag test ever. Field representability mirrors D3's ctor-field
+      rules. Type surface: `(int, int)` vs `int * int` — note `of
+      int * t` ALREADY uses TIMES to separate ctor fields in decls,
+      so a bare `typ TIMES typ` arm collides there (OCaml's answer:
+      `of int * t` stays two fields, a tuple field needs parens);
+      pick a surface that keeps menhir at zero conflicts.
+
+  D8 records — records have a natural nominal home: the user declares
+      `type point = { x : int; y : int }`, so this is a decl-level
+      desugar to a single-ctor ADT (ctor synthesized from the type
+      name) + a field-name → decl-order-index table alongside
+      ctor_info. Decide where literals `{ x = 1; y = 2 }` desugar:
+      parse time works only if the parser owns field tables (it
+      shouldn't); a typing-time rewrite to ctor form is the likely
+      winner. Accept permuted field order in literals and patterns by
+      sorting to decl order at rewrite time. Decide the field-access
+      surface: `r.x` needs a DOT token the lexer doesn't have (check
+      the float `0.5` and selector regex interactions) vs
+      destructuring-only via match — pick one and document it. Decide
+      whether record patterns may omit fields (missing = PWild).
+      Note LBRACE/RBRACE are declared in parser.mly but the lexer has
+      NO `{`/`}` rules — they're two of the three pre-existing
+      warnings; D8 adds the rules and the warning count legitimately
+      drops.
+
+  Shared — decide whether destructuring-let (`let (a, b) = e in ...`)
+      lands now as sugar for a one-arm match or is deferred; either
+      is fine, document the choice.
+
+Settled constraints that survive whatever you pick:
+- The D4/D5 objpool ABI is untouched: compound {tag, f0...} cells,
+  static per-type tags, IAdtAlloc/ITagGet/IFieldGet at 3+n/3/3
+  (§13.5). Tuples and records must compile to exactly this machinery.
+- One global ctor namespace (D3). Any synthesized ctor name must be
+  collision-proof against user code — avoid the namespace entirely
+  (structural) or reserve the form and reject user spellings of it.
+- Exhaustiveness/redundancy through the D3 Maranget machinery — no
+  side-channel approximation. Witnesses must render as tuple/record
+  syntax, never internal ctor names.
+- §4.4 public-entry contract: test entry points return ints.
+
+Guardrails:
+- Baseline BEFORE the first edit: rebuild per CLAUDE.md, suite green
+  (66 checks), hash the five canaries; all SIX /tmp harnesses green
+  (test_dyn_array, test_cons, test_regions, test_fixed_point,
+  test_adts, test_list_match — regenerate per §2 conventions if /tmp
+  was cleared).
+- The five canaries stay byte-identical; zero new menhir conflicts.
+- New lowering verified by CFG dump + command count on probes BEFORE
+  extending the test suite: tuple build = 3+n cmds, field read =
+  3 cmds, tuple/record match = zero obj_tag dispatches (grep the
+  emitted file), unused pattern fields emit NO obj_f<k> read.
+- Tests: scripts/test_tuples_records.mcaml (or one file each) + /tmp
+  harness per D9 conventions: tuple build/match round-trip, tuple-in-
+  ctor and ctor-in-tuple nesting, tuple as fun param/return (handle
+  convention), record decl/literal/pattern with permuted fields,
+  field access via whichever surface you picked, wrong-arity /
+  unknown-field / duplicate-field typing errors, and single-ctor
+  exhaustiveness (a one-arm tuple match typechecks; a trailing
+  `| _ -> ...` after it is rejected as redundant).
+
+After the task: update §2 and §13.5, commit with the task IDs (D7,
+D8; split decision-doc commits from implementation commits if the
+diffs are large). If you hit any §13 escalation trigger, stop and
+tell me. Before writing code, confirm the chosen representations and
+outline the planned file edits.
+
+Phase D then has no open tasks; next per §13.7 is Phase E (HM
+inference + let-polymorphism) — do not start it in this session.
+```
+
 ## 9. Rollback and A/B flags
 
 Add these environment flags in the same style as the existing
