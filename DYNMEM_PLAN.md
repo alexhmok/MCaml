@@ -1109,13 +1109,83 @@ self-recursion with source-order generalization.
       annotations exactly as today. Full battery green: suite 66/66 +
       async, Phase D 40/40, all seven /tmp harnesses, five canaries
       byte-identical.)
-- [ ] E3. Let-generalization at `let` bindings; instantiation at uses (syntactic-value restriction per §13.10 decision 3)
-- [ ] E4. Annotations on `fun` params and return types become optional (parser: `param := ID | ID COLON typ`, optional return; omitted → `TVar (ref None)`; zero new menhir conflicts; return annotations become checked)
-- [ ] E4b. Lift B2's monomorphic-list restriction to 'a list (Nil/Cons/head/tail/is_nil generic; PCons/PNil + Maranget list column carry the element type; `list` annotation keyword still means `TList TInt`; region-return of `TList` non-int keeps failing loudly at codegen)
-- [ ] E5. `for_lift.ml`: the `walk` env must tolerate unresolved `TVar`s (zonk + default-to-TInt when materializing helper params; §13.10 E5 corollary)
-- [ ] E6. `knormal.ml` boundary: main.ml zonks each def and BINDS residual `TVar`s to TInt before `compile_def_to_cfg` (knormal and below never see a TVar)
-- [ ] E7. `monomorphize.ml`: keep the existing `TArrStatic`/`TMat` template path (length-in-type forces specialization). All other polymorphic types flow through uniform int representation — no new monomorphization work needed (verification task)
-- [ ] E8. Tests: `scripts/test_polymorphism.mcaml` + /tmp harness per D9 conventions — polymorphic `id` at int/bool/list/tuple, first-order polymorphic list helpers (length/sum — no map/fold, that's F), tuple-polymorphic swap, value-restriction rejection probe, un-annotated fun inferring param types from use, annotation-mismatch probe, HM diagnostic quality (unify-fail names both types; occurs-check error actionable)
+- [x] E3. Let-generalization at `let` bindings; instantiation at uses (syntactic-value restriction per §13.10 decision 3)
+      (Commit `c93b1e0`. `is_value` (literals/Var/Nil/Cons-Tuple-Record-
+      ctor of values), `generalize` scanning the scheme env PLUS the
+      global tables — a tvar shared with another def's still-uninferred
+      fun_sigs entry is never quantified, so forward-shared constraints
+      can't evaporate at instantiation. `fun_schemes` table with
+      per-call-site `instantiate_fun`; App lookup order is fun_schemes
+      → fun_sigs (raw monotype: self-recursion + forward calls,
+      decision 7) → TInt fallback. The App arg-mismatch message gains a
+      "(cannot unify X with Y)" suffix — legacy prefix preserved.
+      Behavior-inert while annotations were still required: battery
+      green, canaries byte-identical.)
+- [x] E4. Annotations on `fun` params and return types become optional
+      (Commit `67b56d8`, together with E5/E6. Parser: `param := ID |
+      ID COLON typ`, optional return; omitted → `TVar (ref None)`
+      minted in the action — no option types, no new AST shape; ZERO
+      new menhir conflicts (only the pre-existing IN warning);
+      regenerated parser.ml/.mli checked in. `Typing.type_fun_def`
+      unifies the declared return with the body type — the decision-6
+      strengthening; the full battery confirmed no existing script
+      carried a wrong return annotation. Probes: unannotated
+      `double(21)`=42, `id` at bool+int in one program=42 under sim,
+      return-mismatch error names both types.)
+- [x] E4b. Lift B2's monomorphic-list restriction to 'a list
+      (Commit `6e48e9c`. Nil mints a fresh elem tvar per mention
+      (residuals default to TInt at the boundary — bare `[]` behavior
+      preserved); Cons unifies head against the tail's element type
+      (new both-types message replaces the B2 "v1 only supports int
+      lists" rejection); head/tail/is_nil become 'a-list-generic,
+      dropping B8's accept-anything laxity (unification types the
+      let-bound-list pattern directly). PCons checks the head
+      sub-pattern against the element type — ctor-in-list patterns are
+      typeable, closing the D6 scope note — and `useful`'s cons
+      specializations thread the column element type (exact witness:
+      `(Rect(_, _) :: [])`). Zero runtime/IR/codegen change; `list`
+      keyword still = `TList TInt`; region returns of TList non-int
+      still fail loudly at codegen (re-verified).)
+- [x] E5. `for_lift.ml`: the `walk` env must tolerate unresolved `TVar`s
+      (Commit `67b56d8` — ZERO for_lift edits needed. The walk's env
+      types share the def's tvar REFS, so synthesized helper params
+      ride the same refs; they get constrained through the helper's
+      call site during main's typing pass and default with everything
+      else in the zonk pass. The oracle's speculative walk-time
+      unifications are a subset of real typing's (same expressions,
+      laxer App rule — fun_sigs is empty during for_lift), so no
+      contradiction is possible. §13.10 E5 corollary documents the one
+      pathological edge: a region body whose type is prematurely
+      zonk-defaulted at walk time — unreachable in practice because
+      region-in-helper is rejected at main.ml (C3).)
+- [x] E6. knormal boundary: main.ml zonks each def, binding residual `TVar`s to TInt before `compile_def_to_cfg`
+      (Commit `67b56d8`. Phase 1 split into 1a type-and-generalize
+      (source order, synthetic helpers skipped), 1b zonk every def via
+      `Typing.zonk_default` (destructive bind is safe — ALL typing,
+      including the for_lift oracle, is complete), 1c compile. knormal
+      and below never see a TVar; `fun f(x) = 7` compiles with x : int.)
+- [x] E7. `monomorphize.ml`: template path verification
+      (No code change, as predicted. Evidence: `tvar_bindable` makes
+      TArrStatic/TMat/TArrDyn unbindable to tvars, so templates remain
+      annotation-driven; suite t32/t33 (dotp mono a/b) still emit
+      `dotp__arr10_arr11` / `dotp__arr12_arr13` clones; primitives_v1
+      canary (arr-param templates throughout) byte-identical through
+      the whole phase.)
+- [x] E8. Tests: `scripts/test_polymorphism.mcaml` + /tmp harness
+      (Commit `ab19836`. 10 int-returning entries per §4.4: id at
+      int/bool/list/tuple/ADT, len at three element types, swap at two
+      tuple shapes, un-annotated inference from use, E3
+      let-generalization proper (`let n = [] in` used at int AND bool
+      elems), ctor-in-list dispatch. `/tmp/mcaml_out/test_polymorphism
+      .py` (uncommitted, D9 conventions) asserts $ret + §4.4
+      post-conditions, greps ZERO clones for id/swap/len (§13.1:
+      polymorphic functions compile once), and probes five rejections:
+      value restriction (`ref []` at two elem types), annotation
+      mismatch, occurs check (actionable), unify-fail naming both
+      types, and the tvar single-int restriction (darr needs an
+      annotation). 18/18 green. Suite 66/66 + async; Phase D 40/40;
+      all EIGHT /tmp harnesses green; five canaries byte-identical
+      through the entire phase.)
 
 ### Phase F — First-class lambdas (specialization + escape-analysis fallback)
 - [ ] F1. Parser/AST: `fun x -> e`, partial application, `Lambda of pattern list * expr` AST node
@@ -2263,6 +2333,105 @@ After each session: update §2 (mark E-task progress with commit
 hashes), keep decision-doc commits separate from implementation
 commits, and leave the tree green. When E is fully closed, author
 §8.13 for Phase F.
+```
+
+### 8.13 Phase F kickoff (F1–F7 — first-class lambdas)
+
+Re-pasteable across sessions: check §2 for which F tasks are open and
+pick up from there.
+
+```
+Read /Users/alexmok/MCaml/DYNMEM_PLAN.md — §2 for current status (all
+of Phase E is closed: HM inference + let-polymorphism landed, commits
+25cc860..ab19836), §13.6 for the settled two-strategy design
+(specialize aggressively, fall back gracefully — do NOT revisit),
+§13.5 for the closure cell layout ({tag: $CLOSURE, code, env_0, ...}
+in the existing objpool), §13.10 for the Phase E decisions Phase F
+builds on (esp. the tvar single-int restriction — a closure handle IS
+a single int, so 'a -> 'b tvars stay sound), §13 (bottom) for
+escalation triggers. Read CLAUDE.md for the pipeline and the manual
+rebuild command. Verify `git status` is clean before starting.
+
+This phase is F1–F7: `fun x -> e` lambdas, closure conversion, escape
+analysis, whole-program defunctionalization for Known lambdas, and the
+apply-dispatch runtime for Escaping ones. Two lowering strategies, ONE
+language surface (§13.6): Known lambdas (never stored/returned/passed
+to an escaping HOF param) get MLton-style specialization — the HOF is
+cloned per unique closure that flows in, at zero runtime cost;
+Escaping lambdas get a closure objpool cell + `mcaml:apply` macro
+dispatch (~4 cmds fixed + 2/captured var + ~2x macro wall-clock).
+Expect 3–4 sessions. Suggested order: decisions + F1/F2 first (parse +
+one uniform closure-conversion IR form, everything still rejected at
+codegen so the battery stays trivially green), then F3/F4
+(escape analysis + specialization — this alone makes literal-lambda
+HOFs work end-to-end), then F5 (apply-dispatch runtime), then F6/F7.
+
+Make the DECISIONS first and document them in a new §13.11 before
+writing code (D5/D6 protocol):
+
+  1. Arrow types — HM needs `TFun of typ list * typ` (or curried
+     equivalent) in Ast.typ. Decide: n-ary uncurried (matches the
+     existing call convention, no partial application) vs curried with
+     auto-currying (the F1 task line mentions partial application —
+     decide whether it survives scoping; n-ary + no-partial-app is the
+     cheap v1). Whatever lands must extend tvar_bindable: a closure
+     handle is ONE int, so TFun becomes tvar-bindable — that is what
+     makes polymorphic HOFs (map : ('a -> 'b) -> 'a list -> 'b list)
+     typeable in Phase F, and it must NOT break the §13.10 amendment
+     for the non-uniform types.
+  2. Where lambdas may appear in v1 — argument position only vs
+     let-bound vs stored-in-ADT. §13.6 already prices escaping
+     closures; decide the v1 SURFACE scope and the exact "escaping"
+     definition F3 classifies against.
+  3. fun_sigs/fun_schemes interaction — HOF params are TFun-typed;
+     decide how build_sigs represents a HOF's signature and whether
+     specialization clones re-enter the fn_table before or after
+     monomorphize (the F3 task line says between inline and
+     monomorphize — confirm or amend with rationale).
+  4. Closure tag value — §13.5 says {tag: $CLOSURE, ...}; pick the
+     concrete reserved tag (ADT tags are per-type so a dedicated
+     sentinel is safe; document why it can't collide).
+  5. tick_guard/tick_split interaction — apply-dispatch inside a
+     TCO'd loop: decide how cost.ml prices ICall-via-apply and whether
+     MCAML_STRICT_HOT (F6) fires at typing or at codegen.
+
+Behaviors that MUST survive (all pinned by the existing battery):
+- Everything Phase E pinned: §13.10 decisions, the tvar single-int
+  restriction, zero clones for value-polymorphic functions (lambda
+  SPECIALIZATION clones are new and expected — the E8 zero-clones grep
+  pins id/swap/len specifically, keep it passing).
+- The §4.4 public-entry contract, every §4.1 reserved slot, ICons/
+  IHead/ITail budgets, the D5 decision-tree shapes, region walker
+  domain (TList TInt only).
+- for_lift's oracle degraded mode and the two-pass main.ml driver
+  (type+generalize, then zonk+compile) — closure conversion must slot
+  between them or after, not inside typing.
+
+Guardrails (the full battery, now NINE checks):
+- Baseline BEFORE the first edit: rebuild per CLAUDE.md; suite 66/66 +
+  async; Phase D suite 40/40; hash the five canaries; all EIGHT /tmp
+  harnesses green (test_dyn_array, test_cons, test_regions,
+  test_fixed_point, test_adts, test_list_match, test_tuples_records,
+  test_polymorphism — regenerate per §2 conventions if /tmp was
+  cleared).
+- Five canaries byte-identical until a phase task deliberately
+  changes codegen for lambda-free programs (none should — lambdas are
+  purely additive; any drift is a stop-and-investigate).
+- Zero new menhir conflicts; every pre-existing typing error message
+  keeps firing (probe-update-in-same-commit rule applies).
+- F7 tests per D9 conventions: literal lambdas in HOFs specialize
+  (grep the clone files), closures captured in ADTs take the apply
+  path, MCAML_SPECIALIZE_LIMIT fallback fires, MCAML_STRICT_HOT
+  promotes the right patterns, and the [closure] diagnostic lines
+  match the §13.6 contract.
+
+If escape analysis or specialization forces a §3 decision to bend
+(e.g. §3.6 "new IR ops are opaque"), STOP and flag per §13 — do not
+special-case through it.
+
+After each session: update §2 with commit hashes, keep decision-doc
+commits separate from implementation commits, and leave the tree
+green. When F is fully closed, author §8.14 for Phase G.
 ```
 
 ## 9. Rollback and A/B flags
