@@ -3381,6 +3381,222 @@ namespace, D3's decl-before-use ordering, and every pre-existing error
 message byte-for-byte (arity/unbound-tyvar errors are NEW messages,
 not replacements).
 
+### 13.12 Phase F decisions (first-class lambdas)
+
+Settled before the first F1 edit, per the D5/D6/G4 protocol, from a
+full sweep of every exhaustive-match function over `typ` in
+`typing.ml`, a read of `ast.ml`'s current `typ`/`expr`/`def`, the
+`fun_sigs`/`fun_schemes` population and `App` lookup path, `main.ml`'s
+Inline/Monomorphize ordering, `cost.ml`'s `ICall` pricing, and a direct
+check of `codegen_cfg.ml`'s region-return dispatch (line-cited below).
+The five decisions from the §8.13 kickoff, in order. Baseline
+verified clean before this work started: rebuild per CLAUDE.md, suite
+66/66+async, Phase D 40/40, Phase E 42/42+12 rejection probes, five
+canaries byte-identical (hash + `diff -rq` both confirm, matching
+`canary_hashes_e8_final.txt` exactly), all nine `/tmp` harnesses green
+including `test_param_types` (survived from G4, no reconstruction
+needed).
+
+**1. Arrow types — `TFun of typ list * typ`, n-ary uncurried, NO partial
+application in v1 (amends the F1 task line).** Every function/closure
+call in this language is already fully-applied n-ary with zero
+currying precedent — `App of string * expr list` and `Fun of string *
+(string * typ) list * typ * expr` (`ast.ml:48-84`) both take a fixed
+arg list, never a partial one. Introducing partial application would
+require an arity-tracking currying runtime (each partial application
+minting a NEW closure capturing the args-so-far) with no existing
+machinery to build on — a scope explosion the phase's 3–4-session
+budget doesn't include. Deferred as a mechanical G-follow-up (G5?) if
+ever needed, same posture as G4's deferred multi-param type decls.
+`tvar_bindable` (`typing.ml:141-154`) gets a `TFun _ -> None` arm
+(bindable, joining `TInt | TFloat | TBool | TList _ | TTuple _ | TAdt _
+| TVar _`) — a closure handle is one scoreboard int, which is exactly
+what makes `map : ('a -> 'b) -> 'a list -> 'b list` typeable and is
+what the kickoff's own decision-1 wording requires.
+
+Every one of the 12 functions the kickoff named needs a `TFun` arm,
+confirmed exhaustive (no catch-all `_` arm exists in any of them
+today) by direct read: `occurs`, `tvar_bindable`, `unify`,
+`zonk_default`, `copy_with`, `free_tvars`, `string_of_typ`,
+`check_typ_ok`, `subst_typarams` all get a RECURSING arm — `TFun (ps,
+r) -> List.exists/List.map/fold (recurse) ps` folded with `recurse r`
+(mirrors the existing `TTuple ts -> List.iter/exists/map ... ts`
+shape at, e.g., `typing.ml:124` (`occurs`), `typing.ml:219`
+(`zonk_default`), `typing.ml:241` (`copy_with`), `typing.ml:289`
+(`free_tvars`)). `unify`'s arm is structural and arity-checked,
+inserted before the catch-all at `typing.ml:196`:
+```
+| TFun (p1, r1), TFun (p2, r2) when List.length p1 = List.length p2 ->
+    List.iter2 unify p1 p2; unify r1 r2
+```
+`check_field_type` / `check_record_field_type` / `check_tuple_elem`
+(`typing.ml:404-449`, `:483-518`, `:697-728`) get a REJECTING arm
+instead — ties to decision 2 below — with a message parallel to the
+existing `TArrDyn`/`TRef` rejections: "closures cannot be stored as an
+ADT/tuple/record field in v1 — pass as a function argument, let-bind
+it, or return it instead." `string_of_typ` (`typing.ml:99-119`) renders
+`TFun ([t], r)` as `t -> string_of_typ r` (no parens, arity 1) and
+`TFun (ts, r)` as `"(" ^ String.concat ", " (List.map string_of_typ ts)
+^ ") -> " ^ string_of_typ r` for arity ≥ 2 — mirrors the existing
+`TAdt (n, [a])` vs `TAdt (n, args)` rendering split at
+`typing.ml:114-117`.
+
+**Region-return path needs ZERO new code — verified, not assumed.**
+`codegen_cfg.ml:262-310`'s `IRegionExit` dispatch on `ret_typ` ends in
+an untyped catch-all `| _ -> failwith (Printf.sprintf "codegen_cfg:
+region return type %s has no v1 walker" (match ret_typ with ... | _ ->
+"<unknown>"))` (lines 300–310) — BOTH the outer match and the inner
+diagnostic-string match already have their own `_` catch-all (line
+310: `| _ -> "<unknown>"`), so neither is exhaustive over `typ` and
+neither is forced to grow a `TFun` arm by the compiler. A closure
+escaping via region-return therefore already fails loudly today with
+"region return type <unknown> has no v1 walker" the moment `TFun`
+exists — functionally correct, zero new code, and satisfies the §13
+escalation guardrail (no §3 decision bends). Optional cosmetic-only
+follow-up: add `Ast.TFun _ -> "TFun"` to the inner match for a clearer
+message — not required for correctness.
+
+**2. v1 lambda placement scope — first-class everywhere EXCEPT stored
+in a Tuple/Record/ADT-ctor field; escaping defined over call-graph +
+ref/return flow only.** Lambdas are usable as a direct call argument,
+let-bound, returned from a function (HOF factories), and stored in a
+`ref` — the smallest scope where F5's apply-dispatch runtime isn't
+dead code: if lambdas were literal-argument-only, every lambda would
+be statically visible at its unique call site and F3 would classify
+100% of them `Known`, making F5 (a required task) unreachable.
+
+OUT OF SCOPE for v1: storing a lambda inside a `Tuple`/`Record` literal
+or an ADT constructor application field — REJECTED at typing via
+decision 1's `check_field_type`/`check_record_field_type`/
+`check_tuple_elem` arms, same posture as the existing `TArrDyn`/`TRef`
+rejections there. Rationale: (a) §13.6 already prices "closures stored
+in data structures" as an accepted, out-of-scope loss for MCaml's
+target workloads; (b) allowing it would force the C5 region deep-copy
+walker — which handles only `TList TInt` today and already fails
+loudly for `TAdt`/`TArrDyn`/`TTuple` region returns (verified above)
+— to reason about closures nested inside arbitrarily-matched data, a
+walker-extension question this phase doesn't need to open; (c) it
+keeps "escaping" a pure call-graph/ref/return-flow question over
+scalars, never a recursive structural-data question, which is what
+keeps F3's classifier tractable in one phase.
+
+F3's `Known`/`Escaping` boundary, concretely: a lambda is `Known` iff
+every use of its value resolves, at whole-program `fn_table` time
+(post-inline), to a directly-dispatchable call site — called
+immediately (through zero or more let/param aliases, but NOT through a
+`ref`-read or across a function-return boundary) as that one `Lambda`
+literal, or passed to a HOF parameter that is itself, transitively,
+only ever called (never stored/returned/`ref`'d/re-passed-past-budget)
+within that HOF. `Escaping via <reason>` the instant ANY use is:
+stored into a `ref`, returned as a function's result, passed to a
+parameter the callee doesn't call directly, or re-passed onward past
+another HOF whose `MCAML_SPECIALIZE_LIMIT` has been exceeded (decision
+3's fallback). Attempting to store one in a Tuple/Record/ADT field is
+caught at typing, before F3 ever runs — not an F3 concern at all.
+
+**3. fun_sigs/fun_schemes need no new table; F4 folds into Monomorphize,
+not a new re-entrant phase.** `TFun` is just another `typ`, so a HOF's
+`(string * typ) list` param list carries `TFun (ps, r)` through the
+EXISTING `fun_sigs`/`fun_schemes`/`generalize`/`instantiate` machinery
+untouched — `fun_sigs : (string, typ list * typ) Hashtbl.t`
+(`typing.ml:11`) and `build_sigs`/`type_fun_def` (`typing.ml:1067-1081`,
+`:1594-1602`) already store/process arbitrary `typ`, with zero
+per-shape special-casing to remove.
+
+This amends the F3 task line's "between inline and monomorphize"
+framing: F3 (escape analysis) IS the new standalone whole-`fn_table`
+pass sitting between `Inline.run` and `Monomorphize.run`
+(`main.ml:212-219`, confirmed strictly sequential over the same
+`fn_table : (string, Cfg.cfg_func) Hashtbl.t`) — it needs the same
+post-inline whole-program visibility the inliner itself needs. F4 (the
+actual specialization) is NOT a separate phase; it's an EXTENSION of
+Monomorphize's existing per-argument-shape clone key, extended to also
+key on "closure identity of a `Known`-classified `TFun` argument" as
+an additional specialization axis alongside its existing array-shape
+key. Clones re-enter `fn_table`/`fn_order` through the exact mechanism
+Monomorphize already uses for array clones (`main.ml:216-226`) — zero
+new plumbing in `main.ml`. `MCAML_SPECIALIZE_LIMIT=K` reuses
+Monomorphize's existing per-source-function clone-count bookkeeping as
+the SAME counter Known-lambda clones increment; the one genuinely NEW
+code path is the fallback beyond K — arrays have no apply-dispatch
+escape hatch, so "give up cloning and route through F5's apply-dispatch
+instead" is new logic Monomorphize doesn't need today.
+
+**4. Closure tag value — reserve tag `-2`.** Cells are `{tag: -2, code,
+env_0, env_1, ...}`. Every user-declared tag (ADT ctors, cons cells
+(tag 1), tuples/records (tag 0)) is assigned via `List.iteri` over
+decl order (`typing.ml:465`, confirmed by direct read) and is therefore
+always `>= 0` by construction — ANY negative tag is structurally
+impossible for a user-declared type, so `-2` cannot collide with any
+current or future decl, by construction rather than by convention.
+`-2` rather than `-1` is chosen purely so a raw NBT/cell dump during
+debugging doesn't visually conflate the closure tag field with the
+pre-existing, UNRELATED `-1` list-nil SENTINEL HANDLE value (§4.2) — a
+different field in a different context (a bare handle meaning "no
+cell" vs. a tag field inside an always-present cell) but adjacent
+enough in a hex/int dump to cause confusion during a manual debugging
+session. No dispatch code ever reads this tag at runtime: like every
+other objpool cell, dispatch is driven entirely by STATIC type
+knowledge (a value's `TFun` type is known at every call site from
+typing), matching D4/D5's existing "tags are NOT globally unique... a
+tag is only interpreted under the scrutinee's static type" — the tag
+field exists purely for `{tag, ...fields}` cell-shape uniformity and
+future dump readability, never for a runtime branch.
+
+**5. tick_guard/tick_split interaction — new `IApply` op, priced by a
+whole-program worst-case constant; `MCAML_STRICT_HOT` fires in
+`optimize.ml`, not typing.** New IR op `IApply of vreg option * vreg *
+vreg list` (dest, closure-handle vreg, arg vregs) in `cfg.ml`, lowered
+via a fixed `mcaml:apply` macro-dispatch helper (F5) that reads the
+`code` field and jumps to the resolved function. Only `Escaping`
+lambdas ever lower to `IApply`; `Known` lambdas' call sites become
+ordinary `ICall`s against F4's specialized clone.
+
+`cost.ml`'s `estimate` (`cost.ml:36`, `ICall` priced at `cost.ml:45-47`)
+gets an `IApply` arm priced as `4 + 2 * K_max_captured`, where
+`K_max_captured` is a SINGLE whole-program constant (not per-call-site)
+— computed once, after F3's whole-program escape analysis has
+enumerated every `Escaping` closure shape, as the maximum
+captured-variable count across all of them. This is an EXACT
+worst-case bound, not a heuristic: because escape analysis is
+whole-program/closed-world (the same reason `Inline.run` and
+`Monomorphize.run` are whole-table passes), every closure shape that
+could ever reach ANY apply-dispatch call site is statically
+enumerable, even though which specific shape reaches a given site at
+runtime isn't. This mirrors `cost.ml`'s own documented posture
+(`cost.ml:29-32`) of pricing the worst realistic lowering rather than
+modeling per-call-site specifics exactly.
+
+`MCAML_STRICT_HOT` fires at the CFG/optimize level (`main.ml` Phase 3 /
+`optimize.ml`), NOT in `typing.ml`. Grounding: `typing.ml` runs per-def
+before `knormal`/`cfg_build` even exist and has zero notion of loop
+structure; "hot loop" can only be evaluated once `dominators`/
+`loop_detect` have run for a function (already wired per-function
+inside `optimize.ml`'s M4 loop pass, confirmed by the module layout in
+CLAUDE.md) AND once F3's classification is available. Concretely: F3
+tags each `IApply` site (or the `ICall` it would have been) with its
+escape reason; a new F6 check runs per-function during Phase 3, after
+that function's `loop_detect` result is available, and raises a
+compile error if `MCAML_STRICT_HOT=1` and any `IApply` sits inside a
+detected natural loop OR inside a TCO'd self-tail loop body (the common
+case in this codebase). Threading F3's per-call-site reason data
+through to this per-function Phase 3 check (a side table keyed by
+function+block+instruction-index vs. embedding the reason string
+directly in `IApply`) is left as an F3/F6 implementation choice, not
+decided here.
+
+Behaviors that MUST survive (restated from §8.13, now grounded): every
+§13.10/§13.11 decision including the tvar single-int amendment; zero
+clones for value-polymorphic non-lambda functions (lambda
+specialization clones are new and expected); the §4.4 public-entry
+contract and every §4.1 reserved slot; ICons/IHead/ITail budgets; the
+D5 decision-tree shapes; the region-walker domain staying `TList TInt`
+only (now doubly confirmed — `TFun` automatically falls into the same
+already-existing catch-all, no new rejection arm needed); `for_lift`'s
+oracle degraded mode and the two-pass `main.ml` driver (type+
+generalize, then zonk+compile) — closure conversion slots between
+Inline and Monomorphize (decision 3), not inside typing.
+
 ## 13. Escalation triggers
 
 If any of these happen during a task, stop and flag to the user rather
