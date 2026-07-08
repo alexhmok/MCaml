@@ -3198,7 +3198,7 @@ surviving `IClosureMake`/`IApply` pair that hits a loud
 currently fail EARLIER, at knormal's defensive `Typing.fun_sigs`
 membership check, with a related but distinctly-worded message — see
 decision 2's v1 scope note and the F2-completion entry in §2 — not at
-the F5 stub; if F5's design changes what knormal accepts, re ecamine
+the F5 stub; if F5's design changes what knormal accepts, re-examine
 that check), lambdas forwarded through two or more HOF parameter hops,
 lambdas forwarded across a self-tail-recursive back-edge, lambdas
 merged from ambiguous control flow (`if c then lam1 else lam2` — the
