@@ -26,7 +26,7 @@ let build_sigs (prog : program) : unit =
     match d with
     | Fun (name, params, ret, _) ->
         Hashtbl.replace fun_sigs name (List.map snd params, ret)
-    | Val _ -> ()
+    | Val _ | TypeDecl _ -> ()
   ) prog
 
 let rec infer env e =
@@ -309,6 +309,11 @@ let rec infer env e =
       let ty = infer env e in
       tr := ty;
       ty
+
+  | Match _ ->
+      (* Phase D / D1 placeholder: full pattern typing + exhaustiveness
+         lands in D3. Unreachable until the D2 parser emits Match. *)
+      raise (Error "match: typing lands in D3")
 
   | For (i, lo, hi, body) ->
       if infer env lo <> TInt then raise (Error "for: lo must be int");

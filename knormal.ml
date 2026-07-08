@@ -514,6 +514,12 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
   | App ("array_make", _) ->
       failwith "array_make must appear as the rhs of a let binding"
 
+  | Match _ ->
+      (* Phase D stub, same convention as B4/C1: the frontend (D1–D3)
+         accepts and types `match`, but decision-tree lowering is D5.
+         Fail fast rather than silently miscompiling. *)
+      failwith "Match: lowering lands in D5"
+
   | Region (tr, body) ->
       (* Phase C / C3+C5. Normalize the body with the same [dest] so
          the body's final value still lands in [d]. For primitive

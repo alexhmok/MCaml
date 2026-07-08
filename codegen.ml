@@ -17,7 +17,7 @@ open Ast
 
 let compile_def_to_cfg (d : def) : Cfg.cfg_func option =
   match d with
-  | Val _ -> None
+  | Val _ | TypeDecl _ -> None
   | Fun (name, params, _, body) ->
       let norm = Knormal.normalize_fun params body in
       let optimized = Tco.optimize_tail name norm in

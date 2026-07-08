@@ -96,14 +96,42 @@ let rec g env e =
   | Nil -> Nil
   | Cons (h, t) -> Cons (g env h, g env t)
   | Region (tr, e) -> Region (tr, g env e)   (* share tr so typing's write is visible downstream *)
+  (* Phase D: pattern variables are binders — rename them like Let/For
+     binders so `let r = 5 in match e with Circle(r) -> r` resolves the
+     body's r to the pattern binding, not the outer let. *)
+  | Match (e, arms) ->
+      let e' = g env e in
+      let arms' = List.map (fun (p, body) ->
+        let (p', env') = rename_pattern env p in
+        (p', g env' body)) arms in
+      Match (e', arms')
   | For (i, lo, hi, body) ->
       let i' = new_name i in
       let env' = M.add i i' env in
       For (i', g env lo, g env hi, g env' body)
 
+and rename_pattern env p =
+  match p with
+  | PWild -> (PWild, env)
+  | PInt i -> (PInt i, env)
+  | PVar x ->
+      let x' = new_name x in
+      (PVar x', M.add x x' env)
+  | PCtor (c, ps) ->
+      let (ps_rev, env') =
+        List.fold_left (fun (acc, e) p ->
+          let (p', e') = rename_pattern e p in
+          (p' :: acc, e')) ([], env) ps
+      in
+      (PCtor (c, List.rev ps_rev), env')
+
 (* Rename Definitions (Top Level) *)
 let h env d =
   match d with
+  | TypeDecl _ -> d
+      (* Phase D: type declarations bind no runtime names; ctor-name
+         validation (Capitalized, unique) happens at registration in
+         typing.ml where the error messages have full context. *)
   | Val (name, e) ->
       validate_toplevel_name "val" name;
       Val (name, g env e) (* We don't rename global values in this MVP *)

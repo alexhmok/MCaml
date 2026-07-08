@@ -752,7 +752,27 @@ real ONNX compile is host-side (ONNX walker → .mcaml emission),
 which is MineTorch's project, not MCaml's.
 
 ### Phase D — ADTs and pattern matching
-- [ ] D1. AST: `TypeDecl of string * constructor list`, `Match of expr * (pattern * expr) list`, `Pat*` variants
+- [x] D1. AST: `TypeDecl of string * constructor list`, `Match of expr * (pattern * expr) list`, `Pat*` variants
+      (`ast.ml` gains `TAdt of string` in typ (nominal ADT reference —
+      needed so D2's parser can accept `t` in type positions and D3 can
+      type scrutinees), `constructor = string * typ list`, `pattern`
+      (PWild/PVar/PInt/PCtor — PInt included because D5's decision
+      trees dispatch on `matches N` so int-literal arms are natural),
+      `Match` in expr, `TypeDecl` in def. Inert structural arms in
+      for_lift (free_vars + walk — pattern binders excluded from fvs;
+      walk threads them as TInt per §12.1 uniform representation) and
+      alpha's `h`. One deliberate strengthening over "inert": alpha's
+      Match arm renames pattern binders like Let/For binders, because
+      leaving them unrenamed while the body's vars DO get renamed
+      would capture-shift `let r = 5 in match e with Circle(r) -> r`
+      to the outer let. knormal gets the loud D5 stub
+      ("Match: lowering lands in D5"); typing gets a D3 placeholder
+      Error arm. `codegen.ml`'s `compile_def_to_cfg` Val arm widened
+      to `Val _ | TypeDecl _ -> None` — declared deviation from the
+      "zero codegen edits" guardrail: it's the driver dispatch, not
+      command emission, zero behavior change, and without it the
+      build has a non-exhaustive-match warning. Suite 66/66 green;
+      all five canaries byte-identical.)
 - [ ] D2. Parser: `type t = A | B of int | C of t * t` syntax, `match e with | p -> e | ...`
 - [ ] D3. Typing: nominal-type environment; pattern typing; exhaustiveness + redundancy check
 - [ ] D4. Runtime: generalize `conspool` into a single `objpool` with tag-discriminated cells (see §13 decision D.a). Alternative: keep conspool for lists and add a sibling pool per ADT — decide in D4 before touching codegen

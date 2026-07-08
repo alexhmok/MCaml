@@ -145,7 +145,7 @@ let () =
               (Printf.sprintf
                  "mcaml: global val %s: RHS must be an array literal \
                   `[| ... |]` in v1" name)
-        | Fun _ -> None
+        | Fun _ | TypeDecl _ -> None
       ) program
     in
     List.iter (fun (name, ty, ints) ->
@@ -160,7 +160,7 @@ let () =
     let fn_order : string list ref = ref [] in
     List.iter (fun def ->
       match def with
-      | Val _ -> ()
+      | Val _ | TypeDecl _ -> ()
       | Fun (name, params, _, body) ->
           if not (For_lift.is_synthetic_name name) then begin
             let type_env = List.map (fun (n, t) -> (n, t)) params in

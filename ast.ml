@@ -5,6 +5,20 @@ type typ = TInt | TFloat | TBool | TUnit | TSelector | TPos
          | TMat of typ * int * int    (* element type, rows, cols *)
          | TRef of typ                (* ref cell holding T *)
          | TList of typ               (* cons list: element type; handle at runtime *)
+         | TAdt of string             (* Phase D: nominal user-declared ADT; runtime value is an objpool handle (or a small-int for nullary-only enums — D4 decides) *)
+
+(* Phase D: one constructor of a declared ADT: name + field types.
+   Constructor names must be Capitalized (validated at registration in
+   typing.ml) so patterns can distinguish `Circle` (ctor) from `x` (var). *)
+type constructor = string * typ list
+
+(* Phase D: patterns for `match`. PCtor covers both nullary (`Point`)
+   and applied (`Circle(r)`, `Node(l, r)`) constructor patterns. *)
+type pattern =
+  | PWild                              (* _ *)
+  | PVar of string                     (* binds the scrutinee (sub)value *)
+  | PInt of int                        (* integer literal pattern *)
+  | PCtor of string * pattern list     (* constructor pattern, possibly nested *)
 type binop = Add | Sub | Mult | Div | Mod
            | FMult | FDiv                 (* Phase N: Q16.16 fixed-point multiply/divide *)
            | Eq | Neq | Lt | Leq | Gt | Geq | And | Or
@@ -40,9 +54,11 @@ type expr =
   | Nil                                    (* [] : TList t — empty list literal *)
   | Cons of expr * expr                    (* h :: t — cons cell *)
   | Region of typ ref * expr               (* region (fun () -> body) — the [typ ref] is written by typing.ml and read by knormal.ml so the IR's IRegionExit can carry the return type the deep-copy walker dispatches on *)
+  | Match of expr * (pattern * expr) list  (* Phase D: match e with | p -> e | ... *)
 
 type def =
   | Val of string * expr
   | Fun of string * (string * typ) list * typ * expr
+  | TypeDecl of string * constructor list (* Phase D: type t = A | B of int | ... *)
 
 type program = def list

@@ -87,6 +87,18 @@ let rec free_vars (bound : S.t) (e : expr) : S.t =
   | Nil -> S.empty
   | Cons (h, t) -> S.union (free_vars bound h) (free_vars bound t)
   | Region (_, e) -> free_vars bound e
+  | Match (e, arms) ->
+      List.fold_left (fun acc (p, body) ->
+        S.union acc (free_vars (S.union (pattern_vars p) bound) body))
+        (free_vars bound e) arms
+
+(* Phase D: names bound by a pattern (PVar binders, recursively). *)
+and pattern_vars (p : pattern) : S.t =
+  match p with
+  | PWild | PInt _ -> S.empty
+  | PVar x -> S.singleton x
+  | PCtor (_, ps) ->
+      List.fold_left (fun acc p -> S.union acc (pattern_vars p)) S.empty ps
 
 (* Walk an expression carrying a type env. Returns (new_expr, extra_defs). *)
 let rec walk (parent : string) (env : typ M.t) (e : expr)
@@ -205,12 +217,25 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
   | Region (tr, e) ->
       let (e', d) = walk parent env e in
       (Region (tr, e'), d)  (* share tr *)
+  | Match (e, arms) ->
+      let (e', d0) = walk parent env e in
+      (* Pattern binders enter the env as TInt: under the §12.1 uniform
+         representation every ADT field is a scoreboard int (scalar or
+         handle), and the env here only feeds For-helper fv capture and
+         Let type threading. Precise field types are typing.ml's job. *)
+      let pairs = List.map (fun (p, body) ->
+        let env' =
+          S.fold (fun v m -> M.add v TInt m) (pattern_vars p) env in
+        let (body', d) = walk parent env' body in
+        ((p, body'), d)) arms
+      in
+      (Match (e', List.map fst pairs), d0 @ List.concat_map snd pairs)
   | Int _ | Float _ | Bool _ | Str _ | Selector _ | Coord _
   | Command _ | Unit | Var _ -> (e, [])
 
 let lift_def (d : def) : def list =
   match d with
-  | Val _ -> [d]
+  | Val _ | TypeDecl _ -> [d]
   | Fun (name, params, ret, body) ->
       let env =
         List.fold_left (fun m (p, t) -> M.add p t m) M.empty params
