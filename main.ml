@@ -473,6 +473,13 @@ let () =
       all_files := !all_files @ files
     ) fn_order;
 
+    (* F6a: per-lambda specialize/escape report, once every function has
+       been through Phase 3 (so [Closure_spec.check_hot_loop]'s hot-loop
+       annotations, filled in per-function above, are complete). Always
+       on; a lambda-free program never populates the report table, so
+       this prints nothing. *)
+    Closure_spec.print_report ();
+
     (* Phase G: synthesize __globals_init.mcfunction with one
        `data modify storage mcaml:heap __g_<name> set value [...]` line
        per global val. Only emitted when the program has at least one

@@ -53,21 +53,28 @@ open Cfg
 type def_info = {
   def_count : (vreg, int) Hashtbl.t;
   def_instr : (vreg, instr) Hashtbl.t;  (* only meaningful when count = 1 *)
+  all_defs  : (vreg, instr list) Hashtbl.t;
+    (* every def instr seen for a vreg, in no particular order — used
+       only for F6a's best-effort ambiguous-merge attribution (§13.12,
+       new decision): when a def-count > 1, this lets the diagnostic
+       name every distinct IClosureMake origin reaching the merge. *)
 }
 
 let collect_defs (cfg : cfg_func) : def_info =
   let def_count = Hashtbl.create 16 in
   let def_instr = Hashtbl.create 16 in
+  let all_defs = Hashtbl.create 16 in
   let note d i =
     Hashtbl.replace def_count d (1 + (try Hashtbl.find def_count d with Not_found -> 0));
-    if not (Hashtbl.mem def_instr d) then Hashtbl.replace def_instr d i
+    if not (Hashtbl.mem def_instr d) then Hashtbl.replace def_instr d i;
+    Hashtbl.replace all_defs d (i :: (try Hashtbl.find all_defs d with Not_found -> []))
   in
   Array.iter (fun (b : block) ->
     List.iter (fun i -> match instr_def i with
       | Some d -> note d i
       | None -> ()) b.instrs
   ) cfg.blocks;
-  { def_count; def_instr }
+  { def_count; def_instr; all_defs }
 
 (* Resolve [v]'s origin within one function: [Some (lam_fname, captures)]
    iff [v] is defined exactly once and that definition is (transitively,
@@ -91,6 +98,111 @@ let resolve_origin (info : def_info) (v : vreg) : (string * vreg list) option =
   in
   go v
 
+(* ---- F6a: per-lambda specialize/escape diagnostic report ----
+
+   §13.6's contract: "[closure] <name>: specialized (N call sites)" or
+   "[closure] <name>: ESCAPING via <reason> — ~M cmds/call[, inside hot
+   loop <loop>]", keyed by lambda-HELPER name (e.g. "main__lam1"), not
+   by call site. Threading decision (§13.12, new): populated in two
+   passes touching this same module — [run] (Phase 2, below) fills in
+   [resolved_sites] / [escape_reason] / [site_functions] as it already
+   walks every IApply/ICall site for the specialization rewrite itself,
+   so no separate whole-table re-walk is needed; [check_hot_loop]
+   (called from codegen.ml's [compile_cfg_to_files], Phase 3, once per
+   function right after that function's own [Optimize.run] has
+   returned — loop_detect is only meaningful post-LICM/unroll/SROA, and
+   this is the exact point the F6 kickoff named, "before regalloc")
+   fills in the hot-loop annotation once loop structure exists.
+   [print_report] is called once by main.ml after every function has
+   been through Phase 3. Always-on, no MCAML_* gate: a program with
+   zero lambdas populates zero [report] entries, so it emits zero bytes
+   of new stderr output — this is what the F6a exit test asserts (grep
+   over the ten /tmp harnesses' captured stderr, all lambda-free). *)
+
+type report_entry = {
+  mutable resolved_sites : int;
+  mutable escape_reason  : string option;
+  mutable hot_loop       : string option;
+}
+
+let report : (string, report_entry) Hashtbl.t = Hashtbl.create 16
+(* lam_fname -> #captures, gathered once at the end of [run] from any
+   surviving IClosureMake — feeds the ESCAPING line's "~M cmds/call"
+   using cost.ml's own IApply formula (4 + 2*captures). *)
+let caps_count : (string, int) Hashtbl.t = Hashtbl.create 16
+(* lam_fname -> set of function names whose body holds an unresolved
+   use attributable to it. Best-effort (an ambiguous-merge IApply's
+   runtime identity is not statically knowable — every candidate origin
+   reaching the merge is tagged); used only to steer
+   [check_hot_loop]'s hot-loop annotation and MCAML_STRICT_HOT's error
+   message toward the right lambda name(s), never for correctness of
+   the specialization rewrite itself. *)
+let site_functions : (string, (string, unit) Hashtbl.t) Hashtbl.t = Hashtbl.create 16
+
+let get_entry (lam_fname : string) : report_entry =
+  match Hashtbl.find_opt report lam_fname with
+  | Some e -> e
+  | None ->
+      let e = { resolved_sites = 0; escape_reason = None; hot_loop = None } in
+      Hashtbl.replace report lam_fname e; e
+
+let note_resolved (lam_fname : string) : unit =
+  let e = get_entry lam_fname in
+  e.resolved_sites <- e.resolved_sites + 1
+
+let note_site (lam_fname : string) (fname : string) : unit =
+  let s = match Hashtbl.find_opt site_functions lam_fname with
+    | Some s -> s
+    | None ->
+        let s = Hashtbl.create 4 in
+        Hashtbl.replace site_functions lam_fname s; s
+  in
+  Hashtbl.replace s fname ()
+
+let note_escape (lam_fname : string) (fname : string) (reason : string) : unit =
+  let e = get_entry lam_fname in
+  if e.escape_reason = None then e.escape_reason <- Some reason;
+  note_site lam_fname fname
+
+(* Best-effort attribution for a closure operand that failed to resolve
+   to a single origin. Chases the SAME single-def ICopy chain
+   [resolve_origin] does (a plain operand can be one hop away from the
+   actual ambiguity, e.g. after Inline.run's splice-time [$inN_]
+   rebinding), stopping at whichever vreg first fails to be a clean
+   single-def IClosureMake/ICopy chain. The ONLY way that failure can
+   happen for a vreg that IS locally defined is def-count <> 1 (an
+   ambiguous control-flow merge); def-count = 0 means [v] is external
+   to this function (typically the function's own incoming TFun
+   parameter — not this function's problem to explain, the caller side
+   in [rewrite_callers] owns that attribution), and def-count = 1 with
+   a non-closure-chain shape is the HOF-factory-return / ref-then-call
+   shape, both of which already fail earlier at knormal (decision 8) —
+   they cannot actually reach this point, so they are silently skipped
+   here rather than mis-attributed. Not every theoretically-possible
+   escape reason is attributable at the CFG level; documented as a
+   known, deliberate gap rather than silently pretended-complete. *)
+let note_unresolved_closure_use (info : def_info) (fname : string) (v : vreg) : unit =
+  let visited = Hashtbl.create 8 in
+  let rec go v =
+    if Hashtbl.mem visited v then ()
+    else begin
+      Hashtbl.replace visited v ();
+      match Hashtbl.find_opt info.def_count v with
+      | Some 1 ->
+          (match Hashtbl.find_opt info.def_instr v with
+           | Some (ICopy (_, s)) -> go s
+           | _ -> ())
+      | Some n when n <> 1 ->
+          List.iter (fun i -> match i with
+            | IClosureMake (_, lam_fname, _) ->
+                note_escape lam_fname fname "ambiguous control-flow merge"
+            | _ -> ()
+          ) (try Hashtbl.find info.all_defs v with Not_found -> [])
+      | _ -> ()
+    end
+  in
+  go v
+
 (* ---- same-function case ---- *)
 
 let rewrite_same_function (cfg : cfg_func) : unit =
@@ -99,8 +211,8 @@ let rewrite_same_function (cfg : cfg_func) : unit =
     b.instrs <- List.map (fun i -> match i with
       | IApply (dopt, cl, args) ->
           (match resolve_origin info cl with
-           | Some (lam_fname, caps) -> ICall (dopt, lam_fname, caps @ args)
-           | None -> i)
+           | Some (lam_fname, caps) -> note_resolved lam_fname; ICall (dopt, lam_fname, caps @ args)
+           | None -> note_unresolved_closure_use info cfg.fname cl; i)
       | other -> other
     ) b.instrs
   ) cfg.blocks
@@ -129,12 +241,21 @@ let alias_set (cfg : cfg_func) (start : vreg) : (vreg, unit) Hashtbl.t =
 (* Does [callee] use param [idx] (transitively through the alias set)
    ONLY as the closure-operand of its own IApply instructions? Any other
    use (ICall arg, IApply arg, ref/heap store, region-exit return, branch
-   cond, guard, self-tail forward, ...) disqualifies conservatively. *)
-let only_directly_applied (callee : cfg_func) (idx : int) : bool =
+   cond, guard, self-tail forward, ...) disqualifies conservatively.
+   Returns [None] when it's only-directly-applied (OK to specialize) or
+   [Some reason] naming the first disqualifying use found — F6a needs
+   the "why", not just a bool, to attribute the escape to a reason
+   string. *)
+let only_directly_applied (callee : cfg_func) (idx : int) : string option =
   let target = Printf.sprintf "param_%d" idx in
   let aliases = alias_set callee target in
-  let ok = ref true in
-  let check_use v = if Hashtbl.mem aliases v then ok := false in
+  let reason = ref None in
+  let check_use ?(via_self_tail = false) v =
+    if !reason = None && Hashtbl.mem aliases v then
+      reason := Some (if via_self_tail
+                       then "forwarded across a self-tail back-edge"
+                       else "forwarded through 2+ HOF hops")
+  in
   Array.iter (fun (b : block) ->
     List.iter (fun i -> match i with
       | ICopy (_, s) -> ignore s (* alias propagation edge; not itself a leak *)
@@ -147,11 +268,14 @@ let only_directly_applied (callee : cfg_func) (idx : int) : bool =
     ) b.instrs;
     (match b.term with
      | TBranch (c, _, _, _) -> check_use c
-     | TTail (_, targs) -> List.iter check_use targs
+     (* TTail is always a self-tail call (cfg.ml's own definition), so
+        any leak through its arg list is specifically a loop-carried
+        forward, not a generic HOF hop. *)
+     | TTail (_, targs) -> List.iter (check_use ~via_self_tail:true) targs
      | TRet | TJump _ | TUnreachable -> ());
     List.iter (fun (v, _) -> check_use v) b.guards
   ) callee.blocks;
-  !ok
+  !reason
 
 let clone_block (b : block) : block =
   { label = b.label; instrs = b.instrs; term = b.term; preds = b.preds; guards = b.guards }
@@ -165,16 +289,17 @@ let mangle (callee_name : string) (resolved : resolved_param list) : string =
   callee_name ^
   String.concat "" (List.map (fun r -> Printf.sprintf "__clo%d_%s" r.idx r.lam_fname) resolved)
 
-(* Directly-applied-only check result, cached per (callee, idx). *)
-let only_applied_cache : (string * int, bool) Hashtbl.t = Hashtbl.create 16
-let only_applied_cached (table : (string, cfg_func) Hashtbl.t) (callee_name : string) (idx : int) : bool =
+(* Directly-applied-only check result, cached per (callee, idx). [None]
+   = OK to specialize; [Some reason] = disqualified, with why. *)
+let only_applied_cache : (string * int, string option) Hashtbl.t = Hashtbl.create 16
+let only_applied_cached (table : (string, cfg_func) Hashtbl.t) (callee_name : string) (idx : int) : string option =
   match Hashtbl.find_opt only_applied_cache (callee_name, idx) with
-  | Some b -> b
+  | Some r -> r
   | None ->
       let callee = Hashtbl.find table callee_name in
-      let b = only_directly_applied callee idx in
-      Hashtbl.replace only_applied_cache (callee_name, idx) b;
-      b
+      let r = only_directly_applied callee idx in
+      Hashtbl.replace only_applied_cache (callee_name, idx) r;
+      r
 
 let ensure_clone
     (table : (string, cfg_func) Hashtbl.t)
@@ -193,13 +318,26 @@ let ensure_clone
       let template = Hashtbl.find table callee_name in
       let cfg = clone_cfg template in
       let orig_arity = List.length template.params in
-      let next_slot = ref orig_arity in
+      let resolved_idxs = List.map (fun r -> r.idx) resolved in
+      (* F4-followup: drop each resolved position's slot entirely rather
+         than retiring its type to TInt in place. [shift] maps an
+         original (pre-drop) index to its position after every dropped
+         index below it has been removed — computed once as a single
+         index-shift function so simultaneous multi-position drops (a
+         HOF specialized on 2+ closure params at once) shift correctly
+         instead of double-shifting via sequential single drops. *)
+      let shift i = i - List.length (List.filter (fun d -> d < i) resolved_idxs) in
+      let new_arity = orig_arity - List.length resolved_idxs in
+      let next_slot = ref new_arity in
       let slotted = List.map (fun r ->
         let n_caps = List.length r.caps in
         let slots = List.init n_caps (fun i -> Printf.sprintf "param_%d" (!next_slot + i)) in
         next_slot := !next_slot + n_caps;
         (r, slots)
       ) resolved in
+      (* Rewrite IApply -> ICall for the resolved closure operand(s) using
+         the ORIGINAL (pre-drop) "param_<idx>" numbering — must happen
+         before the renumbering pass below touches those literal strings. *)
       List.iter (fun (r, slots) ->
         let target = Printf.sprintf "param_%d" r.idx in
         let aliases = alias_set cfg target in
@@ -211,26 +349,38 @@ let ensure_clone
           ) b.instrs
         ) cfg.blocks
       ) slotted;
-      (* Retire each resolved position's TFun type to TInt in the clone's
-         own params list. This is what stops the fixed-point loop from
-         re-selecting the SAME already-specialized position as a fresh
-         candidate on the next iteration (its closure operand is gone —
-         rewritten to ICall above — but the original param slot is still
-         passed positionally and must not keep looking like an open
-         TFun parameter, or resolve_origin would successfully re-resolve
-         it against the exact same origin every iteration, cloning a
-         new, pointlessly-nested name each time until iter_cap cuts it
-         off instead of reaching a fixed point). Types elsewhere in
-         cfg_func.params are "debug provenance only" (cfg.ml), so
-         changing this one is safe. *)
-      let resolved_idxs = List.map (fun r -> r.idx) resolved in
-      let retired_params =
-        List.mapi (fun idx (pname, ty) ->
-          if List.mem idx resolved_idxs then (pname, Ast.TInt) else (pname, ty)
-        ) template.params
-      in
+      (* Drop-and-renumber the two places a literal "param_<idx>" string
+         must move in lockstep with the params-list drop: the
+         entry-prelude ICopy (cfg_build.ml emits exactly one per scalar
+         param, always in the entry block, always as a USE — never a
+         dest) and any self-tail TTail's own arg list (a TCO'd loop's
+         recursive call always supplies a value at every position, so a
+         resolved position can still appear there whenever the forwarded
+         value isn't literally aliased to the resolved closure itself —
+         only_directly_applied already rejects the case where it is,
+         via its TTail check, so this is a defensive rename+drop for the
+         cases that check doesn't rule out, not dead code). *)
+      let entry_blk = cfg.blocks.(cfg.entry) in
+      entry_blk.instrs <- List.filter_map (fun i -> match i with
+        | ICopy (d, s) when String.length s > 6 && String.sub s 0 6 = "param_" ->
+            (match int_of_string_opt (String.sub s 6 (String.length s - 6)) with
+             | Some k when k < orig_arity ->
+                 if List.mem k resolved_idxs then None
+                 else Some (ICopy (d, Printf.sprintf "param_%d" (shift k)))
+             | _ -> Some i)
+        | other -> Some other
+      ) entry_blk.instrs;
+      Array.iter (fun (b : block) ->
+        match b.term with
+        | TTail (f, targs) when f = callee_name ->
+            let new_targs =
+              List.filteri (fun idx _ -> not (List.mem idx resolved_idxs)) targs
+            in
+            b.term <- TTail (key, new_targs)
+        | _ -> ()
+      ) cfg.blocks;
       let new_params =
-        retired_params @
+        List.filteri (fun idx _ -> not (List.mem idx resolved_idxs)) template.params @
         List.concat_map (fun (_, slots) -> List.map (fun s -> (s, Ast.TInt)) slots) slotted
       in
       let new_cfg = { cfg with fname = key; params = new_params } in
@@ -243,9 +393,6 @@ let ensure_clone
 (* One pass over every caller's call sites; mutates [table] in place and
    sets [progress] when a rewrite fires (mirrors Monomorphize.run's own
    fixed-point loop). *)
-let dummy_counter = ref 0
-let fresh_dummy () = incr dummy_counter; Printf.sprintf "$clo_dummy%d" !dummy_counter
-
 let rewrite_callers
     (table : (string, cfg_func) Hashtbl.t)
     (clone_count : (string, int) Hashtbl.t)
@@ -269,43 +416,46 @@ let rewrite_callers
             let resolved =
               List.filter_map (fun idx ->
                 if idx >= Array.length args_arr then None
-                else if not (only_applied_cached table callee_name idx) then None
                 else
                   match resolve_origin info args_arr.(idx) with
-                  | Some (lam_fname, caps) -> Some { idx; lam_fname; caps }
-                  | None -> None
+                  | None ->
+                      (* Couldn't even name a candidate lambda for this
+                         argument (ambiguous merge, or something else
+                         entirely) — attribute what we can to the
+                         CALLER's own body. *)
+                      note_unresolved_closure_use info caller.fname args_arr.(idx);
+                      None
+                  | Some (lam_fname, caps) ->
+                      (match only_applied_cached table callee_name idx with
+                       | None -> Some { idx; lam_fname; caps }
+                       | Some reason ->
+                           note_escape lam_fname callee_name reason; None)
               ) tfun_positions
             in
             if resolved = [] then [i]
             else
               match ensure_clone table clone_count clones limit callee_name resolved with
-              | None -> [i]
+              | None ->
+                  List.iter (fun r ->
+                    note_escape r.lam_fname callee_name "exceeded MCAML_SPECIALIZE_LIMIT"
+                  ) resolved;
+                  [i]
               | Some clone_name ->
                   progress := true;
+                  List.iter (fun r -> note_resolved r.lam_fname) resolved;
                   let resolved_idxs = List.map (fun r -> r.idx) resolved in
-                  (* Replace each resolved position's argument with a
-                     fresh dummy 0 instead of the original closure vreg.
-                     Otherwise the closure vreg would still count as
-                     "used" (an argument to a live ICall) even though
-                     the clone never reads it (its param slot was
-                     retired to TInt in ensure_clone), which would keep
-                     the originating IClosureMake artificially alive for
-                     DCE and defeat the whole point of the
-                     specialization — a Known lambda must reach zero
-                     remaining uses of its IClosureMake to actually be
-                     zero-cost. *)
-                  let dummy_defs = ref [] in
+                  (* F4-followup: drop each resolved position's argument
+                     entirely (the clone's param slot no longer exists at
+                     all, per ensure_clone's drop-and-renumber) rather
+                     than substituting a dummy 0 — one fewer command per
+                     specialized call site, and the dropped closure vreg
+                     naturally loses this use, which is what lets DCE
+                     collect the originating IClosureMake for free. *)
                   let new_args =
-                    List.mapi (fun idx a ->
-                      if List.mem idx resolved_idxs then begin
-                        let dv = fresh_dummy () in
-                        dummy_defs := IConst (dv, 0) :: !dummy_defs;
-                        dv
-                      end else a
-                    ) args
+                    List.filteri (fun idx _ -> not (List.mem idx resolved_idxs)) args
                   in
                   let extra_caps = List.concat_map (fun r -> r.caps) resolved in
-                  List.rev !dummy_defs @ [ICall (d, clone_name, new_args @ extra_caps)]
+                  [ICall (d, clone_name, new_args @ extra_caps)]
           end
       | other -> [other]
     ) b.instrs
@@ -379,4 +529,135 @@ let run (table : (string, cfg_func) Hashtbl.t) : unit =
        && List.exists (fun (_, ty) -> is_tfun ty) cfg.params
        && not (is_referenced name) then
       cfg.is_template <- true
+  ) table;
+
+  (* F6a: gather each surviving lambda's own capture count, once, for
+     the ESCAPING report line's "~M cmds/call" (cost.ml's own IApply
+     formula, 4 + 2*captures). All instances of a given lam_fname agree
+     on capture count by construction (F2 lifts each SOURCE lambda
+     occurrence to one fixed-arity helper), so first-found wins. *)
+  Hashtbl.iter (fun _ cfg ->
+    Array.iter (fun (b : block) ->
+      List.iter (fun i -> match i with
+        | IClosureMake (_, lam_fname, caps) ->
+            if not (Hashtbl.mem caps_count lam_fname) then
+              Hashtbl.replace caps_count lam_fname (List.length caps)
+        | _ -> ()
+      ) b.instrs
+    ) cfg.blocks
   ) table
+
+(* ---- F6b: MCAML_STRICT_HOT / F6a: hot-loop annotation ----
+
+   Called once per non-template function from codegen.ml's
+   [compile_cfg_to_files], between [Optimize.run] and
+   [Regalloc_cfg.alloc] — the exact point the F6 kickoff named ("after
+   Optimize.run returns for that function, before regalloc"), so this
+   sees the FINAL, fully-optimized CFG shape (post-LICM/unroll/SROA/
+   strength_reduce) without a second whole-table pre-pass or any
+   reordering of main.ml's existing per-function Phase 3 loop (§13.12
+   decision 7's reverted-pass-reordering lesson: pulling Optimize out
+   into a separate pass changed unroll.ml's cross-function timing
+   enough to miscompile a canary last session — this hooks the
+   ALREADY-sequential per-function call instead).
+
+   [Loop_detect.find_loops] already treats a TCO'd self-tail-call as a
+   back-edge to the function's own entry (via
+   [Dominators.extended_succs]: "TTail (f,_) when f = cfg.fname ->
+   [cfg.entry]"), confirmed by direct read before writing this — so "a
+   detected natural loop OR a TCO self-tail loop body" from the F6
+   kickoff's own wording is ALREADY one unified check under
+   [Loop_detect], not two separate mechanisms: any block in the union
+   of every [loop.body] is hot. No need to special-case
+   [main.ml]'s own [has_self_tail] here (that check exists for a
+   different purpose — tick_guard's own per-iteration budget slot). *)
+let check_hot_loop (cfg : cfg_func) : unit =
+  let has_any_apply =
+    Array.exists (fun (b : block) ->
+      List.exists (fun i -> match i with IApply _ -> true | _ -> false) b.instrs
+    ) cfg.blocks
+  in
+  (* Skip the whole Dominators/Loop_detect computation for the
+     overwhelming majority of functions (no closures at all) — keeps
+     this diagnostic's compile-time cost at zero when unused, matching
+     every other Known-lambda-is-free claim in this phase. *)
+  if has_any_apply then begin
+    let idom = Dominators.compute cfg in
+    let loops = Loop_detect.find_loops cfg idom in
+    if loops <> [] then begin
+      let block_loop_name : (label, string) Hashtbl.t = Hashtbl.create 16 in
+      List.iter (fun (l : Loop_detect.loop) ->
+        let name =
+          if l.Loop_detect.header = cfg.entry
+          then cfg.fname ^ " (self-tail loop)"
+          else Printf.sprintf "%s:L%d" cfg.fname l.Loop_detect.header
+        in
+        List.iter (fun b ->
+          if not (Hashtbl.mem block_loop_name b) then
+            Hashtbl.replace block_loop_name b name
+        ) l.Loop_detect.body
+      ) loops;
+      let strict_hot = try Sys.getenv "MCAML_STRICT_HOT" = "1" with Not_found -> false in
+      Array.iter (fun (b : block) ->
+        match Hashtbl.find_opt block_loop_name b.label with
+        | None -> ()
+        | Some loop_name ->
+            List.iter (fun i -> match i with
+              | IApply _ ->
+                  (* F6a: an ambiguous-merge IApply's runtime identity
+                     isn't statically known, so every candidate lambda
+                     this function is a recorded site for gets the
+                     hot-loop annotation — best-effort, matches
+                     [site_functions]'s own documented approximation. *)
+                  Hashtbl.iter (fun lam_fname sites ->
+                    if Hashtbl.mem sites cfg.fname then begin
+                      let e = get_entry lam_fname in
+                      if e.hot_loop = None then e.hot_loop <- Some loop_name
+                    end
+                  ) site_functions;
+                  if strict_hot then begin
+                    let implicated =
+                      Hashtbl.fold (fun lam_fname sites acc ->
+                        if Hashtbl.mem sites cfg.fname then lam_fname :: acc else acc
+                      ) site_functions []
+                      |> List.sort compare
+                    in
+                    let who = match implicated with
+                      | [] -> "an escaping closure"
+                      | names -> "closure " ^ String.concat " / " names
+                    in
+                    failwith
+                      (Printf.sprintf
+                         "mcaml: MCAML_STRICT_HOT=1: %s is invoked via \
+                          apply-dispatch inside hot loop %s — specialize \
+                          it (avoid ref-storage, multi-hop forwarding, or \
+                          self-tail forwarding) or move the call outside \
+                          the loop"
+                         who loop_name)
+                  end
+              | _ -> ()
+            ) b.instrs
+      ) cfg.blocks
+    end
+  end
+
+let print_report () : unit =
+  if Hashtbl.length report > 0 then begin
+    let names = Hashtbl.fold (fun k _ acc -> k :: acc) report [] |> List.sort compare in
+    List.iter (fun lam_fname ->
+      let e = Hashtbl.find report lam_fname in
+      match e.escape_reason with
+      | None ->
+          Printf.eprintf "[closure] %s: specialized (%d call site%s)\n%!"
+            lam_fname e.resolved_sites (if e.resolved_sites = 1 then "" else "s")
+      | Some reason ->
+          let caps = try Hashtbl.find caps_count lam_fname with Not_found -> 0 in
+          let cost = 4 + 2 * caps in
+          let hot = match e.hot_loop with
+            | Some l -> Printf.sprintf ", inside hot loop %s" l
+            | None -> ""
+          in
+          Printf.eprintf "[closure] %s: ESCAPING via %s — ~%d cmds/call%s\n%!"
+            lam_fname reason cost hot
+    ) names
+  end

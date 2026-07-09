@@ -26,6 +26,12 @@ let compile_def_to_cfg (d : def) : Cfg.cfg_func option =
 let compile_cfg_to_files
     ?fn_table ?closure_layout (cfg : Cfg.cfg_func) : (string * string list) list =
   Optimize.run ?fn_table cfg;
+  (* F6a/F6b: loop_detect is only meaningful post-optimize (LICM/unroll/
+     SROA have already run), and this is before regalloc — exactly the
+     point §13.12's F6 decision names, reusing the existing
+     Optimize->Regalloc->Codegen sequence rather than adding a new
+     whole-table pass. *)
+  Closure_spec.check_hot_loop cfg;
   Regalloc_cfg.alloc cfg;
   Codegen_cfg.emit ?closure_layout cfg
 
