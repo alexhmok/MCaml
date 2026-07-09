@@ -7,6 +7,50 @@ open Typing_core
 open Typing_unify
 open Typing_patterns
 
+(* Match phase 2 (see the [Match] arm in [infer]) — redundancy: arm k
+   must match some value arms 0..k-1 miss. [rows] is the arm patterns
+   as one-column Maranget rows. *)
+let check_match_redundancy (tscrut : typ) (rows : pattern list list) : unit =
+  ignore
+    (List.fold_left (fun (i, prev) row ->
+       (match row with
+        | [p] ->
+            (match useful [tscrut] (List.rev prev) row with
+             | Some _ -> ()
+             | None ->
+                 raise (Error (Printf.sprintf
+                   "match arm %d (%s) is unreachable — the arms \
+                    before it already match everything it matches"
+                   (i + 1) (string_of_pattern p))))
+        | _ -> ());
+       (i + 1, row :: prev)) (0, []) rows)
+
+(* Match phase 3 — exhaustiveness: a wildcard useful against all arms
+   means some value falls through — report a concrete witness. *)
+let check_match_exhaustive (tscrut : typ) (rows : pattern list list) : unit =
+  match useful [tscrut] rows [PWild] with
+  | Some (w :: _) ->
+      raise (Error (Printf.sprintf
+        "match is not exhaustive — example of an unmatched value: %s"
+        (string_of_pattern w)))
+  | Some [] ->
+      raise (Error "match is not exhaustive")
+  | None -> ()
+
+(* The (name, arity) pairs [infer_builtin_app] handles. Purely
+   syntactic, so it is safe as a match guard in [infer] — the
+   effectful typing work (unification mutates tvars) runs exactly
+   once, in the helper. A builtin name applied at any other arity
+   falls through to the generic App cascade, exactly as the
+   individual per-arity arms did. *)
+let is_builtin_app (f : string) (args : expr list) : bool =
+  match f, args with
+  | "is_nil", [_] | "to_float", [_] | "to_int", [_]
+  | "raw_of_float", [_] | "float_of_raw", [_]
+  | "array_make", [_; _] | "array_get", [_; _] | "array_set", [_; _; _]
+  | "head", [_] | "tail", [_] -> true
+  | _ -> false
+
 (* Phase E: [infer] is unification-based. The env maps name -> scheme
    (§13.10 decision 2); a public wrapper below restores the historical
    (string * typ) list signature for main.ml / for_lift call sites.
@@ -115,73 +159,11 @@ let rec infer env e =
       let _ = infer env e1 in
       infer env e2
 
-  (* Phase B builtins, E4b-generic: is_nil : 'a list -> bool,
-     head : 'a list -> 'a, tail : 'a list -> 'a list. The pre-E4b
-     accept-anything laxity is gone — unification makes the let-binding
-     pattern `let l = 1 :: [] in head(l)` type directly, which was the
-     only reason for it. *)
-  | App ("is_nil", [arg]) ->
-      unify_msg (infer env arg) (TList (fresh_tvar ()))
-        "is_nil: arg must be a list";
-      TBool
-
-  | App ("to_float", [a]) ->
-      unify_msg (infer env a) TInt "to_float: arg must be int";
-      TFloat
-  | App ("to_int", [a]) ->
-      unify_msg (infer env a) TFloat "to_int: arg must be float";
-      TInt
-  (* Phase N §12.1: TFloat and TInt share the same 32-bit runtime
-     representation, so bit-level reinterpretation is free. These
-     builtins are pure typing coercions with zero codegen cost — used
-     by lib/math.mcaml to compute fractional-raw = x_bits mod 65536
-     etc. on a Q16.16 value. *)
-  | App ("raw_of_float", [a]) ->
-      unify_msg (infer env a) TFloat "raw_of_float: arg must be float";
-      TInt
-  | App ("float_of_raw", [a]) ->
-      unify_msg (infer env a) TInt "float_of_raw: arg must be int";
-      TFloat
-
-  (* Phase A dyn-array builtins. [array_make] materializes a fresh
-     TArrDyn TInt; [array_get]/[array_set] unify against an
-     already-known TArrDyn arg. The element type is carried on the
-     TArrDyn constructor so future non-int widths come for free. *)
-  | App ("array_make", [n; v]) ->
-      unify_msg (infer env n) TInt "array_make: length must be int";
-      let tv = infer env v in
-      unify_msg tv TInt "array_make: init value must be int";
-      TArrDyn tv
-  | App ("array_get", [a; i]) ->
-      (* Note: no TVar arm here — unify's tvar_bindable restriction
-         means an unannotated param can never become a darr, so the
-         first arg must already be annotation-concrete (the `darr`
-         keyword), exactly as before Phase E. *)
-      let elt =
-        match resolve (infer env a) with
-        | TArrDyn t -> t
-        | _ -> raise (Error "array_get: first arg must be a dynamic array")
-      in
-      unify_msg (infer env i) TInt "array_get: index must be int";
-      elt
-  | App ("array_set", [a; i; v]) ->
-      let elt =
-        match resolve (infer env a) with
-        | TArrDyn t -> t
-        | _ -> raise (Error "array_set: first arg must be a dynamic array")
-      in
-      unify_msg (infer env i) TInt "array_set: index must be int";
-      unify_msg (infer env v) elt
-        "array_set: value type does not match element type";
-      TUnit
-  | App ("head", [arg]) ->
-      let elem = fresh_tvar () in
-      unify_msg (infer env arg) (TList elem) "head: arg must be a list";
-      elem
-  | App ("tail", [arg]) ->
-      let elem = fresh_tvar () in
-      unify_msg (infer env arg) (TList elem) "tail: arg must be a list";
-      TList elem
+  (* Builtin applications (Phase B lists, Phase N conversions, Phase A
+     dyn-arrays) — bodies in [infer_builtin_app] below. Must stay ahead
+     of the value-application / ctor / global-function cascade. *)
+  | App (f, args) when is_builtin_app f args ->
+      infer_builtin_app env f args
 
   (* Phase F: value application — calling a local var/param bound to a
      TFun value (a HOF's own function-typed parameter, or a let-bound
@@ -528,32 +510,11 @@ let rec infer env e =
         unify_msg t0 t (Printf.sprintf
           "match arms must all have the same type (arm %d disagrees \
            with arm 1)" (i + 1))) arm_tys;
-      (* 2. Redundancy: arm k must match some value arms 0..k-1 miss. *)
+      (* 2. Redundancy, 3. Exhaustiveness — Maranget usefulness checks,
+         extracted above [infer]. *)
       let rows = List.map (fun (p, _) -> [p]) arms in
-      let _ =
-        List.fold_left (fun (i, prev) row ->
-          (match row with
-           | [p] ->
-               (match useful [tscrut] (List.rev prev) row with
-                | Some _ -> ()
-                | None ->
-                    raise (Error (Printf.sprintf
-                      "match arm %d (%s) is unreachable — the arms \
-                       before it already match everything it matches"
-                      (i + 1) (string_of_pattern p))))
-           | _ -> ());
-          (i + 1, row :: prev)) (0, []) rows
-      in
-      (* 3. Exhaustiveness: a wildcard useful against all arms means
-         some value falls through — report a concrete witness. *)
-      (match useful [tscrut] rows [PWild] with
-       | Some (w :: _) ->
-           raise (Error (Printf.sprintf
-             "match is not exhaustive — example of an unmatched value: %s"
-             (string_of_pattern w)))
-       | Some [] ->
-           raise (Error "match is not exhaustive")
-       | None -> ());
+      check_match_redundancy tscrut rows;
+      check_match_exhaustive tscrut rows;
       t0
 
   | For (i, lo, hi, body) ->
@@ -563,6 +524,83 @@ let rec infer env e =
       let _ = infer env' body in
       (* body may type as anything; for-loops are statements, result is unit *)
       TUnit
+
+(* Hard-coded builtin signatures, dispatched from the guarded App arm
+   in [infer] via [is_builtin_app] — the two must list the same
+   (name, arity) pairs. *)
+and infer_builtin_app env f args =
+  match f, args with
+  (* Phase B builtins, E4b-generic: is_nil : 'a list -> bool,
+     head : 'a list -> 'a, tail : 'a list -> 'a list. The pre-E4b
+     accept-anything laxity is gone — unification makes the let-binding
+     pattern `let l = 1 :: [] in head(l)` type directly, which was the
+     only reason for it. *)
+  | "is_nil", [arg] ->
+      unify_msg (infer env arg) (TList (fresh_tvar ()))
+        "is_nil: arg must be a list";
+      TBool
+
+  | "to_float", [a] ->
+      unify_msg (infer env a) TInt "to_float: arg must be int";
+      TFloat
+  | "to_int", [a] ->
+      unify_msg (infer env a) TFloat "to_int: arg must be float";
+      TInt
+  (* Phase N §12.1: TFloat and TInt share the same 32-bit runtime
+     representation, so bit-level reinterpretation is free. These
+     builtins are pure typing coercions with zero codegen cost — used
+     by lib/math.mcaml to compute fractional-raw = x_bits mod 65536
+     etc. on a Q16.16 value. *)
+  | "raw_of_float", [a] ->
+      unify_msg (infer env a) TFloat "raw_of_float: arg must be float";
+      TInt
+  | "float_of_raw", [a] ->
+      unify_msg (infer env a) TInt "float_of_raw: arg must be int";
+      TFloat
+
+  (* Phase A dyn-array builtins. [array_make] materializes a fresh
+     TArrDyn TInt; [array_get]/[array_set] unify against an
+     already-known TArrDyn arg. The element type is carried on the
+     TArrDyn constructor so future non-int widths come for free. *)
+  | "array_make", [n; v] ->
+      unify_msg (infer env n) TInt "array_make: length must be int";
+      let tv = infer env v in
+      unify_msg tv TInt "array_make: init value must be int";
+      TArrDyn tv
+  | "array_get", [a; i] ->
+      (* Note: no TVar arm here — unify's tvar_bindable restriction
+         means an unannotated param can never become a darr, so the
+         first arg must already be annotation-concrete (the `darr`
+         keyword), exactly as before Phase E. *)
+      let elt =
+        match resolve (infer env a) with
+        | TArrDyn t -> t
+        | _ -> raise (Error "array_get: first arg must be a dynamic array")
+      in
+      unify_msg (infer env i) TInt "array_get: index must be int";
+      elt
+  | "array_set", [a; i; v] ->
+      let elt =
+        match resolve (infer env a) with
+        | TArrDyn t -> t
+        | _ -> raise (Error "array_set: first arg must be a dynamic array")
+      in
+      unify_msg (infer env i) TInt "array_set: index must be int";
+      unify_msg (infer env v) elt
+        "array_set: value type does not match element type";
+      TUnit
+  | "head", [arg] ->
+      let elem = fresh_tvar () in
+      unify_msg (infer env arg) (TList elem) "head: arg must be a list";
+      elem
+  | "tail", [arg] ->
+      let elem = fresh_tvar () in
+      unify_msg (infer env arg) (TList elem) "tail: arg must be a list";
+      TList elem
+  | _ ->
+      (* unreachable: the App arm's [is_builtin_app] guard admits
+         exactly the pairs above *)
+      assert false
 
 (* Public wrapper: the historical signature. main.ml and for_lift pass
    (string * typ) list envs; schemes are internal to this module
