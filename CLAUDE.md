@@ -11,7 +11,7 @@ source → lex → parse → alpha → for_lift →
   Phase 2b        : monomorphize (specialize array-param templates)
   Phase 3 (per Fun): optimize (M3a → M4 loop_pass → M3a) → regalloc_cfg → codegen_cfg → files
   Phase 4         : tick_split (fan oversized files into __cont<N> chains via `schedule … 1t`)
-  Phase 5         : tick_guard (prepend per-iteration $tick_iters budget guard at every TCO'd self-loop entry)
+  Phase 5         : tick_guard (prepend per-iteration $tick_iters_<fname> budget guard at every TCO'd self-loop entry)
 ```
 
 The M4 loop_pass runs LICM → unroll → SROA between two M3a fixed-point
@@ -35,7 +35,7 @@ Historical note: before Milestone 2 the codegen emitted Minecraft commands direc
 - `lexer.mll` — ocamllex source (generates `lexer.ml`, checked in).
 - `parser.mly` — menhir grammar (generates `parser.ml`/`.mli`, checked in). Uses a `seq_expr`/`expr` split to avoid a reduce/reduce conflict between list-separator `;` inside `[| … |]` and statement-level `Seq`.
 - `alpha.ml` — scope analysis; renames every user binder to `name_N` for uniqueness.
-- `typing.ml` — type checker. Quirks: `App` unconditionally returns `TInt` (so functions can't return bools in boolean contexts); nested `Array` literals with matching inner lengths promote to `TMat`.
+- `typing.ml` — type checker. `App` types calls against a global `fun_sigs` table (populated from the post-for_lift program); a lookup miss falls back to `TInt` (covers synthesized helpers and untyped callees). Quirk: nested `Array` literals with matching inner lengths promote to `TMat`.
 
 **Middle end**
 - `knormal.ml` — A-normal form. `kexpr` has `KInt`/`KVar`/`KStr`/`KCommand`/`KBinOp`/`KLet`/`KIf`/`KSeq`/`KCall`/`KLoop` plus the M1 array primitives `KArrLitConst`/`KArrLitDyn`/`KArrGetStatic`/`KArrGet` and the indexed-store primitives `KArrSetStatic`/`KArrSet`. Arrays are not first-class runtime values: `let a = [| … |]` binds `a` to a compile-time storage ID via an internal `arr_env` table; arrays can't be passed to functions or returned in M1/M2. Indexed assignment: `a[i] := v` parses as `RefSet(Index1(a,i), v)` and `alpha.ml` rewrites that into dedicated `IndexSet1`/`IndexSet2` AST nodes so no parser change was needed.
@@ -117,7 +117,10 @@ MCAML_SROA_LIMIT=N ./mcaml < …               # max promoted array length (defa
 MCAML_NO_TICK_SPLIT=1 ./mcaml < …            # Phase 4: skip straight-line file splitting
 MCAML_NO_TICK_GUARD=1 ./mcaml < …            # Phase 5: skip per-iteration loop guard
 MCAML_TICK_BUDGET=N ./mcaml < …              # split threshold per file (default 50000)
-MCAML_LOOP_ITER_LIMIT=N ./mcaml < …          # per-tick loop iteration budget (default 1024)
+MCAML_TICK_COMMANDS=N ./mcaml < …            # per-tick command budget for tick_guard (default 60000);
+                                             # each guarded loop's iter limit = N / its per-iter body cost
+MCAML_LOOP_ITER_LIMIT=N ./mcaml < …          # legacy override: uniform per-tick iteration limit for every
+                                             # guarded loop, ignoring per-iter cost
 ```
 
 The driver accepts `-o <dir>` (or the `MCAML_OUT` env var) to pick an
@@ -132,7 +135,7 @@ the project root to keep generated files out of the source tree.
 - Physical slots: `$r0`, `$r1`, … minted by regalloc, per-function pool.
 - Return slot: `$ret`. **Caveat**: every function writes `$ret` on exit (unit-returning for_lift helpers write `0`), so the slot is only valid for the immediate next command in the caller — safe for synchronous call chains, *unsafe* across tick boundaries. A TCO'd loop whose scheduled continuations resume on later ticks will clobber `$ret` on every natural exit, overwriting whatever the original caller wrote. When a result must survive across tick boundaries, bind it to a ref (`let result = ref 0 in … ; result := expr; !result`) and read `$ref_result_<N>` directly — refs lower to reserved-namespace scoreboard slots that no function touches except via explicit user code. The demo in `scripts/demo_classifier.mcaml` shows the pattern.
 - Call params: `param_0`, `param_1`, ….
-- Tick budget slot: `$tick_iters` — global counter shared across every `tick_guard`-instrumented self-loop. `main.ml`'s `has_self_tail` check must filter on reachable blocks only (entry block, or blocks with non-empty `preds`) so the unroller's stale dead `TTail` doesn't cause a guard to be prepended to a fully-unrolled helper. Without this filter, every call to such a helper bumps `$tick_iters` and may yield mid-body, corrupting the caller.
+- Tick budget slots: `$tick_iters_<fname>` — one counter per `tick_guard`-instrumented self-loop. Per-loop (not one shared counter) is a correctness requirement for nested loops: with a shared counter, the outer loop's iterations bump the inner loop's budget too, so the inner loop yields spuriously mid-iteration and leaves the outer's accumulator with a partial sum (MineTorch stage 9 hit exactly this in the MNIST matmul). The per-loop iteration limit is `MCAML_TICK_COMMANDS / body_cost` (per-function body cost via `Cost.estimate_block`); `MCAML_LOOP_ITER_LIMIT` is a legacy uniform override. `main.ml`'s `has_self_tail` check must filter on reachable blocks only (`Cfg.block_is_reachable`) so the unroller's stale dead `TTail` doesn't cause a guard to be prepended to a fully-unrolled helper. Without this filter, every call to such a helper bumps its counter and may yield mid-body, corrupting the caller.
 - Array scratch slot: `$arr_result` — used by macro getters, reserved. Parallel: `$arr_set_val` — used by per-aid macro setters (`<id>_set.mcfunction`) to pass the value-to-store without macro-substituting a scoreboard read; also reserved.
 - Function dispatch: `function mcaml:<name>`.
 - Array storage: `storage mcaml:heap <aid>` where `<aid>` is a compile-time string like `arr3`.

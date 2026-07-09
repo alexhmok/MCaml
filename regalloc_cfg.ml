@@ -7,32 +7,18 @@
    guard-chain conds) in place, and sets [cfg.slot_count] to the number of
    distinct physical slots minted.
 
-   Encoding choice: dual-position. Each global instruction index [g] has two
-   sub-positions, encoded as [2*g] (reads) and [2*g+1] (writes). Operand
-   uses land on the even index, defs on the odd. This makes the
-   "dest cannot share slot with rhs operand" rule fall out naturally:
-   for an instruction at [g], operand [v2]'s last_use is at least [2*g]
-   and dest [dest]'s first_def is [2*g+1], so [last_use[v2] >= 2*g >= ...]
-   means [v2] is still in [active] when [dest] is allocated — it is
-   not expired because expiry tests [end < first_def], i.e. the slot
-   is only reclaimed when the previous occupant's last_use strictly
-   precedes the new def's position. With last_use=2*g and first_def=2*g+1,
-   [2*g < 2*g+1] so expiry *would* fire — we instead want the expiry to
-   be [end < first_def - 0], meaning [<= 2*g] does NOT expire. Concretely
-   we test [end <= first_def - 1] i.e. [end < first_def]: with end=2*g
-   and first_def=2*g+1, that holds (2*g < 2*g+1), which would expire v2.
-   Wrong!
-
-   Fix: bump an operand read at instr [g] to last_use = 2*g+1 (same sub-
-   position as the def). Then [end=2*g+1] is NOT strictly less than
-   [first_def=2*g+1], so v2 is NOT expired when dest is allocated.
-   For cross-instruction live ranges (v2 is also read later), this only
-   tightens by one sub-tick and is still correct.
-
-   Equivalently: use last_use = 2*g+1 for reads, first_def = 2*g+1 for
-   writes at the same instruction. The shared sub-position means they
-   coexist in [active] at allocation time, and [dest] picks from slots
-   not held by [v2] (or any other operand). *)
+   Position encoding: dual-position. Each global instruction index [g]
+   spans two sub-positions, [2*g] and [2*g+1]; both an instruction's
+   operand reads (last_use) and its def (first_def) land on [2*g+1].
+   Expiry tests [end < first_def], so an operand read at the same
+   instruction as the def shares the def's sub-position and is NOT
+   expired — operand and dest coexist in [active], forcing the dest
+   into a slot disjoint from every operand's. That enforces IBinOp's
+   "dest cannot alias an rhs operand" rule (the emitted
+   [d := v1; d op= v2] sequence would otherwise clobber [v2] on the
+   first copy). An operand whose last read is at an earlier instruction
+   [g'] has [end = 2*g'+1 < 2*g+1] and does expire, so its slot is
+   reclaimed normally. *)
 
 module VSet = Liveness.VSet
 
