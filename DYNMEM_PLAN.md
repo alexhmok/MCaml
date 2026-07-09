@@ -1734,20 +1734,33 @@ self-recursion with source-order generalization.
       v1"` / `"...as a record field in v1"` / `"...as an ADT field in
       v1"`).
 
-      **Second, pre-existing gap found while wiring these up** (not
-      introduced this session, but newly exercised by these specific
-      probes): `main.ml`'s top-level handler catches `Typing.Error` and
-      prints it, but never sets a nonzero exit code — every OTHER
-      reject-probe harness in this test suite (`test_param_types.py`,
-      etc.) already works around this via `rejected = returncode <> 0
-      OR "Error" in output`; `test_lambdas.py`'s own `run_reject_probe`
-      (written for `ref_then_call`'s `Failure`-based rejection, which
-      DOES set a nonzero exit code) predates this and used a stricter
-      `returncode <> 0` check that would have spuriously failed on a
-      pure typing rejection. Aligned it with the same lenient check the
-      rest of the suite already uses rather than changing `main.ml`'s
-      exit-code behavior (a broader change with its own blast radius,
-      not something this session's task list asked for).
+      **Second, pre-existing gap found while wiring these up, then
+      fixed as a same-session follow-up** (commit `9e40441`, requested
+      and confirmed by the user after this was flagged rather than
+      silently worked around): `main.ml`'s top-level handler caught
+      `Lexer.SyntaxError`/`Typing.Error`/`Parser.Error`, printed each,
+      but fell through with the DEFAULT exit code 0 — unlike every
+      other rejection path (a plain `Failure` raised deeper in the
+      pipeline, e.g. `ref_then_call`'s knormal check, which the OCaml
+      runtime already exits 2 for uncaught). `test_lambdas.py`'s own
+      `run_reject_probe` (originally written only against
+      `Failure`-based rejections) used a strict `returncode <> 0`
+      check that would have spuriously failed on a pure typing
+      rejection — first worked around the same lenient way every other
+      reject-probe harness in this suite already does (`rejected =
+      returncode <> 0 OR "Error" in output`), then the UNDERLYING gap
+      itself was fixed directly: all three handler arms now call `exit
+      2`, matching the uncaught-exception convention uniformly. Blast
+      radius beyond this suite: `compile_script()` in every `/tmp/
+      mcaml_out` harness uses `subprocess.run(..., check=True)`, which
+      only raises on a nonzero exit code — before this fix, a checked-
+      in script that regressed to a type error would NOT have been
+      caught by that check, silently leaving a stale/incomplete build
+      dir instead of failing loudly. Reverified after the fix: all ten
+      `/tmp` harnesses green, five canaries byte-identical,
+      `MCAML_NO_CLOSURE_SPEC=1`/`MCAML_O0=1` A/B re-verified. The
+      lenient `run_reject_probe` check was left as-is (still correct,
+      and now redundant-but-harmless with either signal true).
 
       Added four `MCAML_STRICT_HOT` tests per the F6 task's own
       corrected wording: (a) Escaping-in-hot-loop + flag → reject;
