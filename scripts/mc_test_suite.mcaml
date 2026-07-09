@@ -108,7 +108,7 @@ fun build3 (a: int, b: int, c: int) : list =
   a :: b :: c :: []
 
 fun accumf (i: int, acc: float) : float =
-  if i >= 10 then acc else accumf(i + 1, acc + 0.5)
+  if i >= 10 then acc else accumf(i + 1, acc +. 0.5)
 
 (* ==================================================================
    integers and arithmetic
@@ -313,7 +313,7 @@ fun t28_arr_lit_dyn () : int =
 
 fun t29_float_arr () : int =
   let fa = [| 0.5; 1.5 |] in
-  if (fa[0] + fa[1]) = 2.0 then pass_one()
+  if (fa[0] +. fa[1]) = 2.0 then pass_one()
   else (cmd! "say [FAIL] t29_float_arr"; fail_one())
 
 fun t30_mat_static () : int =
@@ -418,7 +418,7 @@ fun t42_global_dyn_sum () : int =
   else (cmd! "say [FAIL] t42_global_dyn_sum"; fail_one())
 
 fun t43_global_float () : int =
-  if (gvflut[1] + gvflut[2]) = 3.0 then pass_one()
+  if (gvflut[1] +. gvflut[2]) = 3.0 then pass_one()
   else (cmd! "say [FAIL] t43_global_float"; fail_one())
 
 (* ==================================================================
@@ -426,41 +426,41 @@ fun t43_global_float () : int =
    ================================================================== *)
 
 fun t44_fadd () : int =
-  if (1.5 + 2.25) = 3.75 then pass_one()
+  if (1.5 +. 2.25) = 3.75 then pass_one()
   else (cmd! "say [FAIL] t44_fadd"; fail_one())
 
 fun t45_fsub () : int =
-  if (5.0 - 1.25) = 3.75 then pass_one()
+  if (5.0 -. 1.25) = 3.75 then pass_one()
   else (cmd! "say [FAIL] t45_fsub"; fail_one())
 
 fun t46_fneg () : int =
-  if raw_of_float(neg_f(3.5)) = -229376 then pass_one()
+  if raw_of_float(~-. 3.5) = -229376 then pass_one()
   else (cmd! "say [FAIL] t46_fneg"; fail_one())
 
 fun t47_fmul_exact () : int =
-  if fmul(1.5, 2.0) = 3.0 then pass_one()
+  if (1.5 *. 2.0) = 3.0 then pass_one()
   else (cmd! "say [FAIL] t47_fmul_exact"; fail_one())
 
 (* pre-shift precision loss is part of the spec: 0.1*0.1 -> raw 625 *)
 fun t48_fmul_lossy () : int =
-  if raw_of_float(fmul(0.1, 0.1)) = 625 then pass_one()
+  if raw_of_float(0.1 *. 0.1) = 625 then pass_one()
   else (cmd! "say [FAIL] t48_fmul_lossy"; fail_one())
 
 fun t49_fdiv_exact () : int =
-  if fdiv(6.0, 2.0) = 3.0 then pass_one()
+  if (6.0 /. 2.0) = 3.0 then pass_one()
   else (cmd! "say [FAIL] t49_fdiv_exact"; fail_one())
 
 fun t50_fdiv_nonexact () : int =
-  if raw_of_float(fdiv(10.0, 3.0)) = 218368 then pass_one()
+  if raw_of_float(10.0 /. 3.0) = 218368 then pass_one()
   else (cmd! "say [FAIL] t50_fdiv_nonexact"; fail_one())
 
 fun t51_float_conversions () : int =
-  if (to_int(fmul(2.5, 4.0)) = 10) && (raw_of_float(to_float(7)) = 458752)
+  if (to_int(2.5 *. 4.0) = 10) && (raw_of_float(to_float(7)) = 458752)
   then pass_one()
   else (cmd! "say [FAIL] t51_float_conversions"; fail_one())
 
 fun t52_fcmp () : int =
-  if (1.5 < 2.5) && (neg_f(1.0) > neg_f(2.0)) then pass_one()
+  if (1.5 < 2.5) && (~-. 1.0 > ~-. 2.0) then pass_one()
   else (cmd! "say [FAIL] t52_fcmp"; fail_one())
 
 fun t53_faccum_tco () : int =
@@ -508,12 +508,12 @@ fun t60_pipe () : int =
   else (cmd! "say [FAIL] t60_pipe"; fail_one())
 
 (* ==================================================================
-   Q16.16 fold/runtime parity on negative operands. fmul's pre-shift
-   and fdiv's scale-up both divide via scoreboard /=, which floors,
+   Q16.16 fold/runtime parity on negative operands. *. 's pre-shift
+   and /. 's scale-up both divide via scoreboard /=, which floors,
    so the folded results must floor identically:
-     fmul(-0.1, 0.1): floor(-6554/256) * floor(6554/256)
+     -0.1 *. 0.1: floor(-6554/256) * floor(6554/256)
                     = -26 * 25 = raw -650
-     fdiv(-10.0, 3.0): floor(-655360*256 / 196608) * 256
+     -10.0 /. 3.0: floor(-655360*256 / 196608) * 256
                      = -854 * 256 = raw -218624
    The runtime side routes raw operands through a dynamic array so
    the lowered command sequence actually executes.
@@ -523,19 +523,19 @@ fun t61_fmul_neg_parity () : int =
   let d = array_make(2, 0) in
   array_set(d, 0, raw_of_float(-0.1));
   array_set(d, 1, raw_of_float(0.1));
-  let rt = fmul(float_of_raw(array_get(d, 0)), float_of_raw(array_get(d, 1))) in
-  if (raw_of_float(rt) = -650) && (raw_of_float(fmul(-0.1, 0.1)) = -650)
+  let rt = float_of_raw(array_get(d, 0)) *. float_of_raw(array_get(d, 1)) in
+  if (raw_of_float(rt) = -650) && (raw_of_float(-0.1 *. 0.1) = -650)
   then pass_one()
-  else (cmd! "say [FAIL] t61_fmul_neg_parity (fmul fold/runtime diverge on negatives)"; fail_one())
+  else (cmd! "say [FAIL] t61_fmul_neg_parity (*. fold/runtime diverge on negatives)"; fail_one())
 
 fun t62_fdiv_neg_parity () : int =
   let d = array_make(2, 0) in
   array_set(d, 0, raw_of_float(-10.0));
   array_set(d, 1, raw_of_float(3.0));
-  let rt = fdiv(float_of_raw(array_get(d, 0)), float_of_raw(array_get(d, 1))) in
-  if (raw_of_float(rt) = -218624) && (raw_of_float(fdiv(-10.0, 3.0)) = -218624)
+  let rt = float_of_raw(array_get(d, 0)) /. float_of_raw(array_get(d, 1)) in
+  if (raw_of_float(rt) = -218624) && (raw_of_float(-10.0 /. 3.0) = -218624)
   then pass_one()
-  else (cmd! "say [FAIL] t62_fdiv_neg_parity (fdiv fold/runtime diverge on negatives)"; fail_one())
+  else (cmd! "say [FAIL] t62_fdiv_neg_parity (/. fold/runtime diverge on negatives)"; fail_one())
 
 (* ==================================================================
    master runner — 62 test functions + 4 inline region checks = 66

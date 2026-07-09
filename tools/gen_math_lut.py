@@ -191,14 +191,14 @@ EXP_FIXED_BODY = """\
    would index past int_exp_lut[10]).
 
    Callers with negative arguments should compute it themselves:
-     fdiv(1.0, exp_fixed(neg_f(x)))
+     1.0 /. exp_fixed(~-. x)
    MineTorch's softmax path always negates beforehand so this is not
    a usability burden for the primary client; human users who want a
    polymorphic wrapper can write one at their layer.
 
    Cost: ~25 cmds per call (positive branch only, no conditional
    dispatch overhead). Precision: ~0.1-0.2% worst case from pre-shift
-   fmul plus LUT frac truncation (drops bottom 8 bits of the
+   *. plus LUT frac truncation (drops bottom 8 bits of the
    fractional raw). Callers needing <0.01% should linear-interpolate
    between adjacent frac_exp_lut entries (~+8 cmds). *)
 fun exp_fixed (x: float) : float =
@@ -207,7 +207,7 @@ fun exp_fixed (x: float) : float =
   let k = (x_raw % 65536) / 256 in
   let ei = int_exp_lut[n] in
   let ef = frac_exp_lut[k] in
-  fmul(ei, ef)
+  ei *. ef
 """
 
 LOG_FIXED_BODY = """\
@@ -286,7 +286,7 @@ fun sigmoid_fixed (x: float) : float =
     else
       (* sigmoid(-x) = 1 - sigmoid(x) *)
       let s = sigmoid_lut[abs_raw / 2048] in
-      1.0 - s
+      1.0 -. s
 
 fun tanh_fixed (x: float) : float =
   let x_raw = raw_of_float(x) in
@@ -297,11 +297,11 @@ fun tanh_fixed (x: float) : float =
   else
     let abs_raw = 0 - x_raw in
     if abs_raw >= 262144 then
-      neg_f(1.0)                         (* x <= -4, saturate *)
+      ~-. 1.0                            (* x <= -4, saturate *)
     else
       (* tanh(-x) = -tanh(x) *)
       let t = tanh_lut[abs_raw / 1024] in
-      neg_f(t)
+      ~-. t
 
 fun gelu_fixed (x: float) : float =
   let x_raw = raw_of_float(x) in
@@ -336,14 +336,14 @@ fun relu_f (x: float) : float =
 
 fun vec_add4_f (a: arr[float, 4], b: arr[float, 4], out: arr[float, 4]) : int =
   for i = 0 to 4 do
-    out[i] := a[i] + b[i]
+    out[i] := a[i] +. b[i]
   done;
   0
 
 fun dot4_f (a: arr[float, 4], b: arr[float, 4]) : float =
   let acc = ref 0 in
   for i = 0 to 4 do
-    let prod = fmul(a[i], b[i]) in
+    let prod = a[i] *. b[i] in
     acc := !acc + raw_of_float(prod)
   done;
   float_of_raw(!acc)
@@ -359,7 +359,7 @@ def to_float_literal(encoded: int) -> str:
     re-encoding via round() never shifts. This is what lets us declare
     the LUTs as `val foo = [| ... |]` with float literals — MCaml's
     typer infers TArrStatic(TFloat, N), subscripts return TFloat, and
-    fmul accepts the result without a cast. """
+    `*.` accepts the result without a cast. """
     return repr(encoded / Q16_SCALE)
 
 

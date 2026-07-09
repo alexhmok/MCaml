@@ -170,7 +170,7 @@ fun d10_bool_field () : int =
 (* float ctor field: Q16.16 raw value survives the cell round-trip *)
 fun d11_float_field () : int =
   let v = match FCell(1.5) with FCell(f) -> f in
-  if (v + 2.25) = 3.75 then pass_one()
+  if (v +. 2.25) = 3.75 then pass_one()
   else (cmd! "say [FAIL] d11_float_field"; fail_one())
 
 (* list handle as a ctor field *)
@@ -283,7 +283,7 @@ fun d25_tuple_wildcard () : int =
 fun d26_tuple_mixed_types () : int =
   let v = match (build3(10, 20, 10), 1.5, 2) with
     | (l, f, n) ->
-        (if (f + f) = 3.0 then sum_list_m(l, 0) + n else -1) in
+        (if (f +. f) = 3.0 then sum_list_m(l, 0) + n else -1) in
   if v = 42 then pass_one()
   else (cmd! "say [FAIL] d26_tuple_mixed_types"; fail_one())
 
@@ -354,7 +354,7 @@ fun d35_nested_record () : int =
 (* float record field via r.w *)
 fun d36_record_float_field () : int =
   let f = { w = 2.5; scale = 4 } in
-  if (f.w + 0.75) = 3.25 then pass_one()
+  if (f.w +. 0.75) = 3.25 then pass_one()
   else (cmd! "say [FAIL] d36_record_float_field"; fail_one())
 
 (* list record field *)

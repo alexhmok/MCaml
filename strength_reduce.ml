@@ -53,10 +53,26 @@
 open Cfg
 
 type basic_iv = {
-  iv_vreg   : vreg;   (* header-local vreg copied from param_N *)
-  param_idx : int;    (* N *)
-  step      : int;    (* constant increment per back-edge traversal *)
-  latch     : label;  (* block whose TTail carries the back-edge *)
+  iv_vreg   : vreg;    (* header-local vreg copied from param_N *)
+  param_idx : int;     (* N *)
+  step      : int;     (* constant increment per back-edge traversal *)
+  latches   : label list;
+  (* Every self-TTail block that actually advances this IV by [step].
+     A basic IV may have several latches (a hand-written loop can have
+     more than one back-edge to itself), but every self-TTail latch in
+     the function must either advance the param by the SAME constant
+     step or pass it through unchanged — see [detect_basic_ivs]. A
+     latch that does anything else (e.g. resets the param to an
+     unrelated constant, as a nested-loop-in-one-function shape's
+     "advance the outer index, reset the inner index" transition does)
+     disqualifies the param from being a basic IV at all, rather than
+     silently recording only the latches that happened to match. The
+     rewrite stage only appends the per-iteration carrier increment at
+     [latches], never at every self-tail block in the function — this
+     is the fix for a real miscompile where a derived carrier for the
+     INNER loop's index kept advancing even across the OUTER loop's
+     reset transition, corrupting the derived value into an
+     out-of-bounds array index. *)
 }
 
 (* Collect [(lv, N)] for every [ICopy (lv, "param_N")] in the function's
@@ -146,31 +162,63 @@ let step_from_update (b : block) (lv : vreg) (a : vreg) : int option =
   scan b.instrs
 
 (* Walk every block whose terminator is a self tail call and, for each
-   parameter-copy pair surfaced by [param_copies_in_entry], ask whether
-   the corresponding tail arg is a constant-step update of that vreg.
-   A latch may contribute several IVs if multiple params advance by a
-   constant step in the same back-edge. *)
+   parameter-copy pair surfaced by [param_copies_in_entry], classify
+   how that latch treats the param: passed through unchanged (modulo
+   ICopy aliasing — resolved the same way [invariant_params] does),
+   advanced by a constant step, or "other" (anything else, e.g. reset
+   to an unrelated constant or a non-linear update). A param qualifies
+   as a basic IV only if EVERY self-tail latch in the function is
+   either unchanged or advances it by the SAME constant step; the
+   latches where it actually advances are recorded so the rewrite
+   stage knows exactly where to append the carrier increment. This
+   rejects hand-written multi-latch shapes (a two-level loop flattened
+   into one recursive function, where the inner index resets to 0 at
+   the outer latch) rather than silently miscompiling them — see the
+   [latches] field comment. *)
 let detect_basic_ivs (cfg : cfg_func) : basic_iv list =
   if cfg.is_template then []
   else
     let params = param_copies_in_entry cfg in
+    let self_tails =
+      let acc = ref [] in
+      Array.iter (fun (b : block) ->
+        match b.term with
+        | TTail (f, _) when f = cfg.fname -> acc := b :: !acc
+        | _ -> ()
+      ) cfg.blocks;
+      List.rev !acc
+    in
     let out = ref [] in
-    Array.iter (fun (b : block) ->
-      match b.term with
-      | TTail (f, args) when f = cfg.fname ->
-          let args_arr = Array.of_list args in
-          List.iter (fun (lv, idx) ->
-            if idx < Array.length args_arr then
+    List.iter (fun (lv, idx) ->
+      let step = ref None in
+      let step_latches = ref [] in
+      let disqualified = ref false in
+      List.iter (fun (b : block) ->
+        match b.term with
+        | TTail (_, args) ->
+            let args_arr = Array.of_list args in
+            if idx >= Array.length args_arr then disqualified := true
+            else begin
               let a = args_arr.(idx) in
-              if a <> lv then
+              let info = scan_block b in
+              if resolve info a = lv then ()
+              else
                 match step_from_update b lv a with
                 | Some k when k <> 0 ->
-                    out := { iv_vreg = lv; param_idx = idx; step = k;
-                             latch = b.label } :: !out
-                | _ -> ()
-          ) params
+                    (match !step with
+                     | None -> step := Some k; step_latches := b.label :: !step_latches
+                     | Some k0 when k0 = k -> step_latches := b.label :: !step_latches
+                     | Some _ -> disqualified := true)
+                | _ -> disqualified := true
+            end
+        | _ -> ()
+      ) self_tails;
+      match !step, !disqualified with
+      | Some k, false when !step_latches <> [] ->
+          out := { iv_vreg = lv; param_idx = idx; step = k;
+                    latches = List.rev !step_latches } :: !out
       | _ -> ()
-    ) cfg.blocks;
+    ) params;
     List.rev !out
 
 (* ---- derived IV detection ---- *)
@@ -486,18 +534,6 @@ let mk_state (cfg : cfg_func) : rewrite_state =
   { defs; param_of;
     emitted = Hashtbl.create 16; pre = [] }
 
-(* Find every block whose terminator is a self [TTail]. These are
-   the latches where the carrier needs its per-iteration increment.
-   For canonical TCO'd self-loops there's exactly one. *)
-let collect_latches (cfg : cfg_func) : block list =
-  let acc = ref [] in
-  Array.iter (fun (b : block) ->
-    match b.term with
-    | TTail (f, _) when f = cfg.fname -> acc := b :: !acc
-    | _ -> ()
-  ) cfg.blocks;
-  !acc
-
 let no_sr = Cfg.pass_disabled "MCAML_NO_SR"
 
 let carrier_name (n : int) : vreg = Printf.sprintf "$ref_sr_%d" n
@@ -554,7 +590,6 @@ let run (cfg : cfg_func) : bool =
         ) table.deriveds
       in
       let st = mk_state cfg in
-      let latches = collect_latches cfg in
       let changed = ref false in
       let appended_increments : (vreg * label, unit) Hashtbl.t =
         Hashtbl.create 8 in
@@ -614,9 +649,14 @@ let run (cfg : cfg_func) : bool =
                  ) blk.instrs;
                  if !replaced then begin
                    changed := true;
-                   (* Append increment to every latch (once per
-                      carrier×latch pair). *)
-                   List.iter (fun (latch : block) ->
+                   (* Append increment ONLY at the latches [bi] itself
+                      advances at (never every self-tail block in the
+                      function — see the [latches] field comment: a
+                      latch that resets this IV rather than stepping
+                      it must not also bump the derived carrier). Once
+                      per carrier×latch pair. *)
+                   List.iter (fun (latch_label : label) ->
+                     let latch = cfg.blocks.(latch_label) in
                      let key = (carrier, latch.label) in
                      if not (Hashtbl.mem appended_increments key) then begin
                        Hashtbl.add appended_increments key ();
@@ -624,7 +664,7 @@ let run (cfg : cfg_func) : bool =
                          latch.instrs @
                          [IBinOp (carrier, Ast.Add, carrier, stride_v)]
                      end
-                   ) latches
+                   ) bi.latches
                  end)
       ) table.deriveds;
       if !changed then
@@ -642,9 +682,11 @@ let dump (cfg : cfg_func) (table : iv_table) : string =
     Buffer.add_string buf "  (no basic IVs)\n"
   else
     List.iter (fun iv ->
+      let latches_str =
+        String.concat "," (List.map (Printf.sprintf "L%d") iv.latches) in
       Buffer.add_string buf
-        (Printf.sprintf "  basic IV %s = param_%d, step=%+d, latch=L%d\n"
-           iv.iv_vreg iv.param_idx iv.step iv.latch)
+        (Printf.sprintf "  basic IV %s = param_%d, step=%+d, latches=%s\n"
+           iv.iv_vreg iv.param_idx iv.step latches_str)
     ) table.basics;
   if table.deriveds = [] then begin
     if table.basics <> [] then

@@ -18,6 +18,7 @@ type token =
   | TYPE
   | TRUE
   | TO
+  | TIMESDOT
   | TIMES
   | TILDE
   | THEN
@@ -30,12 +31,14 @@ type token =
   | RBRACK
   | RBRACE
   | RBAR
+  | PLUSDOT
   | PLUS
   | PIPE
   | PERCENT
   | OR
   | OF
   | NEQ
+  | MINUSDOT
   | MINUS
   | MATCH
   | LT
@@ -61,6 +64,7 @@ type token =
   | DOT
   | DONE
   | DO
+  | DIVDOT
   | DIV
   | CONS
   | COMMA

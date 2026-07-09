@@ -107,8 +107,8 @@ fun sum_ll (ll) =
 (* params pinned bool through if scrutinee + branch types *)
 fun xor_b (a, b) = if a then (if b then false else true) else b
 
-(* E4: partial annotation — a annotated, b inferred float via `+` *)
-fun mix (a : float, b) = a + b
+(* E4: partial annotation — a annotated, b inferred float via `+.` *)
+fun mix (a : float, b) = a +. b
 
 fun scale (a, b) = a * b + a
 

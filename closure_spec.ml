@@ -516,6 +516,21 @@ let run (table : (string, cfg_func) Hashtbl.t) : unit =
         Array.iter (fun (b : block) ->
           List.iter (fun i -> match i with
             | ICall (_, f, _) when f = name -> found := true
+            (* A surviving IClosureMake means some function still
+               CONSTRUCTS a closure over [name] — the only way an
+               Escaping lambda's body is ever invoked is through the
+               runtime apply-dispatch trampoline (a `return run
+               function mcaml:<name>` command STRING emitted later by
+               codegen_cfg, never an ICall/TTail this scan can see
+               directly), so a live IClosureMake is exactly as much a
+               "real" reference as an ICall for retirement purposes.
+               Without this arm, every closure whose only call sites
+               are apply-dispatched (i.e. every genuinely Escaping
+               closure — the same closures this whole pass exists to
+               keep working) gets wrongly retired as dead, leaving the
+               dispatch table pointing at a function file that was
+               never emitted. *)
+            | IClosureMake (_, f, _) when f = name -> found := true
             | _ -> ()) b.instrs;
           (match b.term with
            | TTail (f, _) when f = name -> found := true

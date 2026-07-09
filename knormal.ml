@@ -632,8 +632,43 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
      reaches codegen_cfg's loud F5-deferred stub. Mirrors the Cons
      arm: every captured expr is normalized into a temp regardless of
      dest (so nested side effects still evaluate), the allocation
-     itself is dropped when dest is None (pure expression). *)
+     itself is dropped when dest is None (pure expression).
+
+     Defensive: a captured free variable bound in [arr_env] is a
+     compile-time-only static-array/matrix storage id, NOT a real
+     scoreboard scalar — normalizing it here as an ordinary value would
+     silently read a nonexistent vreg (garbage/0). Ordinary call
+     arguments have a real fix for this (the [Var name when
+     Hashtbl.mem arr_env name] arm in the generic [App] case below,
+     which emits a "#arr:<aid>" pseudo-arg that Monomorphize.run
+     consumes to clone a specialized callee). Closures have no
+     equivalent: [IClosureMake] constructs a value once and the
+     resulting closure is later invoked indirectly through F5's
+     apply-dispatch runtime, which has no per-call-site knowledge of
+     which array shape to specialize against — the monomorphization
+     model this compiler uses is fundamentally call-site-driven and
+     doesn't extend to closures's single, uniform runtime
+     representation. Rather than silently emit a call to a helper that
+     Monomorphize can never find a call site to clone (which is exactly
+     what happened before this check existed: the helper became a
+     permanent [is_template] orphan, never emitted, while the caller
+     still referenced it by name), fail loudly here — same posture as
+     the HOF-factory-return/ref-then-call diagnostic in the generic
+     [App] arm below. *)
   | Closure (fname, captured_exprs) ->
+      List.iter (fun e -> match e with
+        | Var name when Hashtbl.mem arr_env name ->
+            failwith (Printf.sprintf
+              "closure '%s' captures '%s', a static array/matrix — \
+               capturing an arr[..]/mat[..]-typed free variable in a \
+               closure is not supported in v1 (monomorphization is \
+               call-site-driven and has no way to specialize an \
+               indirectly-dispatched closure against an array shape); \
+               pass '%s' as an explicit argument to a helper function \
+               instead of capturing it in a lambda"
+              fname name name)
+        | _ -> ()
+      ) captured_exprs;
       let temps = List.map (fun _ -> new_temp ()) captured_exprs in
       let ks = List.map2 (fun e t -> normalize_to (Some t) e) captured_exprs temps in
       let seq body = List.fold_right (fun k acc -> KSeq (k, acc)) ks body in
@@ -687,44 +722,6 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
            KLet(t_l, KUnit,
              KSeq(k_l,
                KLet(d, KUnit, KTail(d, t_l)))))
-
-  (* Phase N / N5: Q16.16 builtins. fmul/fdiv normalize both operands
-     to temps and emit KBinOp with the dedicated FMult/FDiv variants.
-     neg_f desugars to `0 - a` using a fresh zero temp. *)
-  | App ("fmul", [a; b]) ->
-      let t1 = new_temp () in
-      let t2 = new_temp () in
-      let k1 = normalize_to (Some t1) a in
-      let k2 = normalize_to (Some t2) b in
-      let op_instr = match dest with
-        | Some d -> KLet(d, KBinOp(FMult, t1, t2), KUnit)
-        | None -> KUnit in
-      KLet(t1, KUnit,
-        KSeq(k1,
-          KLet(t2, KUnit,
-            KSeq(k2, op_instr))))
-  | App ("fdiv", [a; b]) ->
-      let t1 = new_temp () in
-      let t2 = new_temp () in
-      let k1 = normalize_to (Some t1) a in
-      let k2 = normalize_to (Some t2) b in
-      let op_instr = match dest with
-        | Some d -> KLet(d, KBinOp(FDiv, t1, t2), KUnit)
-        | None -> KUnit in
-      KLet(t1, KUnit,
-        KSeq(k1,
-          KLet(t2, KUnit,
-            KSeq(k2, op_instr))))
-  | App ("neg_f", [a]) ->
-      let t_zero = new_temp () in
-      let t_a = new_temp () in
-      let k_a = normalize_to (Some t_a) a in
-      let op_instr = match dest with
-        | Some d -> KLet(d, KBinOp(Sub, t_zero, t_a), KUnit)
-        | None -> KUnit in
-      KLet(t_zero, KInt 0,
-        KLet(t_a, KUnit,
-          KSeq(k_a, op_instr)))
 
   (* Phase N / N11: int<->float conversions. to_float(a) = a * 65536;
      to_int(a) = a / 65536 (truncates fractional part). Both lower to

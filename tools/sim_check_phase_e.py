@@ -17,9 +17,11 @@ Three layers, mirroring (and extending) tools/sim_check_phase_d.py:
 3. Runs the compile-time REJECTION probes that cannot live in the
    suite because it must compile: value restriction, checked-annotation
    mismatch, occurs check, both-types unify diagnostics, the tvar
-   single-int restriction (§13.10 amendment), the N5 float-`*`
-   asymmetry, exhaustiveness/redundancy under inferred scrutinees, and
-   the decision-7 poly-use-before-decl rule.
+   single-int restriction (§13.10 amendment), the OCaml-style int/float
+   operator split (plain `+`/`-`/`*`/`/`/`%` reject float operands;
+   `+.`/`-.`/`*.`/`/.` reject int operands), exhaustiveness/redundancy
+   under inferred scrutinees, and the decision-7 poly-use-before-decl
+   rule.
 
 Run after any compiler change, BEFORE re-packaging the in-game pack:
 
@@ -71,9 +73,12 @@ REJECTS = [
      "fun f(x) = array_get(x, 0)\n"
      "fun main() = f(array_make(3, 0))\n",
      "array_get: first arg must be a dynamic array"),
-    ("n5_float_star_asymmetry",
+    ("float_star_rejected",
      "fun f(x: float) = x * 2.0\n",
-     "use fmul/fdiv for Q16.16 multiply/divide"),
+     "int-only; use `+.`/`-.`/`*.`/`/.` for float arithmetic"),
+    ("int_star_dot_rejected",
+     "fun f(x: int) = x *. 2\n",
+     "float-only; use `+`/`-`/`*`/`/` for int arithmetic"),
     ("inexhaustive_inferred_scrutinee",
      "fun f(l) = match l with [] -> 0\nfun main() = f(1 :: [])\n",
      "match is not exhaustive"),

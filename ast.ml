@@ -39,7 +39,7 @@ type pattern =
      complete signature, zero tag reads. *)
   | PRecord of (string * pattern) list (* { x = p; ... } *)
 type binop = Add | Sub | Mult | Div | Mod
-           | FMult | FDiv                 (* Phase N: Q16.16 fixed-point multiply/divide *)
+           | FAdd | FSub | FMult | FDiv   (* Q16.16 fixed-point +. -. *. /. — surface syntax only, minted directly by the parser from the dotted operators; FAdd/FSub are scalar-identical to Add/Sub at every pass below knormal (see codegen_helpers.ml's op_str) *)
            | Eq | Neq | Lt | Leq | Gt | Geq | And | Or
 
 (* Phase A: dynamic-heap pool tag. Lives in ast.ml (not cfg.ml) so that

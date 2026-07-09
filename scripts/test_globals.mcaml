@@ -35,9 +35,9 @@ fun helper (j: int) : int = lut[j] + lut[j + 1]
 
 fun test_helper () : int = helper(3)
 
-fun test_float_lut () : int =
+fun test_float_lut () : float =
   let a = flut[1] in
   let b = flut[2] in
-  a + b
+  a +. b
 
 fun test_static_idx () : int = lut[3]

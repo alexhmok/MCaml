@@ -70,9 +70,19 @@ let rec free_vars (bound : S.t) (e : expr) : S.t =
   | If (c, a, b) ->
       S.union (free_vars bound c)
         (S.union (free_vars bound a) (free_vars bound b))
-  | App (_, args) ->
+  | App (f, args) ->
+      (* The callee is a bare identifier, exactly like a Var read: if
+         it names a local closure-typed binding (a captured HOF
+         parameter or a let-bound lambda), it must be captured just
+         like any other free variable, or a lambda that only ever
+         CALLS a captured closure (never reads it as a plain value)
+         silently loses the capture — the [Lambda] case below relies
+         on this to build [fv_list] via [M.find_opt n env], and a
+         global top-level function name is simply absent from [env]
+         so this is a no-op for the overwhelmingly common case of
+         calling an ordinary top-level function. *)
       List.fold_left (fun acc a -> S.union acc (free_vars bound a))
-        S.empty args
+        (if S.mem f bound then S.empty else S.singleton f) args
   | Seq (e1, e2) -> S.union (free_vars bound e1) (free_vars bound e2)
   | Array es ->
       List.fold_left (fun acc a -> S.union acc (free_vars bound a))

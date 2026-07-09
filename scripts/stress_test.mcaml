@@ -1,0 +1,430 @@
+(* stress_test.mcaml — integration/interaction stress suite.
+
+   scripts/mc_test_suite.mcaml (+ its Phase D/E siblings) already pins
+   every language feature in near-isolation with small inputs. This
+   file's job is different: each check below deliberately COMBINES
+   several features at once, at a scale the per-feature unit tests
+   don't reach, to catch bugs that only show up from cross-pass
+   interaction (inline + closure_spec + monomorphize + strength_reduce
+   all firing on the same function; heap state surviving tick_guard
+   yields; a hand-written TCO'd loop indexing a flattened matrix; the
+   F5 escaping-closure apply-dispatch runtime under multi-hop/self-
+   tail-forward/ambiguous-merge shapes).
+
+   Compile CONCATENATED after lib/math.mcaml (S5 calls relu_f /
+   sigmoid_fixed):
+
+     cat lib/math.mcaml scripts/stress_test.mcaml | ./mcaml -o build_stress
+     python3 tools/sim_check_stress.py build_stress
+
+   In game:
+
+     /reload
+     /function mcaml:run_stress    (7 synchronous checks)
+     scoreboard players set param_0 vars 1
+     scoreboard players set param_1 vars 5000
+     scoreboard players set param_2 vars 0
+     scoreboard players set param_3 vars 0
+     scoreboard players set param_4 vars 0
+     scoreboard players set param_5 vars 0
+     scoreboard players set param_6 vars 0
+     /function mcaml:stress_loop   (S8: cross-tick check, ~10 ticks —
+                                    seed param_0/1 as above; param_2..6
+                                    are placeholders overwritten inside
+                                    on the i=1 iteration, see S8 below)
+
+   Every check bumps $pass or $fail on the `vars` objective and prints
+   `[FAIL] <name>` on failure, same convention as mc_test_suite.mcaml.
+   Expected values below were computed independently in Python (see
+   tools/sim_check_stress.py) before being baked in here, so a wrong
+   hardcoded constant can't quietly agree with a compiler bug.
+
+   Checks:
+     S1 (r1_tree_stress)          -> 573671029  (recursive ADT tree,
+                                      build+eval+count, reclaimed via
+                                      a region; non-tail recursion +
+                                      ADT + region + int match)
+     S2 (r2_sort_stress)          ->      9451  (list insertion sort
+                                      inside a region; recursion +
+                                      list pattern match + region)
+     S3 (test_hof_stress)         ->      2375  (closures: same-
+                                      function, cross-function single-
+                                      hop, multi-hop forward, self-
+                                      tail-forward, ambiguous-merge —
+                                      the full F5 apply-dispatch matrix)
+     S4 (test_matmul_stress)      ->      6017  (8x8 int matmul via a
+                                      hand-written TCO'd loop indexing
+                                      a flattened arr[int,64] with
+                                      i*n+k / k*n+j — the strength-
+                                      reduce target shape — plus a
+                                      64-element dynamic-index sum)
+     S5 (test_float_stress)       -> tolerance  (Q16.16: relu_f + dot
+                                      over 8-wide static float arrays,
+                                      one global LUT + one local array,
+                                      then sigmoid_fixed)
+     S6 (test_particles_stress)   ->       465  (records: immutable
+                                      per-step update threaded through
+                                      TCO, 6 particles x 10 steps,
+                                      scores stashed in a dynamic array)
+     S7 (test_deep_recursion_stress) ->   4824484 (fib_nt(18) non-tail
+                                      + deep_sum(3000) 3000-deep non-
+                                      tail recursion + an 800-iter TCO
+                                      sum, in one entry)
+     S8 (stress_loop, i=1..5000)  -> 16392449  (TCO'd 5000-iteration
+                                      loop threading a darr PARAMETER
+                                      across the self-tail back-edge,
+                                      spanning ~10 ticks under the
+                                      default tick_guard budget; the
+                                      one-time darr allocation is
+                                      folded into the i=1 iteration —
+                                      see the S8 section for why) *)
+
+(* ---------- global vals ---------- *)
+
+val stress_weights = [| 0.5; -0.25; 1.0; 0.75; -0.5; 0.25; 1.5; -1.0 |]
+
+(* ---------- harness helpers ---------- *)
+
+fun st_pass () : int =
+  cmd! "scoreboard players add $pass vars 1";
+  1
+
+fun st_fail () : int =
+  cmd! "scoreboard players add $fail vars 1";
+  0
+
+(* ==================================================================
+   S1 — recursive ADT tree: build + eval + count, inside a region
+   ================================================================== *)
+
+type expr = Num of int
+          | Add of expr * expr
+          | Sub of expr * expr
+          | Mul of expr * expr
+          | Neg of expr
+
+fun build_tree (depth: int, seed: int) : expr =
+  if depth = 0 then Num(seed % 7 + 1)
+  else
+    let l = build_tree(depth - 1, seed * 2 + 1) in
+    let r = build_tree(depth - 1, seed * 2 + 2) in
+    (match seed % 4 with
+     | 0 -> Add(l, r)
+     | 1 -> Sub(l, r)
+     | 2 -> Mul(l, r)
+     | _ -> Add(Neg(l), r))
+
+fun eval_tree (e: expr) : int =
+  match e with
+  | Num(n) -> n
+  | Add(a, b) -> eval_tree(a) + eval_tree(b)
+  | Sub(a, b) -> eval_tree(a) - eval_tree(b)
+  | Mul(a, b) -> eval_tree(a) * eval_tree(b)
+  | Neg(a) -> 0 - eval_tree(a)
+
+fun count_tree (e: expr) : int =
+  match e with
+  | Num(_) -> 1
+  | Add(a, b) -> 1 + count_tree(a) + count_tree(b)
+  | Sub(a, b) -> 1 + count_tree(a) + count_tree(b)
+  | Mul(a, b) -> 1 + count_tree(a) + count_tree(b)
+  | Neg(a) -> 1 + count_tree(a)
+
+(* ==================================================================
+   S2 — list insertion sort, inside a region
+   ================================================================== *)
+
+fun build_seq (i: int, n: int) : list =
+  if i = n then []
+  else ((i * 37 + 11) % 97) :: build_seq(i + 1, n)
+
+fun insert_sorted (x: int, l: list) : list =
+  match l with
+  | [] -> x :: []
+  | h :: t -> if x <= h then x :: h :: t else h :: insert_sorted(x, t)
+
+fun sort_list (l: list) : list =
+  match l with
+  | [] -> []
+  | h :: t -> insert_sorted(h, sort_list(t))
+
+fun sum_list_s (l: list) : int =
+  match l with
+  | [] -> 0
+  | h :: t -> h + sum_list_s(t)
+
+fun is_sorted_pair (l: list) : int =
+  match l with
+  | [] -> 1
+  | _ :: [] -> 1
+  | a :: b :: t -> if a <= b then is_sorted_pair(b :: t) else 0
+
+(* ==================================================================
+   S3 — closures across the full F5 shape matrix: same-function,
+   cross-function single-hop, multi-hop forward, self-tail-forward,
+   ambiguous control-flow merge.
+   ================================================================== *)
+
+fun apply_twice (f: int -> int, x: int) : int = f(f(x))
+
+fun add_k (k: int, f: int -> int, x: int) : int = f(x) + k
+
+fun helper_bump (x: int) : int = x + 100
+
+(* two HOF-parameter hops: apply_multi_hop forwards f to hop2 without
+   calling it; hop2 is the one that actually applies it. *)
+fun hop2 (f: int -> int, x: int) : int = f(x) + helper_bump(x)
+
+fun apply_multi_hop (f: int -> int, x: int) : int = hop2(f, x + 1)
+
+(* self-tail-forward: f rides across the loop's own back-edge. *)
+fun fold_apply (f: int -> int, n: int, acc: int) : int =
+  if n = 0 then acc else fold_apply(f, n - 1, f(acc) + n)
+
+(* ambiguous merge: two distinct closures reach the same call through
+   an if — closure_spec.ml can't resolve a single def, so this forces
+   the F5 apply-dispatch runtime rather than zero-cost specialization. *)
+fun choose_and_apply (c: int, x: int) : int =
+  apply_twice((if c = 1 then (fun (y: int) -> y * 3) else (fun (y: int) -> y + 1000)), x)
+
+fun test_hof_stress () : int =
+  let a = apply_twice(fun (y: int) -> y + 1, 5) in
+  let cap = 100 in
+  let b = add_k(7, fun (y: int) -> y + cap, 3) in
+  let c = apply_multi_hop(fun (y: int) -> y * 2, 10) in
+  let d = fold_apply(fun (y: int) -> y + 2, 5, 0) in
+  let e = choose_and_apply(1, 10) in
+  let g = choose_and_apply(2, 10) in
+  if (a + b + c + d + e + g) = 2375 then st_pass()
+  else (cmd! "say [FAIL] test_hof_stress"; st_fail())
+
+(* ==================================================================
+   S4 — 8x8 int matmul via a HAND-WRITTEN (not `for`) TCO'd loop over
+   a flattened arr[int,64], indexing with i*n+k / k*n+j / i*n+j. This
+   is the matmul shape strength_reduce.ml's docstring names as the
+   case for_lift-synthesized `for` loops don't reach (those get fully
+   unrolled instead); a hand-authored recursive loop is never
+   for_lift-synthesized, so it stays a real IV-rewrite candidate.
+   ================================================================== *)
+
+fun mm_row (a: arr[int, 64], b: arr[int, 64], out: arr[int, 64],
+            i: int, n: int, j: int, k: int, acc: int) : int =
+  if k = n then (
+    out[i * n + j] := acc;
+    if j + 1 = n then 0
+    else mm_row(a, b, out, i, n, j + 1, 0, 0)
+  )
+  else mm_row(a, b, out, i, n, j, k + 1, acc + a[i * n + k] * b[k * n + j])
+
+fun mm_rows (a: arr[int, 64], b: arr[int, 64], out: arr[int, 64],
+             i: int, n: int) : int =
+  if i = n then 0
+  else
+    let _ = mm_row(a, b, out, i, n, 0, 0, 0) in
+    mm_rows(a, b, out, i + 1, n)
+
+fun sum_arr64 (a: arr[int, 64]) : int =
+  let acc = ref 0 in
+  for idx = 0 to 64 do
+    acc := !acc + a[idx]
+  done;
+  !acc
+
+fun test_matmul_stress () : int =
+  let a = [| 1; 2; 3; 4; 5; 1; 2; 3; 4; 5; 1; 2; 3; 4; 5; 1; 2; 3; 4; 5; 1; 2; 3; 4; 5; 1; 2; 3; 4; 5; 1; 2; 3; 4; 5; 1; 2; 3; 4; 5; 1; 2; 3; 4; 5; 1; 2; 3; 4; 5; 1; 2; 3; 4; 5; 1; 2; 3; 4; 5; 1; 2; 3; 4 |] in
+  let b = [| 1; 4; 7; 3; 6; 2; 5; 1; 4; 7; 3; 6; 2; 5; 1; 4; 7; 3; 6; 2; 5; 1; 4; 7; 3; 6; 2; 5; 1; 4; 7; 3; 6; 2; 5; 1; 4; 7; 3; 6; 2; 5; 1; 4; 7; 3; 6; 2; 5; 1; 4; 7; 3; 6; 2; 5; 1; 4; 7; 3; 6; 2; 5; 1 |] in
+  let out = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |] in
+  let _ = mm_rows(a, b, out, 0, 8) in
+  if sum_arr64(out) = 6017 then st_pass()
+  else (cmd! "say [FAIL] test_matmul_stress"; st_fail())
+
+(* ==================================================================
+   S5 — Q16.16 float pipeline: relu(w_i * in_i) dot-accumulated over
+   an 8-wide static float array (one global val LUT, one local
+   literal), fed through the math-library sigmoid LUT.
+   ================================================================== *)
+
+fun relu_dot (w: arr[float, 8], inp: arr[float, 8], i: int, acc: float) : float =
+  if i = 8 then acc
+  else relu_dot(w, inp, i + 1, acc +. relu_f(w[i] *. inp[i]))
+
+fun test_float_stress () : int =
+  let inputs = [| 1.0; 2.0; -1.0; 0.5; 3.0; -2.0; 0.25; 1.0 |] in
+  let s = relu_dot(stress_weights, inputs, 0, 0.0) in
+  let out = sigmoid_fixed(s) in
+  if (out >= 0.74) && (out <= 0.82) then st_pass()
+  else (cmd! "say [FAIL] test_float_stress"; st_fail())
+
+(* ==================================================================
+   S6 — records threaded through TCO: 6 particles, 10 immutable
+   position/velocity updates each, per-particle scores stashed into a
+   dynamic array and summed back out.
+   ================================================================== *)
+
+type particle = { x : int; y : int; vx : int; vy : int }
+
+fun step (p: particle) : particle =
+  { x = p.x + p.vx; y = p.y + p.vy; vx = p.vx; vy = p.vy - 1 }
+
+fun step_n (p: particle, n: int) : particle =
+  if n = 0 then p else step_n(step(p), n - 1)
+
+fun particle_score (p: particle) : int = p.x + p.y
+
+fun run_particles (results: darr, idx: int, count: int) : int =
+  if idx = count then 0
+  else
+    let p0 = { x = idx * 3; y = idx * 2; vx = idx + 1; vy = 10 - idx } in
+    let pf = step_n(p0, 10) in
+    array_set(results, idx, particle_score(pf));
+    run_particles(results, idx + 1, count)
+
+fun sum_darr_s (a: darr, n: int) : int =
+  let acc = ref 0 in
+  for i = 0 to n do
+    acc := !acc + array_get(a, i)
+  done;
+  !acc
+
+fun test_particles_stress () : int =
+  let results = array_make(6, 0) in
+  let _ = run_particles(results, 0, 6) in
+  if sum_darr_s(results, 6) = 465 then st_pass()
+  else (cmd! "say [FAIL] test_particles_stress"; st_fail())
+
+(* ==================================================================
+   S7 — deep non-tail recursion (3000-deep call/save-restore frame
+   stack) alongside exponential-call-count non-tail recursion (fib)
+   and an unrelated large TCO loop, all in one entry.
+   ================================================================== *)
+
+fun fib_nt (n: int) : int =
+  if n < 2 then n else fib_nt(n - 1) + fib_nt(n - 2)
+
+fun deep_sum (n: int) : int =
+  if n = 0 then 0 else n + deep_sum(n - 1)
+
+fun sum_to_tco (n: int, acc: int) : int =
+  if n = 0 then acc else sum_to_tco(n - 1, acc + n)
+
+(* sum_to_tco's iteration count is capped well under the default
+   tick_guard budget (1024 iters/tick) so this whole check still
+   completes synchronously within run_stress's single tick — a
+   5000-iteration version would need multiple ticks to finish, like
+   S8 below. *)
+fun test_deep_recursion_stress () : int =
+  let a = fib_nt(18) in
+  let b = deep_sum(3000) in
+  let c = sum_to_tco(800, 0) in
+  if (a + b + c) = 4824484 then st_pass()
+  else (cmd! "say [FAIL] test_deep_recursion_stress"; st_fail())
+
+(* ==================================================================
+   master runner — 7 checks (2 of them inline region blocks, since
+   `region` is only legal textually inside a public-entry function).
+   ================================================================== *)
+
+fun run_stress () : int =
+  cmd! "say [MCaml stress] running 7 checks...";
+  cmd! "scoreboard players set $pass vars 0";
+  cmd! "scoreboard players set $fail vars 0";
+
+  (* r1 / S1: recursive ADT tree build+eval+count, region-reclaimed *)
+  let r1 = region (fun () ->
+    let t = build_tree(8, 1) in
+    let v = eval_tree(t) in
+    let c = count_tree(t) in
+    v + c * 1000000) in
+  (if r1 = 573671029 then st_pass()
+   else (cmd! "say [FAIL] r1_tree_stress"; st_fail()));
+
+  (* r2 / S2: list insertion sort, region-reclaimed *)
+  let r2 = region (fun () ->
+    let raw = build_seq(0, 20) in
+    let sorted = sort_list(raw) in
+    sum_list_s(sorted) * 10 + is_sorted_pair(sorted)) in
+  (if r2 = 9451 then st_pass()
+   else (cmd! "say [FAIL] r2_sort_stress"; st_fail()));
+
+  test_hof_stress();
+  test_matmul_stress();
+  test_float_stress();
+  test_particles_stress();
+  test_deep_recursion_stress();
+
+  cmd! "tellraw @a [\"[MCaml stress] pass=\",{\"score\":{\"name\":\"$pass\",\"objective\":\"vars\"}},\" fail=\",{\"score\":{\"name\":\"$fail\",\"objective\":\"vars\"}},\" (expected pass=7 fail=0)\"]";
+  cmd! "execute if score $fail vars matches 0 if score $pass vars matches 7 run say [MCaml stress] ALL 7 CHECKS PASSED";
+  cmd! "execute if score $fail vars matches 1.. run say [MCaml stress] FAILURES DETECTED - scroll up for [FAIL] lines";
+  cmd! "execute if score $fail vars matches 0 if score $pass vars matches ..6 run say [MCaml stress] WARNING: fewer than 7 checks ran - suite aborted early";
+  0
+
+(* ==================================================================
+   S8 — cross-tick stress: a hand-written TCO'd 5000-iteration loop
+   that threads a `darr` PARAMETER (not a for-loop-lifted free
+   variable — this exact shape isn't covered by test_dyn_array_params
+   or test_tick_stress) across its own self-tail back-edge, alongside
+   a running sum, a running mod-hash, a periodic array
+   read-after-write, and a periodic non-tail helper call. Spans ~5
+   ticks under the default tick_guard budget (1024 iters/tick).
+
+   IMPORTANT SHAPE, found by this stress suite: `stress_loop` is
+   invoked DIRECTLY as the public entry (seed param_0=1, param_1=5000,
+   the rest 0, then `/function mcaml:stress_loop`) — there is
+   deliberately NO separate `stress_start` wrapper that allocates the
+   darr and then calls this function. A wrapper would call it via a
+   plain synchronous `ICall` (tco.ml only loop-ifies SELF-recursive
+   tail calls — see CLAUDE.md — a call to a DIFFERENT function is
+   never `return run`-dispatched), and Minecraft's `function` command
+   returns control to the CALLER the moment the callee's tick_guard
+   first yields via `return 0`, not when the callee truly finishes.
+   The wrapper's own §4.4 end-of-invocation reset (mandatory on every
+   public-entry function once any dynamic-heap feature is used
+   anywhere in the program) would then fire immediately after that
+   first yield — wiping `mcaml:scratch`/`mcaml:objpool` while
+   `stress_loop` is still mid-flight and has 4000+ iterations left,
+   corrupting the darr this function keeps reading/writing every
+   iteration. `mc_test_suite.mcaml`'s async_start -> async_sum has
+   this exact wrapper shape too, and is subject to the same hazard in
+   principle; it never surfaces there only because async_sum's loop
+   body touches nothing but scoreboard ints, so a mid-loop pool wipe
+   is unobservable. Folding the one-time setup into `stress_loop`
+   itself (guarded on `i = 1`) makes this function the sole public
+   entry, so its reset epilogue only ever runs after the loop's TRUE
+   completion. *)
+
+fun helper13 (x: int) : int = x * 2
+
+(* Factored out so `array_make`'s "must be the direct rhs of a let"
+   restriction doesn't force duplicating this logic across the i=1
+   (fresh alloc) and i>1 (threaded-through) branches below; it also
+   exercises a 4-tuple return value threaded straight back into the
+   next self-tail call. *)
+fun stress_step (da: darr, i: int, sum: int, hash: int,
+                  arrbonus: int, callbonus: int) : int * int * int * int =
+  (if i % 7 = 0 then array_set(da, i % 20, i) else ());
+  let sum2 = sum + i in
+  let hash2 = (hash * 31 + i) % 1000003 in
+  let arrbonus2 = (if i % 11 = 0 then arrbonus + array_get(da, i % 20) else arrbonus) in
+  let callbonus2 = (if i % 13 = 0 then callbonus + helper13(i) else callbonus) in
+  (sum2, hash2, arrbonus2, callbonus2)
+
+fun stress_loop (i: int, n: int, da_in: darr,
+                  sum: int, hash: int, arrbonus: int, callbonus: int) : int =
+  if i = 1 then (
+    cmd! "say [MCaml stress] starting stress_loop(1..5000); yields across ticks...";
+    cmd! "scoreboard players set $stress_done vars 0";
+    let da = array_make(20, 0) in
+    let (sum2, hash2, arrbonus2, callbonus2) = stress_step(da, i, sum, hash, arrbonus, callbonus) in
+    stress_loop(i + 1, n, da, sum2, hash2, arrbonus2, callbonus2)
+  )
+  else if i > n then (
+    (if (sum + hash + arrbonus + callbonus) = 16392449 then
+       cmd! "execute if score $stress_done vars matches 0 run say [MCaml stress] PASS: stress_loop(1..5000) cross-tick checksum matches"
+     else
+       cmd! "execute if score $stress_done vars matches 0 run say [MCaml stress] FAIL: wrong final checksum - run /scoreboard players get $ret vars");
+    cmd! "scoreboard players set $stress_done vars 1";
+    sum + hash + arrbonus + callbonus
+  )
+  else
+    let (sum2, hash2, arrbonus2, callbonus2) = stress_step(da_in, i, sum, hash, arrbonus, callbonus) in
+    stress_loop(i + 1, n, da_in, sum2, hash2, arrbonus2, callbonus2)

@@ -34,6 +34,7 @@ let strip_tyvar tv = String.sub tv 1 (String.length tv - 1)
 %token LPAREN RPAREN LBRACE RBRACE COMMA COLON SEMICOLON
 %token DOT
 %token EQUAL PLUS MINUS TIMES DIV PERCENT LT GT LEQ GEQ NEQ AND OR
+%token PLUSDOT MINUSDOT TIMESDOT DIVDOT
 %token TILDE CARET EOF
 %token LBAR RBAR LBRACK RBRACK
 %token CONS
@@ -94,8 +95,8 @@ let strip_tyvar tv = String.sub tv 1 (String.length tv - 1)
 %left AND
 %left EQUAL NEQ LT GT LEQ GEQ
 %right CONS
-%left PLUS MINUS
-%left TIMES DIV PERCENT
+%left PLUS MINUS PLUSDOT MINUSDOT
+%left TIMES DIV PERCENT TIMESDOT DIVDOT
 %nonassoc BANG REF
 %left LBRACK DOT
 
@@ -282,6 +283,21 @@ expr:
 
   | REF e = expr { Ref e }
   | BANG e = expr { Deref e }
+  /* OCaml-style unary float negation: ~-. e desugars to 0.0 -. e — same
+     precedence tier as REF/BANG (binds tighter than binary arithmetic,
+     looser than indexing/field access). */
+  | TILDE MINUSDOT e = expr %prec BANG { BinOp(FSub, Float 0.0, e) }
+  /* Unary integer negation. Literal operands fold in place so `-1` /
+     `-1.5` stay literals; anything else desugars to `0 - e` (int-only,
+     like OCaml's prefix `-`; floats use ~-.). Same precedence tier as
+     BANG/REF: `-x * y` is `(-x) * y`, `-a[i]` negates the element.
+     Pattern and coord positions don't build through expr, so they get
+     their own MINUS cases below. */
+  | MINUS e = expr %prec BANG
+    { match e with
+      | Int i -> Int (-i)
+      | Float f -> Float (-.f)
+      | e -> BinOp(Sub, Int 0, e) }
   | e1 = expr COLEQ e2 = expr { RefSet(e1, e2) }
   | FOR i = ID EQUAL lo = expr TO hi = expr DO body = seq_expr DONE { For(i, lo, hi, body) }
 
@@ -339,6 +355,7 @@ pattern:
 
 atom_pattern:
   | i = INT { PInt i }
+  | MINUS i = INT { PInt (-i) }
   | name = ID { pattern_of_id name }
   | name = ID LPAREN ps = pattern_comma_list RPAREN
       { if not (is_ctor_name name) then
@@ -386,14 +403,21 @@ nonempty_arg_list:
 coord_part:
   | f = FLOAT { Abs f }
   | i = INT   { Abs (float_of_int i) }
+  | MINUS f = FLOAT { Abs (-.f) }
+  | MINUS i = INT   { Abs (float_of_int (-i)) }
   | TILDE     { Rel None }
   | TILDE f = FLOAT { Rel (Some f) }
   | TILDE i = INT   { Rel (Some (float_of_int i)) }
+  | TILDE MINUS f = FLOAT { Rel (Some (-.f)) }
+  | TILDE MINUS i = INT   { Rel (Some (float_of_int (-i))) }
   | CARET     { Local None }
   | CARET f = FLOAT { Local (Some f) }
   | CARET i = INT   { Local (Some (float_of_int i)) }
+  | CARET MINUS f = FLOAT { Local (Some (-.f)) }
+  | CARET MINUS i = INT   { Local (Some (float_of_int (-i))) }
 
 %inline binop:
   | PLUS { Add } | MINUS { Sub } | TIMES { Mult } | DIV { Div } | PERCENT { Mod }
+  | PLUSDOT { FAdd } | MINUSDOT { FSub } | TIMESDOT { FMult } | DIVDOT { FDiv }
   | EQUAL { Eq } | NEQ { Neq } | LT { Lt } | GT { Gt } | LEQ { Leq } | GEQ { Geq }
   | AND { And } | OR { Or }

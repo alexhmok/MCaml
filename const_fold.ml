@@ -85,6 +85,11 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
             (match op with
              | Add  -> fold (ka + kb)
              | Sub  -> fold (ka - kb)
+             (* FAdd/FSub are scalar-identical to Add/Sub on Q16.16
+                encoding (see typing.ml's BinOp comment) — no rescale
+                needed for constant folding either. *)
+             | FAdd -> fold (ka + kb)
+             | FSub -> fold (ka - kb)
              | Mult -> fold (ka * kb)
              | Div  ->
                  if kb = 0 then

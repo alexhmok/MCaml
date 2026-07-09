@@ -9,8 +9,11 @@
 
 let white = [' ' '\t']+
 let newline = '\r' | '\n' | "\r\n"
-let int = '-'? ['0'-'9']+
-let float = '-'? ['0'-'9']+ '.' ['0'-'9']*
+(* No leading '-' here: longest-match made `x-1` lex as `x` `INT(-1)`
+   (a parse error). Negation is the parser's job now — a unary MINUS
+   production folds literals and desugars the rest to `0 - e`. *)
+let int = ['0'-'9']+
+let float = ['0'-'9']+ '.' ['0'-'9']*
 let id = ['a'-'z' 'A'-'Z' '_'] ['a'-'z' 'A'-'Z' '0'-'9' '_']*
 let selector = '@' ['a' 'e' 'p' 'r' 's'] ('[' [^ ']']* ']')?
 let tyvar = '\'' ['a'-'z' 'A'-'Z' '0'-'9' '_']*  (* G4: decl-side type variable, e.g. 'a — §13.11 decision 3 *)
@@ -77,6 +80,13 @@ rule read = parse
   | ":"      { COLON }
   | ";"      { SEMICOLON }
   | "="      { EQUAL }
+  (* Float binops (OCaml-style dotted operators) must be matched before
+     the bare PLUS/MINUS/TIMES/DIV rules below — ocamllex picks the
+     longest match, so this ordering is defensive, not load-bearing. *)
+  | "+."     { PLUSDOT }
+  | "-."     { MINUSDOT }
+  | "*."     { TIMESDOT }
+  | "/."     { DIVDOT }
   | "+"      { PLUS }
   | "-"      { MINUS }
   | "*"      { TIMES }

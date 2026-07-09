@@ -22,6 +22,10 @@ let cmp_str = function
 
 let op_str = function
   | Add -> "+=" | Sub -> "-=" | Mult -> "*=" | Div -> "/=" | Mod -> "%="
+  (* FAdd/FSub are scalar-identical to Add/Sub on Q16.16 encoding — see
+     typing.ml's BinOp comment. FMult/FDiv never reach here: they're
+     intercepted earlier in cmd_score_binop's dedicated arms. *)
+  | FAdd -> "+=" | FSub -> "-="
   | And -> "<"                          (* scoreboard min; valid for 0/1 *)
   | Or  -> ">"                          (* scoreboard max; valid for 0/1 *)
   | _ -> "+="

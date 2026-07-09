@@ -1161,29 +1161,37 @@ let rec infer env e =
       let t2 = infer env e2 in
       (match op with
        | Add | Sub | Mult | Div | Mod ->
+           (* OCaml-style split: plain operators are int-only. Float
+              arithmetic goes through the dotted operators (+. -. *. /.)
+              below — mixing them is a type error, not silent coercion. *)
            unify_msg t1 t2 "Type mismatch in binary operation";
            (match resolve t1 with
             | TInt -> TInt
-            (* Phase N / N5: Add and Sub on Q16.16 are scalar-identical
-               to int add/sub because (x*65536 + y*65536) = (x+y)*65536.
-               Mult/Div on TFloat are rejected — users must call
-               fmul/fdiv which lower to FMult/FDiv (different codegen).
-               Mod on TFloat falls through to the generic rejection,
-               exactly as before Phase E. *)
             | TFloat ->
-                (match op with
-                 | Add | Sub -> TFloat
-                 | Mult | Div ->
-                     raise (Error "use fmul/fdiv for Q16.16 multiply/divide; \
-                                   `*` and `/` on float would emit int semantics \
-                                   and silently lose the fractional part")
-                 | _ -> raise (Error "Type mismatch in binary operation"))
+                raise (Error "`+`/`-`/`*`/`/`/`%` are int-only; \
+                              use `+.`/`-.`/`*.`/`/.` for float arithmetic")
             | TVar _ ->
                 (* §13.10 decision 5: two unconstrained operands default
                    to int eagerly (OCaml-compatible `+`). *)
                 unify_msg t1 TInt "Type mismatch in binary operation";
                 TInt
             | _ -> raise (Error "Type mismatch in binary operation"))
+       | FAdd | FSub | FMult | FDiv ->
+           (* Phase N / N5: FAdd/FSub are scalar-identical to Add/Sub on
+              Q16.16 encoding — (x*65536 + y*65536) = (x+y)*65536 — but
+              still type-checked as their own arm so `+.`/`-.` reject int
+              operands exactly as `+`/`-` reject float ones. FMult/FDiv
+              lower to the multi-command pre-shift/scale-up sequences in
+              codegen_helpers.ml. *)
+           unify_msg t1 t2 "Type mismatch in binary operation";
+           (match resolve t1 with
+            | TFloat -> TFloat
+            | TVar _ ->
+                unify_msg t1 TFloat "Type mismatch in binary operation";
+                TFloat
+            | _ ->
+                raise (Error "`+.`/`-.`/`*.`/`/.` are float-only; \
+                              use `+`/`-`/`*`/`/` for int arithmetic"))
        | Eq | Neq | Lt | Gt | Leq | Geq ->
            unify_msg t1 t2 "Type mismatch in binary operation";
            (match resolve t1 with
@@ -1195,12 +1203,7 @@ let rec infer env e =
        | And | Or ->
            unify_msg t1 TBool "Type mismatch in binary operation";
            unify_msg t2 TBool "Type mismatch in binary operation";
-           TBool
-       | FMult | FDiv ->
-           (* Internal ops minted by knormal from fmul/fdiv Apps — the
-              surface parser never produces them, so reaching this arm
-              was and stays the generic rejection (pre-E catch-all). *)
-           raise (Error "Type mismatch in binary operation"))
+           TBool)
 
   | Let (x, e1, e2) ->
       let t1 = infer env e1 in
@@ -1230,25 +1233,6 @@ let rec infer env e =
         "is_nil: arg must be a list";
       TBool
 
-  (* Phase N / N5: Q16.16 fixed-point multiply/divide/negate builtins.
-     We use explicit App-builtins instead of overloading `*`/`/` because
-     dispatching on operand type would require knormal to track a
-     per-variable type environment, which it currently doesn't. The
-     deliberate asymmetry — `+`/`-` work on TFloat, but `*`/`/` route
-     through fmul/fdiv — matches the asymmetry in how they lower: Add
-     and Sub are one scoreboard op each; FMult and FDiv are multi-
-     command inlined sequences (see N6/N7). *)
-  | App ("fmul", [a; b]) ->
-      unify_msg (infer env a) TFloat "fmul: first arg must be float";
-      unify_msg (infer env b) TFloat "fmul: second arg must be float";
-      TFloat
-  | App ("fdiv", [a; b]) ->
-      unify_msg (infer env a) TFloat "fdiv: first arg must be float";
-      unify_msg (infer env b) TFloat "fdiv: second arg must be float";
-      TFloat
-  | App ("neg_f", [a]) ->
-      unify_msg (infer env a) TFloat "neg_f: arg must be float";
-      TFloat
   | App ("to_float", [a]) ->
       unify_msg (infer env a) TInt "to_float: arg must be int";
       TFloat

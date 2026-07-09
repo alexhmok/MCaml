@@ -224,18 +224,47 @@ let () =
     let no_closure_spec = Cfg.pass_disabled "MCAML_NO_CLOSURE_SPEC" in
     if not no_closure_spec then Closure_spec.run fn_table;
 
+    (* Phase 2b: monomorphize array-parameterized templates. After this
+       the table still contains the templates but they're marked
+       is_template=true and skipped during emit. *)
+    Monomorphize.run fn_table;
+
     (* Phase F5: whole-program closure-shape table. Computed right after
        Closure_spec.run per §13.12 decision 5's own framing ("after F3's
        whole-program escape analysis has enumerated every Escaping
        closure shape") — every IClosureMake still in fn_table at this
        point is either genuinely Escaping or budget-exceeded; Known
-       instances were already rewritten away above. Ordering relative to
-       Monomorphize.run below doesn't matter (monomorphize never touches
-       TFun/closure machinery, decision 3). Empty (zero codes) on any
-       program with no closures at all — every downstream consumer treats
-       that as a no-op, so canary programs are unaffected.
+       instances were already rewritten away above. Empty (zero codes)
+       on any program with no closures at all — every downstream
+       consumer treats that as a no-op, so canary programs are
+       unaffected.
 
-       Deliberately NOT computed post-DCE (a tempting-looking refinement
+       MUST run AFTER Monomorphize.run, not before (this used to run
+       before, on the stated belief that "monomorphize never touches
+       TFun/closure machinery" made the ordering immaterial — that
+       belief was wrong and caused a real bug: [Closure_layout.compute]
+       skips [is_template] functions when scanning for [IClosureMake],
+       but [is_template] is set purely from a function's OWN params
+       having an array/matrix type, independent of whether a closure is
+       lexically constructed inside its body. A function that merely
+       takes an array parameter AND happens to also build an unrelated
+       closure (one that captures no array at all) was a template at
+       the old pre-Monomorphize call site, so its [IClosureMake] was
+       invisible to the shape table — then Monomorphize cloned it into
+       concrete, non-template copies whose inherited [IClosureMake] was
+       never registered, and codegen_cfg's [Closure_layout.code_of]
+       crashed with "has no assigned code" on every such clone. Running
+       this after Monomorphize means every surviving non-template
+       function (originals AND clones) gets scanned, so no
+       array-parameterized function can hide a closure from this table
+       again. Still safely before Phase 3 (regalloc/codegen/DCE), so
+       the existing "deliberately NOT computed post-DCE" reasoning
+       below is unaffected by this move — that concern is entirely
+       about Optimize.run's placement, a different pass. *)
+    let closure_layout = Closure_layout.compute fn_table in
+    Cost.k_max_captured := closure_layout.Closure_layout.k_max_captured;
+
+    (* Deliberately NOT computed post-DCE (a tempting-looking refinement
        that would let a program whose lambdas are all Known emit zero
        apply/apply_dispatch_<N> files instead of a few harmless dead
        ones): DCE only happens per-function inside Optimize.run, which
@@ -257,13 +286,6 @@ let () =
        closure's OWN call sites compile to, not about whether some other,
        unrelated Escaping shape elsewhere in the same program leaves a
        same-named dead file behind). *)
-    let closure_layout = Closure_layout.compute fn_table in
-    Cost.k_max_captured := closure_layout.Closure_layout.k_max_captured;
-
-    (* Phase 2b: monomorphize array-parameterized templates. After this
-       the table still contains the templates but they're marked
-       is_template=true and skipped during emit. *)
-    Monomorphize.run fn_table;
 
     (* Extend fn_order with any clones that monomorphize added. *)
     let extra_names =
@@ -327,7 +349,23 @@ let () =
     let is_public_entry (name : string) : bool =
       match Hashtbl.find_opt fn_table name with
       | Some cfg when not cfg.Cfg.is_template ->
+          (* A lambda-lifted helper reachable only via the closure
+             apply-dispatch trampoline (F5) is invoked through
+             `IApply` -> `mcaml:apply` -> `apply_dispatch_N` ->
+             `return run function mcaml:<helper>`, a call edge that
+             lives in generated command STRINGS, not in any `ICall`
+             the `called_by_other` walk above can see. Without this
+             exclusion such a helper is (wrongly) treated as an
+             orphan public entry and gets the §4.4 reset epilogue
+             appended, wiping mcaml:objpool/scratch mid-invocation
+             the moment the SAME closure (or any other live heap
+             handle) is used again after that call returns. Mirrors
+             the existing reasoning for TFun-typed functions never
+             being externally invocable (F3+F4): a closure helper is
+             a genuine public entry only if nothing in the program
+             ever constructs a closure over it. *)
           not (Hashtbl.mem called_by_other name)
+          && not (Hashtbl.mem closure_layout.Closure_layout.shapes name)
       | _ -> false
     in
     (* Phase C decision #5. Region save slots [$region_save_<k>_*] are
@@ -358,6 +396,71 @@ let () =
                 public-entry-point functions in v1 (DYNMEM_PLAN §C5)"
                name)
       end) fn_table;
+    (* KNOWN, CONFIRMED, UNFIXED HAZARD (documented rather than rejected
+       — see below for why a compiler-enforced check isn't safe to ship):
+       a public entry P that makes an ordinary (non-tail) ICall — directly
+       or transitively through other helper functions — into a function
+       G with a self-tail loop is unsafe the moment G's loop actually
+       needs to yield mid-run. Minecraft's `function` command returns
+       control to the IMMEDIATE caller the instant the callee finishes
+       OR executes an explicit `return`, and tick_guard's per-iteration
+       budget guard does exactly that (`schedule ... 1t; return 0`) on
+       every yield — NOT "the whole call chain unwinds," just one level.
+       So P resumes immediately after its `function mcaml:G` line,
+       reaches its own §4.4 end-of-invocation reset (appended
+       unconditionally after P's last command, since P — not G, which
+       `called_by_other` correctly marks non-public — is the one
+       [is_public_entry] fires for), and wipes `mcaml:scratch`/
+       `mcaml:objpool` while G's scheduled continuation is still
+       mid-flight and depends on that exact state next tick. Confirmed
+       by direct repro (2026-07-08): a wrapper plain-calling a self-tail
+       darr-loop under a low MCAML_LOOP_ITER_LIMIT gets its heap wiped
+       after the loop's FIRST partial run, then crashes resuming the
+       scheduled continuation next tick.
+
+       This is the exact hazard scripts/stress_test.mcaml's S8 comment
+       documents finding and works around by making the self-tail loop
+       itself the sole public entry (folding any one-time setup into an
+       `i = 1` guard inside the loop) rather than introducing a
+       wrapper — but that was only ever a per-test workaround, never a
+       compiler guarantee.
+
+       A compile-time rejection of "any public entry that can reach a
+       self-tail function via ICall" was tried and reverted: EVERY
+       self-tail loop gets tick_guard's yield machinery woven in
+       unconditionally, regardless of whether it will ever actually
+       iterate past the budget for realistic inputs (e.g.
+       mc_test_suite.mcaml's `sum_list`, called from `run_all`, over
+       lists far shorter than the default 1024-iteration budget) — so a
+       blanket static rejection has no way to distinguish "structurally
+       has a self-tail loop" from "will actually span multiple ticks
+       for this program's real inputs" (a runtime-data-dependent
+       question with no static bound anywhere in this compiler) and
+       broke large amounts of legitimate, already-working code the
+       moment it was tried.
+
+       A runtime fix (a global "$tick_yielded" flag, set by tick_guard
+       right before its yield and checked by the wrapper's reset) was
+       also sketched and rejected: it correctly SKIPS the wrapper's
+       premature reset on a yield, but then nothing ever fires the
+       reset once G's OWN scheduled continuation later truly
+       completes — that continuation re-enters via a direct scheduled
+       call to G, never back through P, and G itself is not a public
+       entry (something else calls it) so it carries no reset of its
+       own either. The pool would simply never get reclaimed for that
+       invocation rather than being corrupted — better than a crash,
+       but still wrong, and building the "G must inherit a reset ITS
+       OWN true-completion path fires, once it's known to be
+       reachable from a heap-using public entry" plumbing needed to
+       close that gap is a real multi-file architecture change, not a
+       proportionate scope for a bug-hunting pass.
+
+       Net: no compiler-level fix ships for this in v1. Follow
+       stress_test.mcaml's S8 pattern — fold any one-time setup into
+       the self-tail function itself (guarded on the first iteration)
+       so it is the sole public entry — for any program where the
+       self-tail loop might realistically span more than one tick's
+       iteration budget. *)
     (* Reset block from DYNMEM_PLAN.md §4.4. permheap is intentionally
        excluded — it persists across invocations by design. *)
     let reset_cmds = [

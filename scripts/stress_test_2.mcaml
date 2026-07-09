@@ -1,0 +1,338 @@
+(* stress_test_2.mcaml — round 2 of the integration/interaction stress
+   suite. scripts/stress_test.mcaml's S1-S8 already combine regions +
+   ADTs, the full F5 closure apply-dispatch matrix (same-function,
+   cross-function, multi-hop, self-tail-forward, ambiguous-merge),
+   matmul/strength-reduce, floats, records, deep non-tail recursion,
+   and a cross-tick darr-through-TCO loop. This file targets shapes
+   S1-S8 do NOT reach:
+
+     - closures RETURNED from a function (HOF factories) rather than
+       only passed in as parameters — decision 2 in DYNMEM_PLAN.md
+       §13.12 calls this out as the smallest scope where escaping
+       closures are unavoidable;
+     - a closure captured INSIDE another closure's environment
+       (composition: `compose(f, g)` returns `fun (x) -> f(g(x))`,
+       so the returned closure's env holds two closure handles, not
+       scalars);
+     - a closure reached through a `ref` alias hop (decision 2 also
+       explicitly allows storing a lambda in a `ref`);
+     - MUTUAL non-tail recursion between two distinct top-level
+       functions (S7's fib_nt/deep_sum are both self-recursive; a
+       mutual pair interleaves two different save/restore frame
+       shapes on the call stack, which self-recursion can't exercise);
+     - a fold-shaped reduction: a closure applied once per list
+       element, threading a separate accumulator through non-tail
+       list recursion (map/fold were literally not typeable before
+       Phase F closed — see scripts/test_polymorphism.mcaml's own
+       comment to that effect);
+     - THREE levels of nested regions where a list is deep-copied
+       across region boundaries repeatedly (built in the innermost
+       region, consed with a new head in the middle region, summed in
+       the outer region) — S1/S2 only cross one region boundary each,
+       mc_test_suite.mcaml's r03 nests two regions but returns a bare
+       int, never re-crossing with a heap value already copied once.
+
+   IMPORTANT DISCOVERED LIMITATION (found while drafting this file,
+   confirmed by direct compilation against the current binary):
+   `let g = <expr> in g(x)` only lowers when `<expr>` is a direct
+   lambda literal (`fun (...) -> ...`) or `g` is itself a function
+   PARAMETER of TFun type — knormal.ml has no per-variable type
+   environment, so it cannot recognize a let-bound alias whose origin
+   is an ordinary function CALL that happens to return a TFun value
+   (a HOF-factory return, e.g. `let g = make_adder(5) in g(10)`) or a
+   `ref` deref (`let g = !r in g(10)`), even though typing.ml accepts
+   both per DYNMEM_PLAN.md's own §13.12 decision 2 ("returned from a
+   function (HOF factories) ... stored in a `ref`" are both listed as
+   in-scope). knormal.ml:288-292 documents this gap explicitly and
+   fails loudly (`knormal.ml:824-838`) rather than miscompiling —
+   "not yet lowered in v1". The workaround used throughout this file:
+   never call a let-bound closure alias BY NAME; instead pass it
+   onward as a plain VALUE argument into a helper (`apply1` below)
+   whose own PARAMETER is what actually gets called — a value read
+   has no callee-resolution requirement, only a callee-position use
+   does. This is a real, reproducible gap between the type checker
+   and knormal's lowering for two of decision 2's five listed
+   lambda-placement scopes; flagged here rather than worked around
+   silently so it's visible on a source read even if this comment is
+   the only place it's recorded.
+
+   Compile CONCATENATED after lib/math.mcaml (no math functions are
+   actually called, but the harness convention keeps every stress
+   file buildable against the same lib prefix so canary hashing stays
+   uniform):
+
+     cat lib/math.mcaml scripts/stress_test_2.mcaml | ./mcaml -o build_stress2
+     python3 tools/sim_check_stress2.py build_stress2
+
+   In game:
+
+     /reload
+     /function mcaml:run_stress2   (6 synchronous checks)
+
+   U3 and U5 need a `region` block, legal only textually inside a
+   public-entry function (DYNMEM_PLAN §C5) — a helper function
+   containing one cannot itself be called by another function, same
+   restriction stress_test.mcaml's S1/S2 respect. Their pass/fail
+   logic is therefore inlined directly into run_stress2 rather than
+   living in its own test_mutual_stress/test_nested_regions2 function
+   (both names still appear in [FAIL] messages for grep-ability).
+
+   Every check bumps $pass2 or $fail2 on the `vars` objective and
+   prints `[FAIL] <name>` on failure, same convention as
+   stress_test.mcaml. Expected values are recomputed independently in
+   Python (tools/sim_check_stress2.py) before being baked in here.
+
+   Checks:
+     U1 (test_factory_stress)     ->       441  (HOF factories:
+                                    make_adder/make_scaler return
+                                    closures, threaded onward as plain
+                                    values into `apply1`'s TFun param;
+                                    a mutable `ref` cell holding a
+                                    closure is reassigned mid-call
+                                    based on a runtime condition)
+     U2 (test_compose_stress)     ->        48  (closure-of-closure:
+                                    compose(f, g) returns a closure
+                                    whose captured env holds f and g,
+                                    themselves closures; nested
+                                    compose(compose(f,g), h))
+     U3 (test_mutual_stress)      ->      1207  (mutual non-tail
+                                    recursion to depth 1500 between
+                                    two distinct functions, plus a
+                                    second mutual pair that builds an
+                                    alternating-sign list over 400
+                                    non-tail frames inside a region)
+     U4 (test_fold_stress)        ->     13447  (fold_sum/fold_max:
+                                    closures applied once per list
+                                    element over a 60-element list
+                                    built by non-tail recursion)
+     U5 (test_nested_regions2)    ->       127  (3 nested regions;
+                                    a list built in the innermost is
+                                    consed with a new head in the
+                                    middle region, then deep-copied
+                                    again into the outer region and
+                                    summed there)
+     U6 (test_deep_mixed_stress)  ->   5755200  (2400-deep non-tail
+                                    recursion where EVERY frame also
+                                    conses onto a heap list AND calls
+                                    a returned closure, stressing the
+                                    frame-stack/arena-bump-pointer/
+                                    apply-dispatch interaction at
+                                    depth all at once) *)
+
+(* ==================================================================
+   harness helpers
+   ================================================================== *)
+
+fun st2_pass () : int =
+  cmd! "scoreboard players add $pass2 vars 1";
+  1
+
+fun st2_fail () : int =
+  cmd! "scoreboard players add $fail2 vars 1";
+  0
+
+fun sum_list_u (l: list) : int =
+  match l with
+  | [] -> 0
+  | h :: t -> h + sum_list_u(t)
+
+fun build_seq_u (i: int, n: int) : list =
+  if i = n then []
+  else ((i * 13 + 3) % 50 - 20) :: build_seq_u(i + 1, n)
+
+(* ==================================================================
+   U1 — HOF factories: closures returned from a function (escaping
+   via the return boundary), one applied directly, one reached
+   through a `ref` alias hop.
+   ================================================================== *)
+
+fun make_adder (k: int) : int -> int =
+  fun (x: int) -> x + k
+
+fun make_scaler (k: int) : int -> int =
+  fun (x: int) -> x * k
+
+(* apply1's own `f` is a genuine TFun PARAMETER, so calling f(x)
+   inside apply1's body is always safe regardless of how the CALLER
+   obtained the closure it passed in as `f` — this is the load-
+   bearing indirection every check below routes through instead of
+   calling a let-bound closure alias directly. *)
+fun apply1 (f: int -> int, x: int) : int = f(x)
+
+(* Mutable closure state: `r` starts pointing at `f`, gets reassigned
+   to `g` under a runtime condition via RefSet, then the CURRENT
+   contents are threaded onward through apply1 (never called by the
+   let-bound name `r`/`g` directly — see the file-header limitation
+   note). *)
+fun apply_via_ref (f: int -> int, g: int -> int, cond: int, x: int) : int =
+  let r = ref f in
+  (if cond = 1 then (r := g) else ());
+  apply1(!r, x)
+
+fun test_factory_stress () : int =
+  let add5 = make_adder(5) in
+  let mul3 = make_scaler(3) in
+  let a = apply1(add5, 10) in
+  let seven = apply1(add5, 2) in
+  let b = apply1(mul3, seven) in
+  let c = apply_via_ref(add5, mul3, 0, 100) in
+  let d = apply_via_ref(add5, mul3, 1, 100) in
+  if (a + b + c + d) = 441 then st2_pass()
+  else (cmd! "say [FAIL] test_factory_stress"; st2_fail())
+
+(* ==================================================================
+   U2 — closure composition: compose(f, g) returns a NEW closure whose
+   captured environment holds f and g, which are themselves closure
+   handles (not scalars) — env_0/env_1 of the returned {tag:-2,...}
+   cell are closure handles pointing at other {tag:-2,...} cells.
+   ================================================================== *)
+
+fun compose (f: int -> int, g: int -> int) : int -> int =
+  fun (x: int) -> f(g(x))
+
+fun twice (f: int -> int) : int -> int =
+  fun (x: int) -> f(f(x))
+
+fun test_compose_stress () : int =
+  let inc = fun (x: int) -> x + 1 in
+  let dbl = fun (x: int) -> x * 2 in
+  let h = compose(dbl, inc) in
+  let a = apply1(h, 3) in
+  let q = twice(h) in
+  let b = apply1(q, 3) in
+  let comp3 = compose(compose(dbl, inc), dbl) in
+  let c = apply1(comp3, 5) in
+  if (a + b + c) = 48 then st2_pass()
+  else (cmd! "say [FAIL] test_compose_stress"; st2_fail())
+
+(* ==================================================================
+   U3 — mutual non-tail recursion between two distinct top-level
+   functions: is_even_nt/is_odd_nt to depth 1500 (interleaved
+   save/restore frames of two different shapes), plus zig/zag
+   building an alternating-sign list over 400 non-tail frames inside
+   a region.
+   ================================================================== *)
+
+fun is_even_nt (n: int) : int =
+  if n = 0 then 1 else is_odd_nt(n - 1)
+
+fun is_odd_nt (n: int) : int =
+  if n = 0 then 0 else is_even_nt(n - 1)
+
+fun zig (n: int) : list =
+  if n = 0 then [] else n :: zag(n - 1)
+
+fun zag (n: int) : list =
+  if n = 0 then [] else (0 - n) :: zig(n - 1)
+
+(* NOTE: the zig/zag half of this check needs a `region` block, which
+   is only legal textually inside a public-entry function (DYNMEM_PLAN
+   §C5) — a helper function containing one cannot itself be called by
+   another function. So unlike every other U-check, this one is
+   inlined directly into run_stress2 below rather than living in its
+   own test_mutual_stress function; see the master runner. *)
+
+(* ==================================================================
+   U4 — fold-shaped list reduction: a closure applied once per
+   element, folded into a separate accumulator threaded through
+   non-tail list recursion. (True n-ary combinator folds like
+   `fold(f, l, acc)` with `f: (int,int) -> int` aren't expressible in
+   v1 — TFun param annotations are arity 0/1 only, arity>=2 needs
+   inference the App-on-local-var typing path doesn't do for an
+   otherwise-unconstrained parameter — so both reductions below use
+   arity-1 closures applied per-element with the running accumulator
+   combined at the call site instead, which is the idiomatic v1
+   shape.)
+   ================================================================== *)
+
+fun fold_sum (f: int -> int, l: list, acc: int) : int =
+  match l with
+  | [] -> acc
+  | h :: t -> fold_sum(f, t, acc + f(h))
+
+fun fold_max (f: int -> int, l: list, best: int) : int =
+  match l with
+  | [] -> best
+  | h :: t ->
+      let v = f(h) in
+      fold_max(f, t, if v > best then v else best)
+
+fun test_fold_stress () : int =
+  let l = build_seq_u(0, 60) in
+  let s = fold_sum(fun (x: int) -> x * x, l, 0) in
+  let m = fold_max(fun (x: int) -> x * 2 - 1, l, -1000000) in
+  if (s % 1000000 + m) = 13447 then st2_pass()
+  else (cmd! "say [FAIL] test_fold_stress"; st2_fail())
+
+(* ==================================================================
+   U5 — 3 nested regions. A list is built in the innermost region,
+   escapes (deep-copy) into the middle region where it's consed with
+   a new head, then escapes AGAIN (deep-copy of the already-copied
+   list) into the outer region where it's finally summed.
+   ================================================================== *)
+
+(* NOTE: same region-in-public-entry-only constraint as U3's zig/zag
+   half — inlined directly into run_stress2 below. *)
+
+(* ==================================================================
+   U6 — deep mixed recursion: 2400 non-tail frames where every frame
+   also conses onto a heap list AND applies a closure obtained from a
+   HOF factory, stressing the interaction between the save/restore
+   frame stack, the arena bump pointer (list cons every frame), and
+   the F5 apply-dispatch runtime (closure call every frame) all at
+   once, at a depth well past S7's fib_nt(18)/deep_sum(3000) which
+   each stress only one of those axes at a time.
+   ================================================================== *)
+
+fun mixer (k: int) : int -> int =
+  fun (x: int) -> x * 2 - k
+
+fun deep_mixed (n: int, f: int -> int) : list =
+  if n = 0 then []
+  else f(n) :: deep_mixed(n - 1, f)
+
+fun test_deep_mixed_stress () : int =
+  let bumper = mixer(3) in
+  let l = deep_mixed(2400, bumper) in
+  if sum_list_u(l) = 5755200 then st2_pass()
+  else (cmd! "say [FAIL] test_deep_mixed_stress"; st2_fail())
+
+(* ==================================================================
+   master runner — 6 checks. U3 and U5 are inline region blocks since
+   `region` is only legal textually inside a public-entry function
+   (DYNMEM_PLAN §C5); run_stress2 itself is never called by another
+   function, so it's the only legal home for them.
+   ================================================================== *)
+
+fun run_stress2 () : int =
+  cmd! "say [MCaml stress2] running 6 checks...";
+  cmd! "scoreboard players set $pass2 vars 0";
+  cmd! "scoreboard players set $fail2 vars 0";
+
+  test_factory_stress();
+  test_compose_stress();
+
+  (* U3: mutual non-tail recursion. *)
+  let d1 = is_even_nt(1500) in
+  let d2 = is_odd_nt(1501) in
+  let zz = region (fun () -> sum_list_u(zig(400))) in
+  (if (d1 * 1000 + d2 * 7 + zz) = 1207 then st2_pass()
+   else (cmd! "say [FAIL] test_mutual_stress"; st2_fail()));
+
+  test_fold_stress();
+
+  (* U5: 3 nested regions, list deep-copied across two boundaries. *)
+  let lvl1 = region (fun () ->
+    let lvl2 = region (fun () ->
+      build_seq_u(0, 8)) in
+    99 :: lvl2) in
+  (if sum_list_u(lvl1) = 127 then st2_pass()
+   else (cmd! "say [FAIL] test_nested_regions2"; st2_fail()));
+
+  test_deep_mixed_stress();
+
+  cmd! "tellraw @a [\"[MCaml stress2] pass=\",{\"score\":{\"name\":\"$pass2\",\"objective\":\"vars\"}},\" fail=\",{\"score\":{\"name\":\"$fail2\",\"objective\":\"vars\"}},\" (expected pass=6 fail=0)\"]";
+  cmd! "execute if score $fail2 vars matches 0 if score $pass2 vars matches 6 run say [MCaml stress2] ALL 6 CHECKS PASSED";
+  cmd! "execute if score $fail2 vars matches 1.. run say [MCaml stress2] FAILURES DETECTED - scroll up for [FAIL] lines";
+  cmd! "execute if score $fail2 vars matches 0 if score $pass2 vars matches ..5 run say [MCaml stress2] WARNING: fewer than 6 checks ran - suite aborted early";
+  0
