@@ -1041,44 +1041,10 @@ and compile_match (dest : string option) (occs : string list)
            let branch_for c =
              let (_, fields, _) = Hashtbl.find Typing.ctor_info c in
              let ar = List.length fields in
-             let f_temps = List.init ar (fun _ -> new_temp ()) in
-             let spec_rows =
-               List.filter_map
-                 (fun row ->
-                    let (p, rest, binds, body) = split_row row in
-                    match p with
-                    | Ast.PCtor (c', subs) when c' = c ->
-                        Some (subs @ rest, binds, body)
-                    | Ast.PWild ->
-                        Some (List.init ar (fun _ -> Ast.PWild) @ rest,
-                              binds, body)
-                    | Ast.PVar x ->
-                        Some (List.init ar (fun _ -> Ast.PWild) @ rest,
-                              (x, occ) :: binds, body)
-                    | _ -> None)
-                 rows
-             in
-             (* Read only the fields some sub-pattern inspects or binds
-                — IFieldGet is never DCE'd (hidden $arr_result write),
-                so an unused read would cost 3 dead commands. *)
-             let used = Array.make (max ar 1) false in
-             List.iter
-               (fun (ps, _, _) ->
-                  List.iteri
-                    (fun i p ->
-                       if i < ar && p <> Ast.PWild then used.(i) <- true)
-                    ps)
-               spec_rows;
-             let sub = compile_match dest (f_temps @ occs_rest) spec_rows in
-             let rec add_reads i acc =
-               if i < 0 then acc
-               else
-                 add_reads (i - 1)
-                   (if used.(i)
-                    then KSeq (KFieldGet (List.nth f_temps i, occ, i), acc)
-                    else acc)
-             in
-             add_reads (ar - 1) sub
+             compile_unfold_column dest occ occs_rest split_row rows ar
+               (function
+                 | Ast.PCtor (c', subs) when c' = c -> Some subs
+                 | _ -> None)
            in
            let tests, else_k =
              if complete then
@@ -1118,40 +1084,10 @@ and compile_match (dest : string option) (occs : string list)
               used-fields filter keeps `_` components from emitting an
               obj_f<k> read. *)
            let ar = List.length ps0 in
-           let f_temps = List.init ar (fun _ -> new_temp ()) in
-           let spec_rows =
-             List.filter_map
-               (fun row ->
-                  let (p, rest, binds, body) = split_row row in
-                  match p with
-                  | Ast.PTuple subs -> Some (subs @ rest, binds, body)
-                  | Ast.PWild ->
-                      Some (List.init ar (fun _ -> Ast.PWild) @ rest,
-                            binds, body)
-                  | Ast.PVar x ->
-                      Some (List.init ar (fun _ -> Ast.PWild) @ rest,
-                            (x, occ) :: binds, body)
-                  | _ -> None)
-               rows
-           in
-           let used = Array.make (max ar 1) false in
-           List.iter
-             (fun (ps, _, _) ->
-                List.iteri
-                  (fun i p ->
-                     if i < ar && p <> Ast.PWild then used.(i) <- true)
-                  ps)
-             spec_rows;
-           let sub = compile_match dest (f_temps @ occs_rest) spec_rows in
-           let rec add_reads i acc =
-             if i < 0 then acc
-             else
-               add_reads (i - 1)
-                 (if used.(i)
-                  then KSeq (KFieldGet (List.nth f_temps i, occ, i), acc)
-                  else acc)
-           in
-           add_reads (ar - 1) sub
+           compile_unfold_column dest occ occs_rest split_row rows ar
+             (function
+               | Ast.PTuple subs -> Some subs
+               | _ -> None)
        | Ast.PRecord fields0 ->
            (* D8: record column. Rows normalize to decl-order sub-
               pattern vectors (missing fields = PWild), after which
@@ -1175,41 +1111,10 @@ and compile_match (dest : string option) (occs : string list)
                | Some p -> p
                | None -> Ast.PWild) decl
            in
-           let f_temps = List.init ar (fun _ -> new_temp ()) in
-           let spec_rows =
-             List.filter_map
-               (fun row ->
-                  let (p, rest, binds, body) = split_row row in
-                  match p with
-                  | Ast.PRecord fields ->
-                      Some (to_vec fields @ rest, binds, body)
-                  | Ast.PWild ->
-                      Some (List.init ar (fun _ -> Ast.PWild) @ rest,
-                            binds, body)
-                  | Ast.PVar x ->
-                      Some (List.init ar (fun _ -> Ast.PWild) @ rest,
-                            (x, occ) :: binds, body)
-                  | _ -> None)
-               rows
-           in
-           let used = Array.make (max ar 1) false in
-           List.iter
-             (fun (ps, _, _) ->
-                List.iteri
-                  (fun i p ->
-                     if i < ar && p <> Ast.PWild then used.(i) <- true)
-                  ps)
-             spec_rows;
-           let sub = compile_match dest (f_temps @ occs_rest) spec_rows in
-           let rec add_reads i acc =
-             if i < 0 then acc
-             else
-               add_reads (i - 1)
-                 (if used.(i)
-                  then KSeq (KFieldGet (List.nth f_temps i, occ, i), acc)
-                  else acc)
-           in
-           add_reads (ar - 1) sub
+           compile_unfold_column dest occ occs_rest split_row rows ar
+             (function
+               | Ast.PRecord fields -> Some (to_vec fields)
+               | _ -> None)
        | Ast.PNil | Ast.PCons _ ->
            (* D6: TList column. The two-ctor signature {[], ::} is
               discriminated by a single Eq-against--1 compare on the
@@ -1300,6 +1205,60 @@ and compile_match (dest : string option) (occs : string list)
              KLet (t_b, KBinOp (Ast.Eq, occ, t_c),
                KIf (t_b, then_k, else_k)))
        | Ast.PWild | Ast.PVar _ -> assert false)
+
+(* Shared tail of the three component-unfolding columns (PCtor fields,
+   PTuple, PRecord — always-complete signatures whose components unfold
+   in place). Mints one temp per component, specializes the rows —
+   [expand] maps a matching refutable head pattern to its [ar]
+   sub-patterns; wildcard/var rows pad with PWild (var rows also bind
+   the occurrence); any other head drops the row — then recurses.
+   Reads only the fields some sub-pattern inspects or binds
+   — KFieldGet is never DCE'd (hidden $arr_result write),
+   so an unused read would cost 3 dead commands. *)
+and compile_unfold_column (dest : string option) (occ : string)
+    (occs_rest : string list)
+    (split_row :
+       Ast.pattern list * (string * string) list * Ast.expr ->
+       Ast.pattern * Ast.pattern list * (string * string) list * Ast.expr)
+    (rows : (Ast.pattern list * (string * string) list * Ast.expr) list)
+    (ar : int)
+    (expand : Ast.pattern -> Ast.pattern list option) : kexpr =
+  let f_temps = List.init ar (fun _ -> new_temp ()) in
+  let spec_rows =
+    List.filter_map
+      (fun row ->
+         let (p, rest, binds, body) = split_row row in
+         match p with
+         | Ast.PWild ->
+             Some (List.init ar (fun _ -> Ast.PWild) @ rest,
+                   binds, body)
+         | Ast.PVar x ->
+             Some (List.init ar (fun _ -> Ast.PWild) @ rest,
+                   (x, occ) :: binds, body)
+         | p ->
+             (match expand p with
+              | Some subs -> Some (subs @ rest, binds, body)
+              | None -> None))
+      rows
+  in
+  let used = Array.make (max ar 1) false in
+  List.iter
+    (fun (ps, _, _) ->
+       List.iteri
+         (fun i p ->
+            if i < ar && p <> Ast.PWild then used.(i) <- true)
+         ps)
+    spec_rows;
+  let sub = compile_match dest (f_temps @ occs_rest) spec_rows in
+  let rec add_reads i acc =
+    if i < 0 then acc
+    else
+      add_reads (i - 1)
+        (if used.(i)
+         then KSeq (KFieldGet (List.nth f_temps i, occ, i), acc)
+         else acc)
+  in
+  add_reads (ar - 1) sub
 
 let normalize e =
   Hashtbl.clear arr_env;

@@ -549,6 +549,113 @@ let mint_carrier () : vreg =
   incr global_carrier;
   carrier_name n
 
+(* Drop derived IVs whose only consumers are *other* derived IVs
+   we're about to rewrite away. Without this filter the matmul
+   k*cols intermediate gets its own carrier even though after
+   the outer k*cols+j is rewritten the inner has no remaining
+   use — DCE eliminates the dead [ICopy] but cannot touch the
+   per-iteration `+= stride` in the latch (the carrier is
+   reserved). The filter is one query over the derived set. *)
+let useful_deriveds_of (cfg : cfg_func) (deriveds : derived_iv list)
+  : derived_iv list =
+  let candidate_set : (vreg, unit) Hashtbl.t = Hashtbl.create 8 in
+  List.iter (fun (d : derived_iv) ->
+    Hashtbl.replace candidate_set d.derived_dest ()
+  ) deriveds;
+  List.filter (fun (d : derived_iv) ->
+    let used = ref false in
+    Array.iter (fun (b : block) ->
+      List.iter (fun i ->
+        let consumer_is_derived =
+          match instr_def i with
+          | Some def -> Hashtbl.mem candidate_set def
+          | None -> false
+        in
+        if not consumer_is_derived
+           && List.mem d.derived_dest (instr_uses i)
+        then used := true
+      ) b.instrs;
+      if List.mem d.derived_dest (term_uses b.term) then
+        used := true
+    ) cfg.blocks;
+    !used
+  ) deriveds
+
+(* Materialize stride; None means stride=1, emitted as a
+   fresh IConst so the multiply has a real operand. *)
+let materialize_stride (st : rewrite_state) (d : derived_iv)
+  : vreg option =
+  match d.stride_vreg with
+  | None ->
+      let t = fresh_tmp st in
+      st.pre <- IConst (t, 1) :: st.pre;
+      Some t
+  | Some v -> materialize st v
+
+let materialize_base (st : rewrite_state) (d : derived_iv)
+  : [ `NoBase | `Have of vreg | `Fail ] =
+  match d.base_vreg with
+  | None -> `NoBase
+  | Some v ->
+      (match materialize st v with
+       | Some r -> `Have r
+       | None -> `Fail)
+
+(* Init: carrier := param_<iv_idx> * stride + base. Mints the carrier,
+   accumulates the init instrs into [st.pre], returns the carrier. *)
+let emit_carrier_init (st : rewrite_state) (bi : basic_iv)
+    (stride_v : vreg) (base_kind : [ `NoBase | `Have of vreg | `Fail ])
+  : vreg =
+  let lo = Printf.sprintf "param_%d" bi.param_idx in
+  let carrier = mint_carrier () in
+  let mul_dest = fresh_tmp st in
+  st.pre <-
+    IBinOp (mul_dest, Ast.Mult, lo, stride_v) :: st.pre;
+  (match base_kind with
+   | `NoBase ->
+       st.pre <- ICopy (carrier, mul_dest) :: st.pre
+   | `Have base_v ->
+       st.pre <-
+         IBinOp (carrier, Ast.Add, mul_dest, base_v)
+         :: st.pre
+   | `Fail -> assert false);
+  carrier
+
+(* Replace defining instr in defining_blk. Returns whether the
+   replacement actually fired. *)
+let replace_defining_instr (cfg : cfg_func) (d : derived_iv)
+    (carrier : vreg) : bool =
+  let blk = cfg.blocks.(d.defining_blk) in
+  let replaced = ref false in
+  blk.instrs <- List.map (fun i ->
+    if (not !replaced) && instr_def i = Some d.derived_dest
+    then begin
+      replaced := true;
+      ICopy (d.derived_dest, carrier)
+    end else i
+  ) blk.instrs;
+  !replaced
+
+(* Append increment ONLY at the latches [bi] itself
+   advances at (never every self-tail block in the
+   function — see the [latches] field comment: a
+   latch that resets this IV rather than stepping
+   it must not also bump the derived carrier). Once
+   per carrier×latch pair. *)
+let append_latch_increments (cfg : cfg_func)
+    (appended_increments : (vreg * label, unit) Hashtbl.t)
+    (bi : basic_iv) (carrier : vreg) (stride_v : vreg) : unit =
+  List.iter (fun (latch_label : label) ->
+    let latch = cfg.blocks.(latch_label) in
+    let key = (carrier, latch.label) in
+    if not (Hashtbl.mem appended_increments key) then begin
+      Hashtbl.add appended_increments key ();
+      latch.instrs <-
+        latch.instrs @
+        [IBinOp (carrier, Ast.Add, carrier, stride_v)]
+    end
+  ) bi.latches
+
 let run (cfg : cfg_func) : bool =
   if no_sr || cfg.is_template then false
   else
@@ -558,37 +665,7 @@ let run (cfg : cfg_func) : bool =
       let basics_by_iv : (vreg, basic_iv) Hashtbl.t = Hashtbl.create 4 in
       List.iter (fun b -> Hashtbl.replace basics_by_iv b.iv_vreg b)
         table.basics;
-      (* Drop derived IVs whose only consumers are *other* derived IVs
-         we're about to rewrite away. Without this filter the matmul
-         k*cols intermediate gets its own carrier even though after
-         the outer k*cols+j is rewritten the inner has no remaining
-         use — DCE eliminates the dead [ICopy] but cannot touch the
-         per-iteration `+= stride` in the latch (the carrier is
-         reserved). The filter is one query over the derived set. *)
-      let candidate_set : (vreg, unit) Hashtbl.t = Hashtbl.create 8 in
-      List.iter (fun (d : derived_iv) ->
-        Hashtbl.replace candidate_set d.derived_dest ()
-      ) table.deriveds;
-      let useful_deriveds =
-        List.filter (fun (d : derived_iv) ->
-          let used = ref false in
-          Array.iter (fun (b : block) ->
-            List.iter (fun i ->
-              let consumer_is_derived =
-                match instr_def i with
-                | Some def -> Hashtbl.mem candidate_set def
-                | None -> false
-              in
-              if not consumer_is_derived
-                 && List.mem d.derived_dest (instr_uses i)
-              then used := true
-            ) b.instrs;
-            if List.mem d.derived_dest (term_uses b.term) then
-              used := true
-          ) cfg.blocks;
-          !used
-        ) table.deriveds
-      in
+      let useful_deriveds = useful_deriveds_of cfg table.deriveds in
       let st = mk_state cfg in
       let changed = ref false in
       let appended_increments : (vreg * label, unit) Hashtbl.t =
@@ -597,74 +674,21 @@ let run (cfg : cfg_func) : bool =
         match Hashtbl.find_opt basics_by_iv d.iv with
         | None -> ()
         | Some bi when bi.step <> 1 -> ()  (* v1: step=1 only *)
-        | Some bi when not (List.exists
+        | Some _ when not (List.exists
               (fun (u : derived_iv) ->
                  u.derived_dest = d.derived_dest)
               useful_deriveds) -> ()
         | Some bi ->
-            (* Materialize stride; None means stride=1, emitted as a
-               fresh IConst so the multiply has a real operand. *)
-            let stride_vreg_opt =
-              match d.stride_vreg with
-              | None ->
-                  let t = fresh_tmp st in
-                  st.pre <- IConst (t, 1) :: st.pre;
-                  Some t
-              | Some v -> materialize st v
-            in
-            let base_attempt =
-              match d.base_vreg with
-              | None -> `NoBase
-              | Some v ->
-                  (match materialize st v with
-                   | Some r -> `Have r
-                   | None -> `Fail)
-            in
+            let stride_vreg_opt = materialize_stride st d in
+            let base_attempt = materialize_base st d in
             (match stride_vreg_opt, base_attempt with
              | None, _ | _, `Fail -> ()
              | Some stride_v, base_kind ->
-                 (* Init: carrier := param_<iv_idx> * stride + base *)
-                 let lo = Printf.sprintf "param_%d" bi.param_idx in
-                 let carrier = mint_carrier () in
-                 let mul_dest = fresh_tmp st in
-                 st.pre <-
-                   IBinOp (mul_dest, Ast.Mult, lo, stride_v) :: st.pre;
-                 (match base_kind with
-                  | `NoBase ->
-                      st.pre <- ICopy (carrier, mul_dest) :: st.pre
-                  | `Have base_v ->
-                      st.pre <-
-                        IBinOp (carrier, Ast.Add, mul_dest, base_v)
-                        :: st.pre
-                  | `Fail -> assert false);
-                 (* Replace defining instr in defining_blk. *)
-                 let blk = cfg.blocks.(d.defining_blk) in
-                 let replaced = ref false in
-                 blk.instrs <- List.map (fun i ->
-                   if (not !replaced) && instr_def i = Some d.derived_dest
-                   then begin
-                     replaced := true;
-                     ICopy (d.derived_dest, carrier)
-                   end else i
-                 ) blk.instrs;
-                 if !replaced then begin
+                 let carrier = emit_carrier_init st bi stride_v base_kind in
+                 if replace_defining_instr cfg d carrier then begin
                    changed := true;
-                   (* Append increment ONLY at the latches [bi] itself
-                      advances at (never every self-tail block in the
-                      function — see the [latches] field comment: a
-                      latch that resets this IV rather than stepping
-                      it must not also bump the derived carrier). Once
-                      per carrier×latch pair. *)
-                   List.iter (fun (latch_label : label) ->
-                     let latch = cfg.blocks.(latch_label) in
-                     let key = (carrier, latch.label) in
-                     if not (Hashtbl.mem appended_increments key) then begin
-                       Hashtbl.add appended_increments key ();
-                       latch.instrs <-
-                         latch.instrs @
-                         [IBinOp (carrier, Ast.Add, carrier, stride_v)]
-                     end
-                   ) bi.latches
+                   append_latch_increments cfg appended_increments
+                     bi carrier stride_v
                  end)
       ) table.deriveds;
       if !changed then
