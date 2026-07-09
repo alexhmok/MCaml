@@ -461,54 +461,31 @@ let rewrite_callers
     ) b.instrs
   ) caller.blocks
 
-let run (table : (string, cfg_func) Hashtbl.t) : unit =
-  (* F3+F4 same-function case: direct, no cloning. *)
-  Hashtbl.iter (fun _ cfg -> if not cfg.is_template then rewrite_same_function cfg) table;
-
-  (* F3+F4 cross-function single-hop case: iterate to a fixed point,
-     same shape as Monomorphize.run. *)
-  Hashtbl.reset only_applied_cache;
-  let limit =
-    try int_of_string (Sys.getenv "MCAML_SPECIALIZE_LIMIT") with _ -> 8
-  in
-  let clone_count : (string, int) Hashtbl.t = Hashtbl.create 8 in
-  let clones : (string, unit) Hashtbl.t = Hashtbl.create 16 in
-  let progress = ref true in
-  let iter_cap = ref 16 in
-  while !progress && !iter_cap > 0 do
-    decr iter_cap;
-    progress := false;
-    let names = Hashtbl.fold (fun k _ acc -> k :: acc) table [] in
-    List.iter (fun caller_name ->
-      let caller = Hashtbl.find table caller_name in
-      if not caller.is_template then
-        rewrite_callers table clone_count clones limit caller progress
-    ) names
-  done;
-
-  (* Retire any TFun-parameterized function that no longer has any
-     internal caller. Unlike an ordinary int/list/ADT parameter, a
-     TFun-typed one can never be supplied by an EXTERNAL datapack
-     invocation (tools/README.md's entrypoint convention sets param_N
-     via `/scoreboard players set` — there is no way to hand-construct
-     a valid closure cell that way), so a function with a TFun param is
-     only ever a genuine "public entry point" if something inside the
-     compiled program still calls it. Once every such call site has
-     been resolved away — by the cross-function clone-and-redirect
-     above, or (just as commonly) by Inline.run splicing its one and
-     only caller before closure_spec's cross-function pass even got to
-     see the ICall, same-function-resolving the inlined copy and
-     leaving the ORIGINAL definition with zero remaining callers — the
-     original is genuinely dead. Mark it [is_template <- true] to reuse
-     the EXISTING "never emitted directly" plumbing main.ml/optimize.ml/
-     codegen_cfg.ml already respect for array templates (cheaper and
-     less invasive than physically removing it from the table, which
-     would also need main.ml's separately-computed [fn_order] to
-     change). A TFun-parameterized function that STILL has a caller
-     (an unresolved one, or simply one this v1 pass didn't reach) is
-     correctly left alone — its surviving Escaping IApply legitimately
-     reaches the F5-deferred codegen stub if it is ever compiled, which
-     is the intended (loud, not silent) v1 behavior. *)
+(* Retire any TFun-parameterized function that no longer has any
+   internal caller. Unlike an ordinary int/list/ADT parameter, a
+   TFun-typed one can never be supplied by an EXTERNAL datapack
+   invocation (tools/README.md's entrypoint convention sets param_N
+   via `/scoreboard players set` — there is no way to hand-construct
+   a valid closure cell that way), so a function with a TFun param is
+   only ever a genuine "public entry point" if something inside the
+   compiled program still calls it. Once every such call site has
+   been resolved away — by the cross-function clone-and-redirect in
+   [run]'s fixed-point stage, or (just as commonly) by Inline.run
+   splicing its one and only caller before closure_spec's
+   cross-function pass even got to see the ICall, same-function-
+   resolving the inlined copy and leaving the ORIGINAL definition with
+   zero remaining callers — the original is genuinely dead. Mark it
+   [is_template <- true] to reuse the EXISTING "never emitted
+   directly" plumbing main.ml/optimize.ml/codegen_cfg.ml already
+   respect for array templates (cheaper and less invasive than
+   physically removing it from the table, which would also need
+   main.ml's separately-computed [fn_order] to change). A
+   TFun-parameterized function that STILL has a caller (an unresolved
+   one, or simply one this v1 pass didn't reach) is correctly left
+   alone — its surviving Escaping IApply legitimately reaches the
+   F5-deferred codegen stub if it is ever compiled, which is the
+   intended (loud, not silent) v1 behavior. *)
+let retire_unreferenced_tfun_fns (table : (string, cfg_func) Hashtbl.t) : unit =
   let is_referenced (name : string) : bool =
     let found = ref false in
     Hashtbl.iter (fun _ (cfg : cfg_func) ->
@@ -544,13 +521,14 @@ let run (table : (string, cfg_func) Hashtbl.t) : unit =
        && List.exists (fun (_, ty) -> is_tfun ty) cfg.params
        && not (is_referenced name) then
       cfg.is_template <- true
-  ) table;
+  ) table
 
-  (* F6a: gather each surviving lambda's own capture count, once, for
-     the ESCAPING report line's "~M cmds/call" (cost.ml's own IApply
-     formula, 4 + 2*captures). All instances of a given lam_fname agree
-     on capture count by construction (F2 lifts each SOURCE lambda
-     occurrence to one fixed-arity helper), so first-found wins. *)
+(* F6a: gather each surviving lambda's own capture count, once, for
+   the ESCAPING report line's "~M cmds/call" (cost.ml's own IApply
+   formula, 4 + 2*captures). All instances of a given lam_fname agree
+   on capture count by construction (F2 lifts each SOURCE lambda
+   occurrence to one fixed-arity helper), so first-found wins. *)
+let gather_caps_counts (table : (string, cfg_func) Hashtbl.t) : unit =
   Hashtbl.iter (fun _ cfg ->
     Array.iter (fun (b : block) ->
       List.iter (fun i -> match i with
@@ -561,6 +539,34 @@ let run (table : (string, cfg_func) Hashtbl.t) : unit =
       ) b.instrs
     ) cfg.blocks
   ) table
+
+let run (table : (string, cfg_func) Hashtbl.t) : unit =
+  (* F3+F4 same-function case: direct, no cloning. *)
+  Hashtbl.iter (fun _ cfg -> if not cfg.is_template then rewrite_same_function cfg) table;
+
+  (* F3+F4 cross-function single-hop case: iterate to a fixed point,
+     same shape as Monomorphize.run. *)
+  Hashtbl.reset only_applied_cache;
+  let limit =
+    try int_of_string (Sys.getenv "MCAML_SPECIALIZE_LIMIT") with _ -> 8
+  in
+  let clone_count : (string, int) Hashtbl.t = Hashtbl.create 8 in
+  let clones : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  let progress = ref true in
+  let iter_cap = ref 16 in
+  while !progress && !iter_cap > 0 do
+    decr iter_cap;
+    progress := false;
+    let names = Hashtbl.fold (fun k _ acc -> k :: acc) table [] in
+    List.iter (fun caller_name ->
+      let caller = Hashtbl.find table caller_name in
+      if not caller.is_template then
+        rewrite_callers table clone_count clones limit caller progress
+    ) names
+  done;
+
+  retire_unreferenced_tfun_fns table;
+  gather_caps_counts table
 
 (* ---- F6b: MCAML_STRICT_HOT / F6a: hot-loop annotation ----
 

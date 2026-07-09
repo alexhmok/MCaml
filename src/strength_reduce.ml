@@ -75,6 +75,27 @@ type basic_iv = {
      out-of-bounds array index. *)
 }
 
+(* Loose param-slot parse used by the IV analysis: "param_" prefix +
+   [int_of_string] on the suffix. Deliberately NOT [Cfg.param_index] —
+   that predicate requires an all-digit suffix, while [int_of_string]
+   also accepts forms like "0x10"/"1_0". For the compiler-minted
+   param_<decimal> names that actually occur the two agree, but this
+   pass keeps its historical semantics. *)
+let param_slot_of (s : vreg) : int option =
+  if String.length s >= 6 && String.sub s 0 6 = "param_" then
+    (try Some (int_of_string (String.sub s 6 (String.length s - 6)))
+     with Failure _ -> None)
+  else None
+
+(* Apply [f b args] at every block of [cfg] whose terminator is a self
+   tail call, in block-array order. *)
+let iter_self_tails (cfg : cfg_func) (f : block -> vreg list -> unit) : unit =
+  Array.iter (fun (b : block) ->
+    match b.term with
+    | TTail (fn, args) when fn = cfg.fname -> f b args
+    | _ -> ()
+  ) cfg.blocks
+
 (* Collect [(lv, N)] for every [ICopy (lv, "param_N")] in the function's
    entry block. If the same [lv] is later overwritten by a non-param
    instruction in the entry block, we drop it — a basic IV must be
@@ -89,11 +110,16 @@ let param_copies_in_entry (cfg : cfg_func) : (vreg * int) list =
     match instr with
     | ICopy (d, s)
       when String.length s >= 6 && String.sub s 0 6 = "param_" ->
-        (try
-           let n = int_of_string (String.sub s 6 (String.length s - 6)) in
-           clobber d;
-           out := (d, n) :: !out
-         with Failure _ -> ())
+        (* The prefix-only guard (not [param_slot_of s <> None]) is
+           load-bearing: a prefix-matching source with an unparsable
+           suffix (e.g. a user var alpha-renamed to "param_x_7") takes
+           THIS arm and does nothing — in particular it does not
+           clobber [d]. Historical behavior, preserved verbatim. *)
+        (match param_slot_of s with
+         | Some n ->
+             clobber d;
+             out := (d, n) :: !out
+         | None -> ())
     | _ ->
         (match instr_def instr with
          | Some d -> clobber d
@@ -179,40 +205,27 @@ let detect_basic_ivs (cfg : cfg_func) : basic_iv list =
   if cfg.is_template then []
   else
     let params = param_copies_in_entry cfg in
-    let self_tails =
-      let acc = ref [] in
-      Array.iter (fun (b : block) ->
-        match b.term with
-        | TTail (f, _) when f = cfg.fname -> acc := b :: !acc
-        | _ -> ()
-      ) cfg.blocks;
-      List.rev !acc
-    in
     let out = ref [] in
     List.iter (fun (lv, idx) ->
       let step = ref None in
       let step_latches = ref [] in
       let disqualified = ref false in
-      List.iter (fun (b : block) ->
-        match b.term with
-        | TTail (_, args) ->
-            let args_arr = Array.of_list args in
-            if idx >= Array.length args_arr then disqualified := true
-            else begin
-              let a = args_arr.(idx) in
-              let info = scan_block b in
-              if resolve info a = lv then ()
-              else
-                match step_from_update b lv a with
-                | Some k when k <> 0 ->
-                    (match !step with
-                     | None -> step := Some k; step_latches := b.label :: !step_latches
-                     | Some k0 when k0 = k -> step_latches := b.label :: !step_latches
-                     | Some _ -> disqualified := true)
-                | _ -> disqualified := true
-            end
-        | _ -> ()
-      ) self_tails;
+      iter_self_tails cfg (fun b args ->
+        let args_arr = Array.of_list args in
+        if idx >= Array.length args_arr then disqualified := true
+        else begin
+          let a = args_arr.(idx) in
+          let info = scan_block b in
+          if resolve info a = lv then ()
+          else
+            match step_from_update b lv a with
+            | Some k when k <> 0 ->
+                (match !step with
+                 | None -> step := Some k; step_latches := b.label :: !step_latches
+                 | Some k0 when k0 = k -> step_latches := b.label :: !step_latches
+                 | Some _ -> disqualified := true)
+            | _ -> disqualified := true
+        end);
       match !step, !disqualified with
       | Some k, false when !step_latches <> [] ->
           out := { iv_vreg = lv; param_idx = idx; step = k;
@@ -251,24 +264,16 @@ let invariant_params (cfg : cfg_func) (params : (vreg * int) list)
   : (int, unit) Hashtbl.t =
   let inv = Hashtbl.create 4 in
   let has_tail = ref false in
-  Array.iter (fun (b : block) ->
-    match b.term with
-    | TTail (f, _) when f = cfg.fname -> has_tail := true
-    | _ -> ()
-  ) cfg.blocks;
+  iter_self_tails cfg (fun _ _ -> has_tail := true);
   if !has_tail then
     List.iter (fun (lv, idx) ->
       let pass_through = ref true in
-      Array.iter (fun (b : block) ->
-        match b.term with
-        | TTail (f, args) when f = cfg.fname ->
-            let args_arr = Array.of_list args in
-            if idx >= Array.length args_arr then pass_through := false
-            else
-              let info = scan_block b in
-              if resolve info args_arr.(idx) <> lv then pass_through := false
-        | _ -> ()
-      ) cfg.blocks;
+      iter_self_tails cfg (fun b args ->
+        let args_arr = Array.of_list args in
+        if idx >= Array.length args_arr then pass_through := false
+        else
+          let info = scan_block b in
+          if resolve info args_arr.(idx) <> lv then pass_through := false);
       if !pass_through then Hashtbl.replace inv idx ()
     ) params;
   inv
@@ -374,14 +379,10 @@ let backedge_iv_dests (cfg : cfg_func) (basics : basic_iv list)
   : (vreg, unit) Hashtbl.t =
   let s = Hashtbl.create 4 in
   List.iter (fun iv ->
-    Array.iter (fun (b : block) ->
-      match b.term with
-      | TTail (f, args) when f = cfg.fname ->
-          let args_arr = Array.of_list args in
-          if iv.param_idx < Array.length args_arr then
-            Hashtbl.replace s args_arr.(iv.param_idx) ()
-      | _ -> ()
-    ) cfg.blocks
+    iter_self_tails cfg (fun _ args ->
+      let args_arr = Array.of_list args in
+      if iv.param_idx < Array.length args_arr then
+        Hashtbl.replace s args_arr.(iv.param_idx) ())
   ) basics;
   s
 
@@ -522,13 +523,10 @@ let mk_state (cfg : cfg_func) : rewrite_state =
   let header = cfg.blocks.(cfg.entry) in
   List.iter (fun instr ->
     match instr with
-    | ICopy (d, s)
-      when String.length s >= 6 && String.sub s 0 6 = "param_" ->
-        (try
-           let n = int_of_string
-             (String.sub s 6 (String.length s - 6)) in
-           Hashtbl.replace param_of d n
-         with Failure _ -> ())
+    | ICopy (d, s) ->
+        (match param_slot_of s with
+         | Some n -> Hashtbl.replace param_of d n
+         | None -> ())
     | _ -> ()
   ) header.instrs;
   { defs; param_of;

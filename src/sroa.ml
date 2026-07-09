@@ -82,6 +82,7 @@ let collect (cfg : cfg_func) : (aid, info) Hashtbl.t =
   in
   Array.iter (fun (b : block) ->
     List.iter (fun i ->
+      (* Aid bookkeeping on the six static-array ops. *)
       (match i with
        | IArrLitConst (id, ks) ->
            let info = info_for id in
@@ -96,62 +97,31 @@ let collect (cfg : cfg_func) : (aid, info) Hashtbl.t =
            info.is_const <- false;
            info.length <- List.length ts;
            info.temps <- ts;
-           if is_sentinel_aid id then info.escapes <- true;
-           List.iter note_use_vreg ts
+           if is_sentinel_aid id then info.escapes <- true
        | IArrGetStatic (_, id, k) ->
            let info = info_for id in
            if k > info.static_max then info.static_max <- k;
            if is_sentinel_aid id then info.escapes <- true
-       | IArrGet (_, id, idx) ->
+       | IArrGet (_, id, _) ->
            let info = info_for id in
            info.dynamic_get <- true;
-           if is_sentinel_aid id then info.escapes <- true;
-           note_use_vreg idx
-       | IArrSetStatic (id, k, v) ->
+           if is_sentinel_aid id then info.escapes <- true
+       | IArrSetStatic (id, k, _) ->
            let info = info_for id in
            if k > info.static_max then info.static_max <- k;
-           if is_sentinel_aid id then info.escapes <- true;
-           note_use_vreg v
-       | IArrSet (id, idx, v) ->
+           if is_sentinel_aid id then info.escapes <- true
+       | IArrSet (id, _, _) ->
            let info = info_for id in
            info.dynamic_put <- true;
-           if is_sentinel_aid id then info.escapes <- true;
-           note_use_vreg idx;
-           note_use_vreg v
-       | ICopy (_, s) -> note_use_vreg s
-       | IBinOp (_, _, a, b') -> note_use_vreg a; note_use_vreg b'
-       | ICall (_, _, args) -> List.iter note_use_vreg args
-       (* Dynamic-heap ops: operand vregs flow through the SROA
-          "pseudo-array handle" escape check. They never reference an aid,
-          so no info_for bookkeeping — only note_use_vreg to stop the
-          analyzer from mistaking a handle-valued vreg for an escaping
-          pseudo-aid carrier. *)
-       | IHeapAllocConst _ -> ()
-       | IHeapAlloc (_, _, n) -> note_use_vreg n
-       | IHeapGet (_, _, b_vr, idx) -> note_use_vreg b_vr; note_use_vreg idx
-       | IHeapSet (_, b_vr, idx, v) ->
-           note_use_vreg b_vr; note_use_vreg idx; note_use_vreg v
-       (* Phase B cons ops: operand vregs are list handles (ints), never
-          aid sentinels. Same treatment as IHeap* — just note_use. *)
-       | ICons (_, h, t) -> note_use_vreg h; note_use_vreg t
-       | IHead (_, c) -> note_use_vreg c
-       | ITail (_, c) -> note_use_vreg c
-       (* Phase D ADT ops: operands are field values / cell handles
-          (ints), never aid sentinels. Same treatment as ICons. *)
-       | IAdtAlloc (_, _, args) -> List.iter note_use_vreg args
-       | ITagGet (_, c) -> note_use_vreg c
-       | IFieldGet (_, c, _) -> note_use_vreg c
-       (* Phase C region brackets: no aid ops. IRegionExit's return
-          vreg (if Some) is a list/arr handle, never an aid. *)
-       | IRegionEnter _ -> ()
-       | IRegionExit (_, None, _) -> ()
-       | IRegionExit (_, Some r, _) -> note_use_vreg r
-       (* Phase F closure ops: captures/closure-vreg/args are ordinary
-          int-valued vregs (list/handle-shaped), never aid sentinels —
-          same treatment as ICons/IAdtAlloc. *)
-       | IClosureMake (_, _, caps) -> List.iter note_use_vreg caps
-       | IApply (_, cl, args) -> note_use_vreg cl; List.iter note_use_vreg args
-       | IConst _ | ICommand _ -> ());
+           if is_sentinel_aid id then info.escapes <- true
+       | _ -> ());
+      (* Escape check: every read operand flows through the pseudo-array
+         handle test so the analyzer never mistakes a handle-valued vreg
+         for an escaping pseudo-aid carrier. [instr_uses] covers exactly
+         the operands the old exhaustive match noted (verified arm by
+         arm): heap/cons/ADT/region/closure operands are handles (ints),
+         never aid sentinels, so noting them stays a no-op. *)
+      List.iter note_use_vreg (instr_uses i)
     ) b.instrs
   ) cfg.blocks;
   tbl
@@ -216,17 +186,12 @@ let aids_touched_by (other_cfg : cfg_func) : (aid, unit) Hashtbl.t =
        | IArrSetStatic (id, _, _)
        | IArrSet (id, _, _) ->
            Hashtbl.replace tbl id ()
-       | ICopy (_, s) -> note_pseudo s
-       | IBinOp (_, _, a, b') -> note_pseudo a; note_pseudo b'
-       | ICall (_, _, args) -> List.iter note_pseudo args
-       (* Dynamic-heap ops never carry a pseudo aid or an aid operand;
-          they're untracked by the escape analysis. *)
-       | IHeapAllocConst _ | IHeapAlloc _ | IHeapGet _ | IHeapSet _ -> ()
-       | ICons _ | IHead _ | ITail _ -> ()
-       | IAdtAlloc _ | ITagGet _ | IFieldGet _ -> ()
-       | IRegionEnter _ | IRegionExit _ -> ()
-       | IClosureMake _ | IApply _ -> ()
-       | IConst _ | ICommand _ -> ())
+       | _ -> ());
+      (* Pseudo-aid tokens can only ride in read-operand positions
+         ([instr_uses]); non-array operands (heap/cons/ADT/region/
+         closure handles) never match the "#arr:" shape, so noting
+         them is a no-op. *)
+      List.iter note_pseudo (instr_uses i)
     ) b.instrs
   ) other_cfg.blocks;
   tbl

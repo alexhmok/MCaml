@@ -4,6 +4,9 @@ type basic_iv = {
   step : int;
   latches : Cfg.label list;
 }
+val param_slot_of : Cfg.vreg -> int option
+val iter_self_tails :
+  Cfg.cfg_func -> (Cfg.block -> Cfg.vreg list -> unit) -> unit
 val param_copies_in_entry : Cfg.cfg_func -> (Cfg.vreg * int) list
 type block_info = {
   alias : (Cfg.vreg, Cfg.vreg) Hashtbl.t;

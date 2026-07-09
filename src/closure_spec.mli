@@ -42,6 +42,8 @@ val rewrite_callers :
   (string, Cfg.cfg_func) Hashtbl.t ->
   (string, int) Hashtbl.t ->
   (string, unit) Hashtbl.t -> int -> Cfg.cfg_func -> bool ref -> unit
+val retire_unreferenced_tfun_fns : (string, Cfg.cfg_func) Hashtbl.t -> unit
+val gather_caps_counts : (string, Cfg.cfg_func) Hashtbl.t -> unit
 val run : (string, Cfg.cfg_func) Hashtbl.t -> unit
 val check_hot_loop : Cfg.cfg_func -> unit
 val print_report : unit -> unit
