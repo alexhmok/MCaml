@@ -553,6 +553,6 @@ let () =
       Printf.printf "Generated %s\n" filename
     ) final_files
   with
-  | Lexer.SyntaxError m -> Printf.eprintf "Lexer: %s\n" m
-  | Typing.Error m -> Printf.eprintf "Type Error: %s\n" m
-  | Parser.Error -> Printf.eprintf "Parser Error\n"
+  | Lexer.SyntaxError m -> Printf.eprintf "Lexer: %s\n" m; exit 2
+  | Typing.Error m -> Printf.eprintf "Type Error: %s\n" m; exit 2
+  | Parser.Error -> Printf.eprintf "Parser Error\n"; exit 2
