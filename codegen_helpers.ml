@@ -35,8 +35,75 @@ let op_str = function
 let cmd_score_set (d : string) (k : int) : string =
   Printf.sprintf "scoreboard players set %s %s %d" d obj_name k
 
+(* Generic two-operand scoreboard operation: `d <op> s`, where [op] is
+   the literal operator token ("=", "+=", "/=", ...). Every
+   score-to-score line in this module routes through here. *)
+let cmd_score_op (d : string) (op : string) (s : string) : string =
+  Printf.sprintf "scoreboard players operation %s %s %s %s %s"
+    d obj_name op s obj_name
+
 let cmd_score_copy (d : string) (s : string) : string =
-  Printf.sprintf "scoreboard players operation %s %s = %s %s" d obj_name s obj_name
+  cmd_score_op d "=" s
+
+let cmd_score_add (slot : string) (n : int) : string =
+  Printf.sprintf "scoreboard players add %s %s %d" slot obj_name n
+
+(* ---- storage <-> score primitives ---- *)
+
+(* Store a score into an NBT path. *)
+let store_score_to_storage (path : string) (v : string) : string =
+  Printf.sprintf
+    "execute store result storage %s int 1 run scoreboard players get %s %s"
+    path v obj_name
+
+(* Read an NBT path into a score. *)
+let read_storage_to_score (d : string) (path : string) : string =
+  Printf.sprintf
+    "execute store result score %s %s run data get storage %s 1"
+    d obj_name path
+
+(* ---- macro-helper primitives ---- *)
+
+(* Stage a score into the shared macro-args idx slot
+   ([storage mcaml:tmp args.idx] — see the runtime conventions). *)
+let stage_idx_arg (v : string) : string =
+  store_score_to_storage "mcaml:tmp args.idx" v
+
+(* Dispatch a macro helper with the shared args compound. *)
+let call_macro_helper (helper : string) : string =
+  Printf.sprintf "function mcaml:%s with storage mcaml:tmp args" helper
+
+(* The 3-command macro-getter call pattern: stage [src] as the idx arg,
+   dispatch [helper], read [$arr_result] back into [d]. Shared by
+   dynamic array gets, cons head/tail, ADT tag/field gets, and the
+   tail of the dyn-heap read. *)
+let macro_get (d : string) (src : string) (helper : string) : string list =
+  [ stage_idx_arg src;
+    call_macro_helper helper;
+    cmd_score_copy d "$arr_result" ]
+
+(* Body of a single-line macro getter file: read [path] (which embeds
+   the `$(idx)` macro hole) into [dest]. The leading `$` marks the
+   line as macro-expanded. *)
+let macro_getter_into (dest : string) (path : string) : string =
+  Printf.sprintf
+    "$execute store result score %s %s run data get storage %s 1"
+    dest obj_name path
+
+let macro_getter_of_path (path : string) : string =
+  macro_getter_into "$arr_result" path
+
+(* Body of a single-line macro setter file: store the staged
+   [$arr_set_val] score into [path] (which embeds the `$(idx)` macro
+   hole). *)
+let macro_setter_of_path (path : string) : string =
+  Printf.sprintf
+    "$execute store result storage %s int 1 run scoreboard players get $arr_set_val %s"
+    path obj_name
+
+(* `param_i := arg_i` staging for direct calls and tail jumps. *)
+let cmd_param_sets (args : string list) : string list =
+  List.mapi (fun i a -> cmd_score_copy (Printf.sprintf "param_%d" i) a) args
 
 (* A non-comparison binop lowers to two commands: dest := v1; dest op= v2.
    The caller must ensure the regalloc has not aliased dest and v2 to the
@@ -59,20 +126,12 @@ let cmd_score_binop (d : string) (op : binop) (v1 : string) (v2 : string) : stri
      preserve all 16 fractional bits; switch if a workload demands it.
      Phase N / N7 will add FDiv following the same pattern. *)
   if op = FMult then begin
-    let copy_v1 =
-      if d = v1 then []
-      else [Printf.sprintf "scoreboard players operation %s %s = %s %s"
-              d obj_name v1 obj_name]
-    in
-    [Printf.sprintf "scoreboard players operation $fmul_t %s = %s %s"
-       obj_name v2 obj_name;
-     Printf.sprintf "scoreboard players operation $fmul_t %s /= $c256 %s"
-       obj_name obj_name]
+    let copy_v1 = if d = v1 then [] else [cmd_score_copy d v1] in
+    [cmd_score_copy "$fmul_t" v2;
+     cmd_score_op "$fmul_t" "/=" "$c256"]
     @ copy_v1 @
-    [Printf.sprintf "scoreboard players operation %s %s /= $c256 %s"
-       d obj_name obj_name;
-     Printf.sprintf "scoreboard players operation %s %s *= $fmul_t %s"
-       d obj_name obj_name]
+    [cmd_score_op d "/=" "$c256";
+     cmd_score_op d "*=" "$fmul_t"]
   end else if op = FDiv then begin
     (* Phase N / N7: Q16.16 fixed-point divide via scale-up numerator.
        Derivation: want c_encoded = (a_real / b_real) * 65536
@@ -92,18 +151,11 @@ let cmd_score_binop (d : string) (op : binop) (v1 : string) (v2 : string) : stri
        Divide-by-zero: scoreboard operation `/= 0` is a Minecraft
        error in real MC; sim.py's `/=` arm returns 0 silently. The
        compiler does not guard — caller's responsibility. *)
-    let copy_v1 =
-      if d = v1 then []
-      else [Printf.sprintf "scoreboard players operation %s %s = %s %s"
-              d obj_name v1 obj_name]
-    in
+    let copy_v1 = if d = v1 then [] else [cmd_score_copy d v1] in
     copy_v1 @
-    [Printf.sprintf "scoreboard players operation %s %s *= $c256 %s"
-       d obj_name obj_name;
-     Printf.sprintf "scoreboard players operation %s %s /= %s %s"
-       d obj_name v2 obj_name;
-     Printf.sprintf "scoreboard players operation %s %s *= $c256 %s"
-       d obj_name obj_name]
+    [cmd_score_op d "*=" "$c256";
+     cmd_score_op d "/=" v2;
+     cmd_score_op d "*=" "$c256"]
   end else
   if is_comparison op then
     match op with
@@ -116,15 +168,8 @@ let cmd_score_binop (d : string) (op : binop) (v1 : string) (v2 : string) : stri
             "execute store success score %s %s if score %s %s %s %s %s"
             d obj_name v1 obj_name (cmp_str op) v2 obj_name ]
   else
-    let copy =
-      if d = v1 then []
-      else
-        [ Printf.sprintf "scoreboard players operation %s %s = %s %s"
-            d obj_name v1 obj_name ]
-    in
-    copy @
-    [ Printf.sprintf "scoreboard players operation %s %s %s %s %s"
-        d obj_name (op_str op) v2 obj_name ]
+    let copy = if d = v1 then [] else [cmd_score_copy d v1] in
+    copy @ [cmd_score_op d (op_str op) v2]
 
 (* ---- array / matrix ops ---- *)
 
@@ -142,40 +187,28 @@ let cmd_arr_lit_dyn (id : string) (temps : string list) : string list =
       (List.mapi
          (fun k t ->
             [ Printf.sprintf "data modify storage mcaml:heap %s append value 0" id;
-              Printf.sprintf
-                "execute store result storage mcaml:heap %s[%d] int 1 run scoreboard players get %s %s"
-                id k t obj_name ])
+              store_score_to_storage
+                (Printf.sprintf "mcaml:heap %s[%d]" id k) t ])
          temps)
   in
   init :: per_elem
 
 let cmd_arr_get_static (d : string) (id : string) (k : int) : string =
-  Printf.sprintf
-    "execute store result score %s %s run data get storage mcaml:heap %s[%d] 1"
-    d obj_name id k
+  read_storage_to_score d (Printf.sprintf "mcaml:heap %s[%d]" id k)
 
 (* Dynamic array access. 3 commands: copy idx into storage, macro-call the
    per-array getter, copy $arr_result into d. *)
 let cmd_arr_get (d : string) (id : string) (idx_score : string) : string list =
-  [ Printf.sprintf
-      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get %s %s"
-      idx_score obj_name;
-    Printf.sprintf "function mcaml:%s_get with storage mcaml:tmp args" id;
-    Printf.sprintf "scoreboard players operation %s %s = $arr_result %s"
-      d obj_name obj_name ]
+  macro_get d idx_score (id ^ "_get")
 
 (* Body of a per-array macro getter file, named <id>_get.mcfunction.
    Returns the single macro line (starts with `$`). *)
 let macro_helper_body (id : string) : string =
-  Printf.sprintf
-    "$execute store result score $arr_result vars run data get storage mcaml:heap %s[$(idx)] 1"
-    id
+  macro_getter_of_path (Printf.sprintf "mcaml:heap %s[$(idx)]" id)
 
 (* Static indexed store: single command. *)
 let cmd_arr_set_static (id : string) (k : int) (val_score : string) : string =
-  Printf.sprintf
-    "execute store result storage mcaml:heap %s[%d] int 1 run scoreboard players get %s %s"
-    id k val_score obj_name
+  store_score_to_storage (Printf.sprintf "mcaml:heap %s[%d]" id k) val_score
 
 (* Dynamic indexed store. 3 commands:
      - copy idx into mcaml:tmp args.idx (macro arg)
@@ -186,20 +219,15 @@ let cmd_arr_set_static (id : string) (k : int) (val_score : string) : string =
    from the reserved $arr_set_val scoreboard slot — we can't substitute
    a score through a macro, but a fixed scratch slot is equivalent. *)
 let cmd_arr_set (id : string) (idx_score : string) (val_score : string) : string list =
-  [ Printf.sprintf
-      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get %s %s"
-      idx_score obj_name;
-    Printf.sprintf "scoreboard players operation $arr_set_val %s = %s %s"
-      obj_name val_score obj_name;
-    Printf.sprintf "function mcaml:%s_set with storage mcaml:tmp args" id ]
+  [ stage_idx_arg idx_score;
+    cmd_score_copy "$arr_set_val" val_score;
+    call_macro_helper (id ^ "_set") ]
 
 (* Body of a per-array macro setter file, named <id>_set.mcfunction.
    Single macro line — $(idx) is substituted by the caller, $arr_set_val
    is a fixed scoreboard slot. *)
 let macro_setter_body (id : string) : string =
-  Printf.sprintf
-    "$execute store result storage mcaml:heap %s[$(idx)] int 1 run scoreboard players get $arr_set_val vars"
-    id
+  macro_setter_of_path (Printf.sprintf "mcaml:heap %s[$(idx)]" id)
 
 (* ---- dynamic heap ops (Phase A) ---- *)
 
@@ -221,14 +249,12 @@ let pool_storage_path (p : Ast.heap_pool) : string =
    per-aid [mcaml:heap <id>]. Emitted once per program (not per function)
    through a filename-level dedupe in main.ml. *)
 let pool_get_body (p : Ast.heap_pool) : string =
-  Printf.sprintf
-    "$execute store result score $arr_result %s run data get storage mcaml:%s cells[$(idx)] 1"
-    obj_name (pool_name p)
+  macro_getter_of_path
+    (Printf.sprintf "mcaml:%s cells[$(idx)]" (pool_name p))
 
 let pool_set_body (p : Ast.heap_pool) : string =
-  Printf.sprintf
-    "$execute store result storage mcaml:%s cells[$(idx)] int 1 run scoreboard players get $arr_set_val %s"
-    (pool_name p) obj_name
+  macro_setter_of_path
+    (Printf.sprintf "mcaml:%s cells[$(idx)]" (pool_name p))
 
 (* Compile-time known-size allocation. Matches DYNMEM_PLAN.md §5.5:
      <base> := $pool_next
@@ -239,17 +265,12 @@ let cmd_heap_alloc_const
     (base : string) (p : Ast.heap_pool) (n : int) : string list =
   let next = pool_next_slot p in
   let path = pool_storage_path p in
-  let init =
-    Printf.sprintf "scoreboard players operation %s %s = %s %s"
-      base obj_name next obj_name
-  in
+  let init = cmd_score_copy base next in
   let append =
     Printf.sprintf "data modify storage %s append value 0" path
   in
   let appends = List.init n (fun _ -> append) in
-  let bump =
-    Printf.sprintf "scoreboard players add %s %s %d" next obj_name n
-  in
+  let bump = cmd_score_add next n in
   init :: appends @ [bump]
 
 (* Dynamic heap read. §5.3, 5 commands. Uses [$arr_idx] as the composed
@@ -257,36 +278,42 @@ let cmd_heap_alloc_const
 let cmd_heap_get
     (d : string) (p : Ast.heap_pool) (base : string) (idx : string)
     : string list =
-  [ Printf.sprintf "scoreboard players operation $arr_idx %s = %s %s"
-      obj_name base obj_name;
-    Printf.sprintf "scoreboard players operation $arr_idx %s += %s %s"
-      obj_name idx obj_name;
-    Printf.sprintf
-      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get $arr_idx %s"
-      obj_name;
-    Printf.sprintf "function mcaml:%s_get with storage mcaml:tmp args"
-      (pool_name p);
-    Printf.sprintf "scoreboard players operation %s %s = $arr_result %s"
-      d obj_name obj_name ]
+  [ cmd_score_copy "$arr_idx" base;
+    cmd_score_op "$arr_idx" "+=" idx ]
+  @ macro_get d "$arr_idx" (pool_name p ^ "_get")
 
 (* Dynamic heap write. §5.4, 5 commands. Re-uses [$arr_set_val] as the
    value-staging slot (same convention as IArrSet). *)
 let cmd_heap_set
     (p : Ast.heap_pool) (base : string) (idx : string) (v : string)
     : string list =
-  [ Printf.sprintf "scoreboard players operation $arr_idx %s = %s %s"
-      obj_name base obj_name;
-    Printf.sprintf "scoreboard players operation $arr_idx %s += %s %s"
-      obj_name idx obj_name;
-    Printf.sprintf "scoreboard players operation $arr_set_val %s = %s %s"
-      obj_name v obj_name;
-    Printf.sprintf
-      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get $arr_idx %s"
-      obj_name;
-    Printf.sprintf "function mcaml:%s_set with storage mcaml:tmp args"
-      (pool_name p) ]
+  [ cmd_score_copy "$arr_idx" base;
+    cmd_score_op "$arr_idx" "+=" idx;
+    cmd_score_copy "$arr_set_val" v;
+    stage_idx_arg "$arr_idx";
+    call_macro_helper (pool_name p ^ "_set") ]
 
 (* ---- Phase B cons ops ---- *)
+
+(* Final two commands of every objpool allocation: hand the fresh
+   cell's handle to [d], bump the pool counter. *)
+let objpool_alloc_finish (d : string) : string list =
+  [ cmd_score_copy d "$objpool_next";
+    cmd_score_add "$objpool_next" 1 ]
+
+(* Shared objpool cell allocator: append [lit], store each value into
+   cells[-1].<field i>, then hand the handle to [d] and bump the pool
+   counter. cmd_adt_alloc and cmd_closure_make differ only in the
+   append literal and the field-name scheme. *)
+let objpool_alloc_cells (d : string) (lit : string)
+    (field : int -> string) (vals : string list) : string list =
+  ("data modify storage mcaml:objpool cells append value " ^ lit)
+  :: List.mapi
+       (fun i v ->
+          store_score_to_storage
+            (Printf.sprintf "mcaml:objpool cells[-1].%s" (field i)) v)
+       vals
+  @ objpool_alloc_finish d
 
 (* §5.1 ICons — 5 commands inline, no macro helper. The cells[-1]
    trick: we append a fresh {tag:1,h:0,t:0} compound, then store-result
@@ -300,27 +327,17 @@ let cmd_heap_set
    the same treatment since ctor tags are always static. *)
 let cmd_cons (d : string) (h : string) (t : string) : string list =
   [ "data modify storage mcaml:objpool cells append value {tag:1,h:0,t:0}";
-    Printf.sprintf
-      "execute store result storage mcaml:objpool cells[-1].h int 1 run scoreboard players get %s %s"
-      h obj_name;
-    Printf.sprintf
-      "execute store result storage mcaml:objpool cells[-1].t int 1 run scoreboard players get %s %s"
-      t obj_name;
-    Printf.sprintf "scoreboard players operation %s %s = $objpool_next %s"
-      d obj_name obj_name;
-    Printf.sprintf "scoreboard players add $objpool_next %s 1" obj_name ]
+    store_score_to_storage "mcaml:objpool cells[-1].h" h;
+    store_score_to_storage "mcaml:objpool cells[-1].t" t ]
+  @ objpool_alloc_finish d
 
 (* §5.2 IHead / ITail — 3 commands each via a per-field macro helper.
    Symmetric, parameterized by field name ("h" or "t"). *)
 let cmd_cons_field
     (d : string) (c : string) (field : string) : string list =
-  [ Printf.sprintf
-      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get %s %s"
-      c obj_name;
-    Printf.sprintf "function mcaml:cons_%s with storage mcaml:tmp args"
-      (match field with "h" -> "head" | "t" -> "tail" | _ -> assert false);
-    Printf.sprintf "scoreboard players operation %s %s = $arr_result %s"
-      d obj_name obj_name ]
+  macro_get d c
+    ("cons_"
+     ^ (match field with "h" -> "head" | "t" -> "tail" | _ -> assert false))
 
 let cmd_cons_head (d : string) (c : string) : string list =
   cmd_cons_field d c "h"
@@ -335,14 +352,10 @@ let cmd_cons_tail (d : string) (c : string) : string list =
    their h/t field names inside the tagged objpool cell precisely so
    these stay field-addressed at 3 cmds post-D4. *)
 let cons_head_body : string =
-  Printf.sprintf
-    "$execute store result score $arr_result %s run data get storage mcaml:objpool cells[$(idx)].h 1"
-    obj_name
+  macro_getter_of_path "mcaml:objpool cells[$(idx)].h"
 
 let cons_tail_body : string =
-  Printf.sprintf
-    "$execute store result score $arr_result %s run data get storage mcaml:objpool cells[$(idx)].t 1"
-    obj_name
+  macro_getter_of_path "mcaml:objpool cells[$(idx)].t"
 
 (* ---- Phase D ADT ops (D5) ---- *)
 
@@ -359,26 +372,12 @@ let cmd_adt_alloc (d : string) (tag : int) (fields : string list) : string list 
         (List.mapi (fun i _ -> Printf.sprintf ",f%d:0" i) fields)
     ^ "}"
   in
-  ("data modify storage mcaml:objpool cells append value " ^ lit)
-  :: List.mapi
-       (fun i v ->
-          Printf.sprintf
-            "execute store result storage mcaml:objpool cells[-1].f%d int 1 run scoreboard players get %s %s"
-            i v obj_name)
-       fields
-  @ [ Printf.sprintf "scoreboard players operation %s %s = $objpool_next %s"
-        d obj_name obj_name;
-      Printf.sprintf "scoreboard players add $objpool_next %s 1" obj_name ]
+  objpool_alloc_cells d lit (Printf.sprintf "f%d") fields
 
 (* ITagGet / IFieldGet — exactly 3 commands each via the §5.2
    macro-getter pattern, parameterized by helper file name. *)
 let cmd_obj_get (d : string) (c : string) (helper : string) : string list =
-  [ Printf.sprintf
-      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get %s %s"
-      c obj_name;
-    Printf.sprintf "function mcaml:%s with storage mcaml:tmp args" helper;
-    Printf.sprintf "scoreboard players operation %s %s = $arr_result %s"
-      d obj_name obj_name ]
+  macro_get d c helper
 
 let cmd_obj_tag_get (d : string) (c : string) : string list =
   cmd_obj_get d c "obj_tag"
@@ -391,14 +390,11 @@ let cmd_obj_field_get (d : string) (c : string) (k : int) : string list =
    into [$arr_result]. Field getters are per-index files; both kinds
    are deduped by filename in main.ml like cons_head/cons_tail. *)
 let obj_tag_body : string =
-  Printf.sprintf
-    "$execute store result score $arr_result %s run data get storage mcaml:objpool cells[$(idx)].tag 1"
-    obj_name
+  macro_getter_of_path "mcaml:objpool cells[$(idx)].tag"
 
 let obj_field_body (k : int) : string =
-  Printf.sprintf
-    "$execute store result score $arr_result %s run data get storage mcaml:objpool cells[$(idx)].f%d 1"
-    obj_name k
+  macro_getter_of_path
+    (Printf.sprintf "mcaml:objpool cells[$(idx)].f%d" k)
 
 (* ---- Phase F closure ops (F5) ---- *)
 
@@ -415,16 +411,7 @@ let cmd_closure_make (d : string) (code : int) (caps : string list) : string lis
         (List.mapi (fun i _ -> Printf.sprintf ",env_%d:0" i) caps)
     ^ "}"
   in
-  ("data modify storage mcaml:objpool cells append value " ^ lit)
-  :: List.mapi
-       (fun i v ->
-          Printf.sprintf
-            "execute store result storage mcaml:objpool cells[-1].env_%d int 1 run scoreboard players get %s %s"
-            i v obj_name)
-       caps
-  @ [ Printf.sprintf "scoreboard players operation %s %s = $objpool_next %s"
-        d obj_name obj_name;
-      Printf.sprintf "scoreboard players add $objpool_next %s 1" obj_name ]
+  objpool_alloc_cells d lit (Printf.sprintf "env_%d") caps
 
 (* IApply call-site lowering (F5 decision: one shared [mcaml:apply]
    dispatch function program-wide, not one per call-site shape — see
@@ -440,18 +427,12 @@ let cmd_closure_make (d : string) (code : int) (caps : string list) : string lis
    read-back (when the result is used) is pushed separately by the
    caller, mirroring ICall's own convention. *)
 let cmd_apply (cl : string) (args : string list) : string list =
-  let idx_line =
-    Printf.sprintf
-      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get %s %s"
-      cl obj_name
-  in
   let arg_stages =
     List.mapi (fun i a ->
-      Printf.sprintf "scoreboard players operation $apply_arg_%d %s = %s %s"
-        i obj_name a obj_name)
+      cmd_score_copy (Printf.sprintf "$apply_arg_%d" i) a)
       args
   in
-  (idx_line :: arg_stages) @ [ "function mcaml:apply with storage mcaml:tmp args" ]
+  (stage_idx_arg cl :: arg_stages) @ [ call_macro_helper "apply" ]
 
 (* Body of the shared [apply.mcfunction] (F5 decision 2: ONE dispatch
    chain covering every closure-typed call site program-wide, not one
@@ -467,9 +448,7 @@ let cmd_apply (cl : string) (args : string list) : string list =
    order has no correctness effect). *)
 let apply_dispatch_body (codes : int list) : string list =
   let get_code =
-    Printf.sprintf
-      "$execute store result score $code %s run data get storage mcaml:objpool cells[$(idx)].code 1"
-      obj_name
+    macro_getter_into "$code" "mcaml:objpool cells[$(idx)].code"
   in
   let branches =
     List.map (fun code ->
@@ -497,14 +476,13 @@ let apply_dispatch_trampoline_body
     (n_captured : int) (n_args : int) (target : string) : string list =
   let env_reads =
     List.init n_captured (fun i ->
-      Printf.sprintf
-        "$execute store result score param_%d %s run data get storage mcaml:objpool cells[$(idx)].env_%d 1"
-        i obj_name i)
+      macro_getter_into (Printf.sprintf "param_%d" i)
+        (Printf.sprintf "mcaml:objpool cells[$(idx)].env_%d" i))
   in
   let arg_copies =
     List.init n_args (fun i ->
-      Printf.sprintf "scoreboard players operation param_%d %s = $apply_arg_%d %s"
-        (n_captured + i) obj_name i obj_name)
+      cmd_score_copy (Printf.sprintf "param_%d" (n_captured + i))
+        (Printf.sprintf "$apply_arg_%d" i))
   in
   env_reads @ arg_copies @ [ Printf.sprintf "return run function mcaml:%s" target ]
 
@@ -514,12 +492,7 @@ let apply_dispatch_trampoline_body
    `function mcaml:<f>`. Same shape used by KLoop and by helper-free
    (slot_count = 0) KCall. *)
 let cmd_tail_jump (f : string) (args : string list) : string list =
-  let param_sets =
-    List.mapi (fun i a ->
-      Printf.sprintf "scoreboard players operation param_%d %s = %s %s"
-        i obj_name a obj_name) args
-  in
-  param_sets @ [Printf.sprintf "function mcaml:%s" f]
+  cmd_param_sets args @ [Printf.sprintf "function mcaml:%s" f]
 
 (* Body of a save/restore helper function for a non-tail call.
    [slots] is the explicit list of physical slot names that must survive
@@ -558,17 +531,13 @@ let cmd_call_helper_body_generic
   let push = "data modify storage mcaml:stk frames append value {}" in
   let saves =
     List.mapi (fun i s ->
-      Printf.sprintf
-        "execute store result storage mcaml:stk frames[-1].f%d int 1 \
-         run scoreboard players get %s %s"
-        i s obj_name) slots
+      store_score_to_storage
+        (Printf.sprintf "mcaml:stk frames[-1].f%d" i) s) slots
   in
   let restores =
     List.mapi (fun i s ->
-      Printf.sprintf
-        "execute store result score %s %s run \
-         data get storage mcaml:stk frames[-1].f%d 1"
-        s obj_name i) slots
+      read_storage_to_score s
+        (Printf.sprintf "mcaml:stk frames[-1].f%d" i)) slots
   in
   let pop = "data remove storage mcaml:stk frames[-1]" in
   [init; push] @ saves @ call_cmds @ restores @ [pop]
@@ -577,13 +546,9 @@ let cmd_call_helper_body_narrow
     ~(slots : string list)
     ~(target : string)
     ~(args : string list) : string list =
-  let param_sets =
-    List.mapi (fun i a ->
-      Printf.sprintf "scoreboard players operation param_%d %s = %s %s"
-        i obj_name a obj_name) args
-  in
   let call = Printf.sprintf "function mcaml:%s" target in
-  cmd_call_helper_body_generic ~slots ~call_cmds:(param_sets @ [call])
+  cmd_call_helper_body_generic ~slots
+    ~call_cmds:(cmd_param_sets args @ [call])
 
 (* IApply save/restore variant (F5): identical framing to
    [cmd_call_helper_body_narrow], with [cmd_apply]'s idx+$apply_arg-bank
@@ -600,14 +565,10 @@ let cmd_apply_helper_body
    intentionally NOT snapshotted per §4.4 (permheap persists across
    invocations). *)
 let cmd_region_enter (k : int) : string list =
-  [
-    Printf.sprintf
-      "scoreboard players operation $region_save_%d_scratch %s = $scratch_next %s"
-      k obj_name obj_name;
-    Printf.sprintf
-      "scoreboard players operation $region_save_%d_objpool %s = $objpool_next %s"
-      k obj_name obj_name;
-  ]
+  List.map (fun pool ->
+    cmd_score_copy (Printf.sprintf "$region_save_%d_%s" k pool)
+      (Printf.sprintf "$%s_next" pool))
+    ["scratch"; "objpool"]
 
 (* §5.6 exit, primitive-return path. Two helper dispatches; counter
    restore happens inline with each truncation helper loop. *)
@@ -632,22 +593,21 @@ let cmd_region_exit_primitive (k : int) : string list =
 let cmd_region_exit_list_int (k : int) (ret : string) : string list =
   [
     (* 1. Seed the stash walker with the child root handle. *)
-    Printf.sprintf "scoreboard players operation $wr_h %s = %s %s"
-      obj_name ret obj_name;
+    cmd_score_copy "$wr_h" ret;
     (* 2. Stash walker: fills region_tmp objpool from the child chain. *)
     "function mcaml:region_walker_list_stash";
-    (* 3. Truncation helpers: pop region-allocated cells out of the
-          primary pools back to the saved marks. *)
-    Printf.sprintf "function mcaml:region_truncate_%d_scratch" k;
-    Printf.sprintf "function mcaml:region_truncate_%d_objpool" k;
+  ]
+  (* 3. Truncation helpers: pop region-allocated cells out of the
+        primary pools back to the saved marks. *)
+  @ cmd_region_exit_primitive k
+  @ [
     (* 4. Seed the rebuild walker with nil tail. *)
-    Printf.sprintf "scoreboard players set $wr_prev %s -1" obj_name;
+    cmd_score_set "$wr_prev" (-1);
     (* 5. Rebuild walker: drains region_tmp, re-appends cells to
           objpool so the final list is at parent-region handles. *)
     "function mcaml:region_walker_list_rebuild";
     (* 6. Rewrite ret to the new parent-region head handle. *)
-    Printf.sprintf "scoreboard players operation %s %s = $wr_prev %s"
-      ret obj_name obj_name;
+    cmd_score_copy ret "$wr_prev";
   ]
 
 (* Stash walker body. Level-independent (no save-slot references).
@@ -667,24 +627,14 @@ let region_walker_list_stash_body : string list =
   [
     Printf.sprintf
       "execute if score $wr_h %s matches -1 run return 0" obj_name;
-    Printf.sprintf
-      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get $wr_h %s"
-      obj_name;
-    "function mcaml:cons_head with storage mcaml:tmp args";
-    Printf.sprintf
-      "scoreboard players operation $wr_cache_h %s = $arr_result %s"
-      obj_name obj_name;
-    Printf.sprintf
-      "execute store result storage mcaml:tmp args.idx int 1 run scoreboard players get $wr_h %s"
-      obj_name;
-    "function mcaml:cons_tail with storage mcaml:tmp args";
-    Printf.sprintf
-      "scoreboard players operation $wr_h %s = $arr_result %s"
-      obj_name obj_name;
+    stage_idx_arg "$wr_h";
+    call_macro_helper "cons_head";
+    cmd_score_copy "$wr_cache_h" "$arr_result";
+    stage_idx_arg "$wr_h";
+    call_macro_helper "cons_tail";
+    cmd_score_copy "$wr_h" "$arr_result";
     "data modify storage mcaml:region_tmp objpool append value {tag:1,h:0,t:0}";
-    Printf.sprintf
-      "execute store result storage mcaml:region_tmp objpool[-1].h int 1 run scoreboard players get $wr_cache_h %s"
-      obj_name;
+    store_score_to_storage "mcaml:region_tmp objpool[-1].h" "$wr_cache_h";
     "function mcaml:region_walker_list_stash";
   ]
 
@@ -701,26 +651,15 @@ let region_walker_list_stash_body : string list =
    original order. *)
 let region_walker_list_rebuild_body : string list =
   [
-    Printf.sprintf
-      "execute unless data storage mcaml:region_tmp objpool[0] run return 0";
-    Printf.sprintf
-      "execute store result score $wr_tmp_h %s run data get storage mcaml:region_tmp objpool[-1].h 1"
-      obj_name;
+    "execute unless data storage mcaml:region_tmp objpool[0] run return 0";
+    read_storage_to_score "$wr_tmp_h" "mcaml:region_tmp objpool[-1].h";
     "data remove storage mcaml:region_tmp objpool[-1]";
     "data modify storage mcaml:objpool cells append value {tag:1,h:0,t:0}";
-    Printf.sprintf
-      "execute store result storage mcaml:objpool cells[-1].h int 1 run scoreboard players get $wr_tmp_h %s"
-      obj_name;
-    Printf.sprintf
-      "execute store result storage mcaml:objpool cells[-1].t int 1 run scoreboard players get $wr_prev %s"
-      obj_name;
-    Printf.sprintf
-      "scoreboard players operation $wr_prev %s = $objpool_next %s"
-      obj_name obj_name;
-    Printf.sprintf
-      "scoreboard players add $objpool_next %s 1" obj_name;
-    "function mcaml:region_walker_list_rebuild";
+    store_score_to_storage "mcaml:objpool cells[-1].h" "$wr_tmp_h";
+    store_score_to_storage "mcaml:objpool cells[-1].t" "$wr_prev";
   ]
+  @ objpool_alloc_finish "$wr_prev"
+  @ [ "function mcaml:region_walker_list_rebuild" ]
 
 (* Body of region_truncate_<k>_scratch.mcfunction. Three guarded
    commands per iteration: pop the tail cell, decrement the bump
@@ -731,28 +670,21 @@ let region_walker_list_rebuild_body : string list =
    caller would continue past the region exit with a dangling pool
    state. Documented in §12 as a future-work item; v1's regions must
    stay under ~20k cells per pool to fit maxCommandChainLength. *)
-let region_truncate_scratch_body (k : int) : string list =
+let region_truncate_body (pool : string) (k : int) : string list =
   let guard =
     Printf.sprintf
-      "execute if score $scratch_next %s > $region_save_%d_scratch %s run"
-      obj_name k obj_name
+      "execute if score $%s_next %s > $region_save_%d_%s %s run"
+      pool obj_name k pool obj_name
   in
   [
-    Printf.sprintf "%s data remove storage mcaml:scratch cells[-1]" guard;
-    Printf.sprintf "%s scoreboard players remove $scratch_next %s 1"
-      guard obj_name;
-    Printf.sprintf "%s function mcaml:region_truncate_%d_scratch" guard k;
+    Printf.sprintf "%s data remove storage mcaml:%s cells[-1]" guard pool;
+    Printf.sprintf "%s scoreboard players remove $%s_next %s 1"
+      guard pool obj_name;
+    Printf.sprintf "%s function mcaml:region_truncate_%d_%s" guard k pool;
   ]
 
+let region_truncate_scratch_body (k : int) : string list =
+  region_truncate_body "scratch" k
+
 let region_truncate_objpool_body (k : int) : string list =
-  let guard =
-    Printf.sprintf
-      "execute if score $objpool_next %s > $region_save_%d_objpool %s run"
-      obj_name k obj_name
-  in
-  [
-    Printf.sprintf "%s data remove storage mcaml:objpool cells[-1]" guard;
-    Printf.sprintf "%s scoreboard players remove $objpool_next %s 1"
-      guard obj_name;
-    Printf.sprintf "%s function mcaml:region_truncate_%d_objpool" guard k;
-  ]
+  region_truncate_body "objpool" k
