@@ -325,11 +325,11 @@ let objpool_alloc_cells (d : string) (lit : string)
    constant — no separate tag-write command, so ICons stays at 5 cmds
    (§13.5 budgeted 6). D5's generic ADT cells ({tag, f0, f1, ...}) get
    the same treatment since ctor tags are always static. *)
+let cons_cell_lit = "{tag:1,h:0,t:0}"
+
 let cmd_cons (d : string) (h : string) (t : string) : string list =
-  [ "data modify storage mcaml:objpool cells append value {tag:1,h:0,t:0}";
-    store_score_to_storage "mcaml:objpool cells[-1].h" h;
-    store_score_to_storage "mcaml:objpool cells[-1].t" t ]
-  @ objpool_alloc_finish d
+  objpool_alloc_cells d cons_cell_lit
+    (function 0 -> "h" | 1 -> "t" | _ -> assert false) [h; t]
 
 (* §5.2 IHead / ITail — 3 commands each via a per-field macro helper.
    Symmetric, parameterized by field name ("h" or "t"). *)
@@ -633,7 +633,7 @@ let region_walker_list_stash_body : string list =
     stage_idx_arg "$wr_h";
     call_macro_helper "cons_tail";
     cmd_score_copy "$wr_h" "$arr_result";
-    "data modify storage mcaml:region_tmp objpool append value {tag:1,h:0,t:0}";
+    "data modify storage mcaml:region_tmp objpool append value " ^ cons_cell_lit;
     store_score_to_storage "mcaml:region_tmp objpool[-1].h" "$wr_cache_h";
     "function mcaml:region_walker_list_stash";
   ]
@@ -654,11 +654,12 @@ let region_walker_list_rebuild_body : string list =
     "execute unless data storage mcaml:region_tmp objpool[0] run return 0";
     read_storage_to_score "$wr_tmp_h" "mcaml:region_tmp objpool[-1].h";
     "data remove storage mcaml:region_tmp objpool[-1]";
-    "data modify storage mcaml:objpool cells append value {tag:1,h:0,t:0}";
-    store_score_to_storage "mcaml:objpool cells[-1].h" "$wr_tmp_h";
-    store_score_to_storage "mcaml:objpool cells[-1].t" "$wr_prev";
   ]
-  @ objpool_alloc_finish "$wr_prev"
+  (* Append fresh cell with h = popped value, t = previous handle,
+     advance $wr_prev — exactly a cons, so emit it as one. (cmd_cons
+     stores the OLD $wr_prev into .t before its final two commands
+     overwrite $wr_prev with the new handle.) *)
+  @ cmd_cons "$wr_prev" "$wr_tmp_h" "$wr_prev"
   @ [ "function mcaml:region_walker_list_rebuild" ]
 
 (* Body of region_truncate_<k>_scratch.mcfunction. Three guarded

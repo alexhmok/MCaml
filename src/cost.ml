@@ -4,13 +4,13 @@
    contribute to its containing function's main body when [codegen_cfg]
    lowers it. The plan in
    [/Users/alexmok/.claude/plans/mcaml-microgpt-inference.md] §1.2 calls
-   this the "tick scheduler cost model"; later passes (cost_analysis,
-   tick_split) consume the per-block / per-function summaries to decide
-   where to insert tick-split points so a single function invocation
-   stays under [maxCommandChainLength].
+   this the "tick scheduler cost model"; tick_split.ml and tick_guard.ml
+   (via main.ml) consume the per-block / per-function summaries to
+   decide where to insert tick-split points so a single function
+   invocation stays under [maxCommandChainLength].
 
-   This file is the §4 stage 1 deliverable: pure model + summary helpers.
-   No analyzer driver, no split-point insertion. *)
+   This file is pure model + summary helpers. No analyzer driver, no
+   split-point insertion. *)
 
 open Cfg
 

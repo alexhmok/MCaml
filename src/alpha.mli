@@ -50,7 +50,12 @@ module M :
 val counter : int ref
 val new_name : string -> string
 val validate_toplevel_name : string -> string -> unit
+val rename_params :
+  string M.t ->
+  (string * Ast.typ) list -> (string * Ast.typ) list * string M.t
 val g : string M.t -> Ast.expr -> Ast.expr
 val check_dup_binders : Ast.pattern -> unit
 val rename_pattern : string M.t -> Ast.pattern -> Ast.pattern * string M.t
+val rename_pattern_list :
+  string M.t -> Ast.pattern list -> Ast.pattern list * string M.t
 val h : string M.t -> Ast.def -> Ast.def

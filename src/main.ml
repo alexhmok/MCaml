@@ -320,6 +320,72 @@ let run_dump_hooks fn_table fn_order =
 
 (* ---- Phase A: entry-point + dynamic-heap analysis ---- *)
 
+(* KNOWN, CONFIRMED, UNFIXED HAZARD (documented rather than rejected
+   — see below for why a compiler-enforced check isn't safe to ship):
+   a public entry P that makes an ordinary (non-tail) ICall — directly
+   or transitively through other helper functions — into a function
+   G with a self-tail loop is unsafe the moment G's loop actually
+   needs to yield mid-run. Minecraft's `function` command returns
+   control to the IMMEDIATE caller the instant the callee finishes
+   OR executes an explicit `return`, and tick_guard's per-iteration
+   budget guard does exactly that (`schedule ... 1t; return 0`) on
+   every yield — NOT "the whole call chain unwinds," just one level.
+   So P resumes immediately after its `function mcaml:G` line,
+   reaches its own §4.4 end-of-invocation reset (appended
+   unconditionally after P's last command, since P — not G, which
+   `called_by_other` correctly marks non-public — is the one
+   [is_public_entry] fires for), and wipes `mcaml:scratch`/
+   `mcaml:objpool` while G's scheduled continuation is still
+   mid-flight and depends on that exact state next tick. Confirmed
+   by direct repro (2026-07-08): a wrapper plain-calling a self-tail
+   darr-loop under a low MCAML_LOOP_ITER_LIMIT gets its heap wiped
+   after the loop's FIRST partial run, then crashes resuming the
+   scheduled continuation next tick.
+
+   This is the exact hazard scripts/stress_test.mcaml's S8 comment
+   documents finding and works around by making the self-tail loop
+   itself the sole public entry (folding any one-time setup into an
+   `i = 1` guard inside the loop) rather than introducing a
+   wrapper — but that was only ever a per-test workaround, never a
+   compiler guarantee.
+
+   A compile-time rejection of "any public entry that can reach a
+   self-tail function via ICall" was tried and reverted: EVERY
+   self-tail loop gets tick_guard's yield machinery woven in
+   unconditionally, regardless of whether it will ever actually
+   iterate past the budget for realistic inputs (e.g.
+   mc_test_suite.mcaml's `sum_list`, called from `run_all`, over
+   lists far shorter than the default 1024-iteration budget) — so a
+   blanket static rejection has no way to distinguish "structurally
+   has a self-tail loop" from "will actually span multiple ticks
+   for this program's real inputs" (a runtime-data-dependent
+   question with no static bound anywhere in this compiler) and
+   broke large amounts of legitimate, already-working code the
+   moment it was tried.
+
+   A runtime fix (a global "$tick_yielded" flag, set by tick_guard
+   right before its yield and checked by the wrapper's reset) was
+   also sketched and rejected: it correctly SKIPS the wrapper's
+   premature reset on a yield, but then nothing ever fires the
+   reset once G's OWN scheduled continuation later truly
+   completes — that continuation re-enters via a direct scheduled
+   call to G, never back through P, and G itself is not a public
+   entry (something else calls it) so it carries no reset of its
+   own either. The pool would simply never get reclaimed for that
+   invocation rather than being corrupted — better than a crash,
+   but still wrong, and building the "G must inherit a reset ITS
+   OWN true-completion path fires, once it's known to be
+   reachable from a heap-using public entry" plumbing needed to
+   close that gap is a real multi-file architecture change, not a
+   proportionate scope for a bug-hunting pass.
+
+   Net: no compiler-level fix ships for this in v1. Follow
+   stress_test.mcaml's S8 pattern — fold any one-time setup into
+   the self-tail function itself (guarded on the first iteration)
+   so it is the sole public entry — for any program where the
+   self-tail loop might realistically span more than one tick's
+   iteration budget. *)
+
 (* Phase A / A9: compute the public-entry set and the any-dyn-heap
    flag before Phase 3 fires. A non-template function is "public"
    iff no other non-template function calls it via ICall. The flag
@@ -403,71 +469,6 @@ let compute_entry_info fn_table closure_layout
     end) fn_table;
   (!any_dyn_heap_use, is_public_entry)
 
-(* KNOWN, CONFIRMED, UNFIXED HAZARD (documented rather than rejected
-   — see below for why a compiler-enforced check isn't safe to ship):
-   a public entry P that makes an ordinary (non-tail) ICall — directly
-   or transitively through other helper functions — into a function
-   G with a self-tail loop is unsafe the moment G's loop actually
-   needs to yield mid-run. Minecraft's `function` command returns
-   control to the IMMEDIATE caller the instant the callee finishes
-   OR executes an explicit `return`, and tick_guard's per-iteration
-   budget guard does exactly that (`schedule ... 1t; return 0`) on
-   every yield — NOT "the whole call chain unwinds," just one level.
-   So P resumes immediately after its `function mcaml:G` line,
-   reaches its own §4.4 end-of-invocation reset (appended
-   unconditionally after P's last command, since P — not G, which
-   `called_by_other` correctly marks non-public — is the one
-   [is_public_entry] fires for), and wipes `mcaml:scratch`/
-   `mcaml:objpool` while G's scheduled continuation is still
-   mid-flight and depends on that exact state next tick. Confirmed
-   by direct repro (2026-07-08): a wrapper plain-calling a self-tail
-   darr-loop under a low MCAML_LOOP_ITER_LIMIT gets its heap wiped
-   after the loop's FIRST partial run, then crashes resuming the
-   scheduled continuation next tick.
-
-   This is the exact hazard scripts/stress_test.mcaml's S8 comment
-   documents finding and works around by making the self-tail loop
-   itself the sole public entry (folding any one-time setup into an
-   `i = 1` guard inside the loop) rather than introducing a
-   wrapper — but that was only ever a per-test workaround, never a
-   compiler guarantee.
-
-   A compile-time rejection of "any public entry that can reach a
-   self-tail function via ICall" was tried and reverted: EVERY
-   self-tail loop gets tick_guard's yield machinery woven in
-   unconditionally, regardless of whether it will ever actually
-   iterate past the budget for realistic inputs (e.g.
-   mc_test_suite.mcaml's `sum_list`, called from `run_all`, over
-   lists far shorter than the default 1024-iteration budget) — so a
-   blanket static rejection has no way to distinguish "structurally
-   has a self-tail loop" from "will actually span multiple ticks
-   for this program's real inputs" (a runtime-data-dependent
-   question with no static bound anywhere in this compiler) and
-   broke large amounts of legitimate, already-working code the
-   moment it was tried.
-
-   A runtime fix (a global "$tick_yielded" flag, set by tick_guard
-   right before its yield and checked by the wrapper's reset) was
-   also sketched and rejected: it correctly SKIPS the wrapper's
-   premature reset on a yield, but then nothing ever fires the
-   reset once G's OWN scheduled continuation later truly
-   completes — that continuation re-enters via a direct scheduled
-   call to G, never back through P, and G itself is not a public
-   entry (something else calls it) so it carries no reset of its
-   own either. The pool would simply never get reclaimed for that
-   invocation rather than being corrupted — better than a crash,
-   but still wrong, and building the "G must inherit a reset ITS
-   OWN true-completion path fires, once it's known to be
-   reachable from a heap-using public entry" plumbing needed to
-   close that gap is a real multi-file architecture change, not a
-   proportionate scope for a bug-hunting pass.
-
-   Net: no compiler-level fix ships for this in v1. Follow
-   stress_test.mcaml's S8 pattern — fold any one-time setup into
-   the self-tail function itself (guarded on the first iteration)
-   so it is the sole public entry — for any program where the
-   self-tail loop might realistically span more than one tick's
-   iteration budget. *)
 (* Reset block from DYNMEM_PLAN.md §4.4. permheap is intentionally
    excluded — it persists across invocations by design. *)
 let reset_cmds = [

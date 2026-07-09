@@ -102,6 +102,9 @@ val fresh_lambda_name : string -> string
 val is_synthetic_name : string -> bool
 val free_vars : S.t -> Ast.expr -> S.t
 val pattern_vars : Ast.pattern -> S.t
+val capture_list : Ast.typ M.t -> S.t -> (string * Ast.typ) list
 val walk : string -> Ast.typ M.t -> Ast.expr -> Ast.expr * Ast.def list
+val walk_list :
+  string -> Ast.typ M.t -> Ast.expr list -> Ast.expr list * Ast.def list
 val lift_def : Ast.def -> Ast.def list
 val run : Ast.program -> Ast.program

@@ -61,8 +61,19 @@ let validate_toplevel_name kind name =
           kind name c name (String.lowercase_ascii name))
     ) name
 
+(* Rename a parameter list, threading each fresh binder into the env.
+   Shared by Lambda (in [g]) and top-level Fun (in [h]). fold_right, so
+   [new_name] mints counters in reverse param order — both call sites
+   always did this; preserved because the _N suffixes are observable in
+   emitted slot names. *)
+let rename_params env params =
+  List.fold_right (fun (p, t) (ps, acc_env) ->
+    let p' = new_name p in
+    ((p', t) :: ps, M.add p p' acc_env)
+  ) params ([], env)
+
 (* Rename Expressions *)
-let rec g env e = 
+let rec g env e =
   match e with
   | Var x -> Var (try M.find x env with Not_found -> x)
   | Let (x, e1, e2) ->
@@ -87,10 +98,7 @@ let rec g env e =
   | App(f, args) ->
       App((try M.find f env with Not_found -> f), List.map (g env) args)
   | Lambda (params, body) ->
-      let (params', env') = List.fold_right (fun (p, t) (ps, acc_env) ->
-        let p' = new_name p in
-        ((p', t) :: ps, M.add p p' acc_env)
-      ) params ([], env) in
+      let (params', env') = rename_params env params in
       Lambda (params', g env' body)
   | Closure (fname, caps) -> Closure (fname, List.map (g env) caps)
   | Array elems -> Array (List.map (g env) elems)
@@ -165,19 +173,11 @@ and rename_pattern env p =
       let x' = new_name x in
       (PVar x', M.add x x' env)
   | PCtor (c, ps) ->
-      let (ps_rev, env') =
-        List.fold_left (fun (acc, e) p ->
-          let (p', e') = rename_pattern e p in
-          (p' :: acc, e')) ([], env) ps
-      in
-      (PCtor (c, List.rev ps_rev), env')
+      let (ps', env') = rename_pattern_list env ps in
+      (PCtor (c, ps'), env')
   | PTuple ps ->
-      let (ps_rev, env') =
-        List.fold_left (fun (acc, e) p ->
-          let (p', e') = rename_pattern e p in
-          (p' :: acc, e')) ([], env) ps
-      in
-      (PTuple (List.rev ps_rev), env')
+      let (ps', env') = rename_pattern_list env ps in
+      (PTuple ps', env')
   | PRecord fields ->
       let (fs_rev, env') =
         List.fold_left (fun (acc, e) (f, p) ->
@@ -190,6 +190,15 @@ and rename_pattern env p =
       let (ph', env') = rename_pattern env ph in
       let (pt', env'') = rename_pattern env' pt in
       (PCons (ph', pt'), env'')
+
+(* Rename a sub-pattern list left-to-right, threading the env. *)
+and rename_pattern_list env ps =
+  let (ps_rev, env') =
+    List.fold_left (fun (acc, e) p ->
+      let (p', e') = rename_pattern e p in
+      (p' :: acc, e')) ([], env) ps
+  in
+  (List.rev ps_rev, env')
 
 (* Rename Definitions (Top Level) *)
 let h env d =
@@ -204,10 +213,7 @@ let h env d =
   | Fun (name, params, ret, body) ->
       validate_toplevel_name "fun" name;
       (* 1. Rename parameters *)
-      let (params', env') = List.fold_right (fun (p, t) (ps, acc_env) ->
-        let p' = new_name p in
-        ((p', t) :: ps, M.add p p' acc_env)
-      ) params ([], env) in
+      let (params', env') = rename_params env params in
 
       (* 2. Rename body using new param names *)
       Fun (name, params', ret, g env' body)

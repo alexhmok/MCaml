@@ -35,6 +35,7 @@ val cmd_heap_set : Ast.heap_pool -> string -> string -> string -> string list
 val objpool_alloc_finish : string -> string list
 val objpool_alloc_cells :
   string -> string -> (int -> string) -> string list -> string list
+val cons_cell_lit : string
 val cmd_cons : string -> string -> string -> string list
 val cmd_cons_field : string -> string -> string -> string list
 val cmd_cons_head : string -> string -> string list

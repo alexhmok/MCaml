@@ -142,6 +142,20 @@ and pattern_vars (p : pattern) : S.t =
         S.empty fields
   | PCons (ph, pt) -> S.union (pattern_vars ph) (pattern_vars pt)
 
+(* Compute the capture list for a hoisted helper: the free vars that
+   are known in [env] (S.elements order — deterministic), minus
+   ref-typed ones. Refs lower to globally-stable scoreboard slot
+   names; the helper body references them directly by name and does
+   NOT need them as captures/params. Shared by the For and Lambda
+   hoists below. *)
+let capture_list (env : typ M.t) (fvs : S.t) : (string * typ) list =
+  S.elements fvs
+  |> List.filter_map (fun n ->
+       match M.find_opt n env with
+       | Some t -> Some (n, t)
+       | None -> None)
+  |> List.filter (fun (_, t) -> match t with TRef _ -> false | _ -> true)
+
 (* Walk an expression carrying a type env. Returns (new_expr, extra_defs). *)
 let rec walk (parent : string) (env : typ M.t) (e : expr)
   : expr * def list =
@@ -151,23 +165,10 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
       let (hi', d2) = walk parent env hi in
       let body_env = M.add i TInt env in
       let (body', d3) = walk parent body_env body in
-      (* Free variables in body' (minus i). Only keep ones known in env. *)
+      (* Free variables in body' (minus i). Only keep ones known in env;
+         ref-typed fvs are filtered (see [capture_list]). *)
       let fvs = S.remove i (free_vars (S.singleton i) body') in
-      let fv_list =
-        S.elements fvs
-        |> List.filter_map (fun n ->
-             match M.find_opt n env with
-             | Some t -> Some (n, t)
-             | None -> None)
-      in
-      (* Refs lower to globally-stable scoreboard slot names; the helper
-         body references them directly by name and does NOT need them as
-         parameters. Filter them out. *)
-      let fv_list =
-        List.filter
-          (fun (_, t) -> match t with TRef _ -> false | _ -> true)
-          fv_list
-      in
+      let fv_list = capture_list env fvs in
       let synth = fresh_name parent in
       let hi_p = fresh_hi_name () in
       let params =
@@ -214,13 +215,11 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
       let (b', d2) = walk parent env b in
       (Seq (a', b'), d1 @ d2)
   | App (f, args) ->
-      let pairs = List.map (walk parent env) args in
-      let args' = List.map fst pairs in
-      let defs = List.concat_map snd pairs in
+      let (args', defs) = walk_list parent env args in
       (App (f, args'), defs)
   | Array es ->
-      let pairs = List.map (walk parent env) es in
-      (Array (List.map fst pairs), List.concat_map snd pairs)
+      let (es', defs) = walk_list parent env es in
+      (Array es', defs)
   | Index1 (a, i) ->
       let (a', d1) = walk parent env a in
       let (i', d2) = walk parent env i in
@@ -257,8 +256,8 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
       let (t', d2) = walk parent env t in
       (Cons (h', t'), d1 @ d2)
   | Tuple es ->
-      let pairs = List.map (walk parent env) es in
-      (Tuple (List.map fst pairs), List.concat_map snd pairs)
+      let (es', defs) = walk_list parent env es in
+      (Tuple es', defs)
   | Record fields ->
       let pairs =
         List.map (fun (f, e) ->
@@ -287,21 +286,7 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
       in
       let (body', d_inner) = walk parent body_env body in
       let fvs = free_vars bound_names body' in
-      let fv_list =
-        S.elements fvs
-        |> List.filter_map (fun n ->
-             match M.find_opt n env with
-             | Some t -> Some (n, t)
-             | None -> None)
-      in
-      (* Refs lower to globally-stable scoreboard slot names, exactly
-         like For's fv filtering — the helper body references them
-         directly by name and does NOT need them as captures/params. *)
-      let fv_list =
-        List.filter
-          (fun (_, t) -> match t with TRef _ -> false | _ -> true)
-          fv_list
-      in
+      let fv_list = capture_list env fvs in
       let synth = fresh_lambda_name parent in
       let helper_params = fv_list @ params in
       let fv_args = List.map (fun (n, _) -> Var n) fv_list in
@@ -315,8 +300,8 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
      in the input program — kept for match exhaustiveness / defensive
      correctness if a Closure ever arrives already-converted. *)
   | Closure (fname, caps) ->
-      let pairs = List.map (walk parent env) caps in
-      (Closure (fname, List.map fst pairs), List.concat_map snd pairs)
+      let (caps', defs) = walk_list parent env caps in
+      (Closure (fname, caps'), defs)
   | Match (e, arms) ->
       let (e', d0) = walk parent env e in
       (* Pattern binders enter the env as TInt: under the §12.1 uniform
@@ -332,6 +317,14 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
       (Match (e', List.map fst pairs), d0 @ List.concat_map snd pairs)
   | Int _ | Float _ | Bool _ | Str _ | Selector _ | Coord _
   | Command _ | Unit | Var _ -> (e, [])
+
+(* Walk each expression of a list left-to-right, concatenating the
+   hoisted defs in traversal order (helper emission order is
+   load-bearing — helpers are compiled in source order). *)
+and walk_list (parent : string) (env : typ M.t) (es : expr list)
+  : expr list * def list =
+  let pairs = List.map (walk parent env) es in
+  (List.map fst pairs, List.concat_map snd pairs)
 
 let lift_def (d : def) : def list =
   match d with
