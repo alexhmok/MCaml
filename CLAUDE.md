@@ -69,30 +69,29 @@ Historical note: before Milestone 2 the codegen emitted Minecraft commands direc
 
 ## Build & run
 
-No dune/Makefile. Rebuild manually:
+Dune project. Rebuild:
 
 ```
 cd /Users/alexmok/MCaml
+dune build          # builds _build/default/main.exe; ./mcaml is a symlink to it
+```
+
+Dune resolves module ordering automatically — no hand-maintained module
+list. The checked-in `lexer.ml` / `parser.ml` / `parser.mli` are compiled
+as plain modules; when `lexer.mll` or `parser.mly` change, regenerate
+them manually first:
+
+```
 ocamllex lexer.mll                                   # regenerate lexer.ml
 menhir parser.mly                                    # regenerate parser.ml/.mli
-ocamlc -c ast.ml parser.mli lexer.ml parser.ml \
-           alpha.ml typing.ml for_lift.ml knormal.ml tco.ml \
-           codegen_helpers.ml cfg.ml cfg_build.ml \
-           liveness.ml dominators.ml loop_detect.ml \
-           licm.ml unroll.ml sroa.ml \
-           monomorphize.ml inline.ml closure_spec.ml closure_layout.ml \
-           const_fold.ml copy_prop.ml local_cse.ml dce.ml \
-           strength_reduce.ml cost.ml optimize.ml regalloc_cfg.ml \
-           codegen_cfg.ml codegen.ml tick_split.ml tick_guard.ml main.ml
-ocamlc -o mcaml ast.cmo lexer.cmo parser.cmo alpha.cmo typing.cmo \
-                for_lift.cmo knormal.cmo tco.cmo codegen_helpers.cmo \
-                cfg.cmo cfg_build.cmo liveness.cmo dominators.cmo \
-                loop_detect.cmo licm.cmo unroll.cmo sroa.cmo \
-                monomorphize.cmo inline.cmo closure_spec.cmo closure_layout.cmo const_fold.cmo copy_prop.cmo \
-                local_cse.cmo dce.cmo strength_reduce.cmo cost.cmo \
-                optimize.cmo regalloc_cfg.cmo codegen_cfg.cmo codegen.cmo \
-                tick_split.cmo tick_guard.cmo main.cmo
 ```
+
+The `dune` file uses `(flags (-g))` (no `:standard`) so warnings match
+plain `ocamlc` defaults instead of dune's fatal dev-profile set.
+
+Refactor gate: `python3 tools/verify_canary.py` compiles the 5 test
+suites, runs their sim checkers, and prints a sha256 canary hash per
+build — compare across commits to prove a change is byte-identical.
 
 Invoke:
 
@@ -120,10 +119,6 @@ MCAML_NO_TICK_GUARD=1 ./mcaml < …            # Phase 5: skip per-iteration loo
 MCAML_TICK_BUDGET=N ./mcaml < …              # split threshold per file (default 50000)
 MCAML_LOOP_ITER_LIMIT=N ./mcaml < …          # per-tick loop iteration budget (default 1024)
 ```
-
-Add `tick_guard.cmo` after `tick_split.cmo` in the manual rebuild
-command — Phase 5 sits between the splitter and `main.ml`. The new
-module is file-level only; it does not touch the CFG.
 
 The driver accepts `-o <dir>` (or the `MCAML_OUT` env var) to pick an
 output directory; it `mkdir -p`'s the dir if missing. Default is cwd so
