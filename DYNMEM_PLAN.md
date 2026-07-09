@@ -1402,7 +1402,66 @@ self-recursion with source-order generalization.
       self-tail-recursive back-edge, arriving via ambiguous control-flow
       merge, or beyond `MCAML_SPECIALIZE_LIMIT` — every one of these
       fails LOUDLY (compile-time error), never silently.)
-- [ ] F4-followup. Drop-and-renumber the retired parameter slot instead of passing a dummy zero (currently a harmless one-extra-argument-pass per specialized call, not a correctness issue — deferred, not required for the zero-cost claim since the dummy-argument fix already makes the originating IClosureMake DCE-able)
+- [x] F4-followup. Drop-and-renumber the retired parameter slot instead
+      of passing a dummy zero. (Session 5, commit `6adb298`. Verified
+      the prerequisite claim directly before implementing: `param_K` as
+      a literal vreg name occurs as a USE in exactly one place per
+      scalar parameter — the entry-prelude `ICopy(p_name, "param_K")`
+      `cfg_build.ml:302-308` emits, always in the entry block, never a
+      dest anywhere in the CFG IR (the `param_i := arg_i` assignment is
+      synthesized later, at codegen time, from a call's plain arg list
+      — confirmed by grepping `codegen_helpers.ml`/`codegen_cfg.ml`,
+      which derive arg count purely from the CALL SITE's arg list,
+      never from `cfg.params`, itself documented as "debug provenance
+      only" in `cfg.ml`).
+
+      `closure_spec.ml`'s `ensure_clone` now computes a single
+      index-shift map from the resolved positions being dropped
+      (`shift i = i - #{d in resolved_idxs : d < i}`), applied
+      uniformly to: the clone's own `params` list (filtered, not
+      retyped), the entry-prelude `ICopy` sources for every SURVIVING
+      original parameter (renumbered; the dropped position's own
+      prelude `ICopy` is removed outright), and any self-tail `TTail`'s
+      own arg list (filtered at the same positions, with the `TTail`'s
+      target renamed from the template's name to the clone's — a
+      latent gap in the ORIGINAL `clone_cfg`, which never renamed
+      self-tail targets at all; harmless before this session because
+      `only_directly_applied`'s existing TTail check disqualifies any
+      resolved position that's itself forwarded across a self-tail
+      edge, so no clone from F3+F4/F5 ever actually contained a
+      self-tail terminator matching this shape — but a hand-written
+      probe with a FRESH `IClosureMake` re-forwarded on each iteration,
+      rather than the SAME vreg, can reach `ensure_clone` while still
+      being self-tail-recursive on other variables, so the rename was
+      added defensively rather than left as an unreachable-in-practice
+      gap). `rewrite_callers` now drops the resolved position's
+      argument entirely (`List.filteri`) instead of substituting a
+      fresh `IConst 0`, removing the now-dead `dummy_counter`/
+      `fresh_dummy` machinery entirely.
+
+      Verified: a dedicated probe (`apply_mid(x, f: int -> int, y)`,
+      closure param in the MIDDLE, not first or last, kept un-inlined
+      via the same `helper_add_one` non-leaf trick decision 7 already
+      established) diffed pre/post-edit compiled output — the clone
+      body's read shifts from `param_2` to `param_1` (correct
+      direction, no off-by-one) and the call site drops one
+      `scoreboard players set` + one `scoreboard players operation`
+      (2 fewer commands per specialized call), both builds' `$ret`
+      verified correct (114) via `sim.py`. Full battery green: all ten
+      `/tmp` harnesses (`test_lambdas.py`'s existing four Known-path
+      entries plus five F5 Escaping probes all still pass — the
+      `budget_exceeded`/`multi_hop_forwarded` probes are the ones that
+      actually exercise the cross-function clone path un-inlined, per
+      decision 7's own leaf-inlining note; `test_lambdas.mcaml` itself
+      is NOT exercised, since its `apply_twice`/`add_k` HOFs ARE leaves
+      and get spliced away by `Inline.run` before `Closure_spec.run`
+      ever sees them — confirmed by direct `MCAML_NO_INLINE=1` A/B,
+      which DOES show the clone/renumbering path firing), five
+      canaries byte-identical, every `scripts/*.mcaml` file's compiled
+      output byte-hash diffed against a pre-edit snapshot (zero
+      differences — this task touches only the cross-function clone
+      path, which none of the 39 checked-in scripts exercise un-inlined
+      today), `MCAML_NO_CLOSURE_SPEC=1`/`MCAML_O0=1` A/B re-verified.)
 - [x] F5. Apply-dispatch runtime for escaping lambdas. (Session 4, commit
       `36a97c7` — implementation — plus a separate plan-doc commit
       documenting §13.12 decisions 7–8 and this §2 entry. Full design
@@ -1550,8 +1609,153 @@ self-recursion with source-order generalization.
       `MCAML_STRICT_HOT`) remain open — F6 did not fall out naturally
       this session and was not attempted, per the kickoff's own
       framing.)
-- [ ] F6. Diagnostics: `[closure]` per-lambda report (specialized vs escaping + reason + cost estimate); `MCAML_STRICT_HOT=1` env knob to promote escaping-in-hot-loop to a compile error; `cost.ml` integration so `tick_split`/`tick_guard` budgets account for apply-dispatch cost
-- [ ] F7. Tests: literal lambdas in HOFs specialize; closures captured in ADTs take the apply path; strict-hot mode fires on the right patterns
+- [x] F6. Diagnostics + `MCAML_STRICT_HOT` + cost verification. (Session
+      5, commit `6adb298`. Full design record in §13.12 decision 9.
+
+      **F6a** — per-lambda `[closure] <name>: specialized (N call
+      sites)` / `[closure] <name>: ESCAPING via <reason> — ~M cmds/call
+      [, inside hot loop <loop>]` report, keyed by lambda-helper name
+      (e.g. `main__lam1`), matching §13.6's contract exactly. Threading
+      decision (§13.12 decision 9): populated in TWO touch points, both
+      inside `closure_spec.ml` — `run` (Phase 2) records
+      `resolved_sites`/`escape_reason`/`site_functions` as it walks
+      every `IApply`/`ICall` site for the specialization rewrite itself
+      (no separate whole-table re-walk needed), and a new
+      `Closure_spec.check_hot_loop`, called once per non-template
+      function from `codegen.ml`'s `compile_cfg_to_files` between
+      `Optimize.run` and `Regalloc_cfg.alloc`, fills in the hot-loop
+      annotation once `Loop_detect` is meaningful (post-LICM/unroll/
+      SROA/strength_reduce). `main.ml` calls
+      `Closure_spec.print_report ()` once, after every function has
+      been through Phase 3. Always-on, no gating env var: a lambda-free
+      program never populates the report table, so it emits zero bytes
+      of new stderr — confirmed by all five canaries' captured stderr
+      staying exactly empty and by diffing every `scripts/*.mcaml`
+      file's stderr against a pre-session baseline (only
+      `test_lambdas.mcaml`, the one lambda-bearing script, gained new
+      lines).
+
+      Escape-reason attribution reuses the EXISTING disqualification
+      points rather than a new analysis: `resolve_origin`'s def-count
+      check (`ambiguous control-flow merge`), `only_directly_applied`'s
+      per-use check (now returns `string option` instead of `bool`,
+      distinguishing `forwarded through 2+ HOF hops` from `forwarded
+      across a self-tail back-edge` since `TTail` is always a self-tail
+      call by `cfg.ml`'s own definition), and `ensure_clone`'s budget
+      check (`exceeded MCAML_SPECIALIZE_LIMIT`). Two of the plan's
+      original candidate reasons — "stored in a ref" and "returned from
+      a function [and later called]" — are NOT attributable at the CFG
+      level and are documented as such rather than silently guessed at:
+      both already fail EARLIER, at knormal's pre-existing defensive
+      `Hashtbl.mem Typing.fun_sigs` check (the same one decision 8
+      already named for `ref_then_call`), so a program exhibiting
+      either shape never compiles far enough for `Closure_spec.run` to
+      see an `IClosureMake`/`IApply` pair at all.
+
+      **Bug found and fixed while wiring up the ambiguous-merge
+      reason**: the first version of the attribution helper
+      (`note_unresolved_closure_use`) checked only the IMMEDIATE
+      operand's def-count, which missed the common case where
+      `Inline.run`'s splice-time `$inN_` rebinding puts one clean
+      single-def `ICopy` between the `IApply` and the actual ambiguous
+      merge — fixed by having it chase the same single-def `ICopy`
+      chain `resolve_origin` already does, stopping at whichever vreg
+      first fails to be a clean chain. Caught immediately by an
+      ambiguous-merge probe (`if cond then lam1 else lam2` feeding a
+      HOF parameter) producing zero report output before the fix.
+
+      **F6b** — `MCAML_STRICT_HOT=1` reuses the exact same
+      `check_hot_loop` hook: `Loop_detect.find_loops` already treats a
+      TCO'd self-tail-call as a back-edge to the function's own entry
+      (`Dominators.extended_succs`: `TTail (f,_) when f = cfg.fname ->
+      [cfg.entry]`, confirmed by direct read before relying on it), so
+      "a detected natural loop OR a TCO self-tail loop body" from the
+      F6 kickoff's own wording is ALREADY one unified check under
+      `Loop_detect` — no separate `has_self_tail`-style special-casing
+      was needed or added. Any `IApply` found inside the union of every
+      loop's body raises a loud `failwith` naming the loop and (via
+      `site_functions`) the implicated closure(s) when known. Added as
+      a small in-place check between the existing `Optimize.run` and
+      `Regalloc_cfg.alloc` calls in `codegen.ml`'s `compile_cfg_to_files`
+      — no reordering of `main.ml`'s per-function Phase 3 loop, per
+      decision 7's reverted-pass-reordering lesson.
+
+      **F6c** — verified, not re-implemented: F5 already gave `cost.ml`
+      real `IApply`/`IClosureMake` formulas, and `tick_guard.ml`'s
+      `compute_limit` already consumes `Cost.estimate_block` (which
+      includes those) to compute `MCAML_TICK_COMMANDS / body_cost`. A
+      direct comparison — the same self-tail-loop shape calling an
+      ordinary function directly (iteration limit 3000, `MCAML_DUMP_
+      COSTS=1` drift 0.0%) vs. calling an Escaping closure (iteration
+      limit 2857) — confirms the cost integration is genuinely
+      load-bearing: a hotter, apply-dispatch-carrying loop body gets a
+      correspondingly LOWER, safer per-tick iteration budget. The
+      self-tail-forward Escaping probe's own drift (`estimate=17
+      own_actual=15`, +13.3%) is a residual, SAFE-direction
+      (conservative — fewer iterations allowed, never more) overestimate
+      from the save/restore helper's extra commands not being modeled
+      by the flat `4 + 2*captures` formula — this exact gap was already
+      named as a deliberate, deferred refinement in decision 7's own
+      closing paragraph ("a future session tightening that formula
+      should account for the save/restore helper's own extra
+      commands"), so it is left as-is rather than expanded into a new
+      cost-model change this session. Added a permanent regression
+      check to `/tmp/mcaml_out/test_lambdas.py` (`check_tick_guard_
+      cost_integration`) asserting escaping-loop-limit < known-loop-
+      limit, so a future regression in the cost/tick_guard wiring
+      fails loudly instead of silently.
+
+      Verified end-to-end: all four `MCAML_STRICT_HOT` scenarios pass
+      — (a) Escaping-in-hot-loop + flag set → rejected; (b) same
+      program, flag unset → compiles (control); (c) Known/specialized
+      closure in the SAME hot self-tail loop + flag set → NOT rejected
+      (zero-cost, never reaches `IApply`); (d) Escaping closure with NO
+      loop anywhere in the program + flag set → NOT rejected
+      (escaping-but-cold is allowed). Full battery green: all ten
+      `/tmp` harnesses, five canaries byte-identical, every
+      `scripts/*.mcaml` file's compiled `.mcfunction` output AND exit
+      code byte-identical against a pre-session baseline (only
+      `test_lambdas.mcaml`'s stderr gained the new `[closure]` lines —
+      zero `.mcfunction` content changes anywhere), `MCAML_NO_CLOSURE_
+      SPEC=1`/`MCAML_O0=1` A/B re-verified.)
+- [x] F7. Tests, with one correction to the plan's own F7 line. (Session
+      5, commit `6adb298`. "Literal lambdas in HOFs specialize" was
+      already covered by `test_lambdas.mcaml`'s four Known-path entries
+      — no new test needed.
+
+      **Correction, not silently reinterpreted**: "closures captured in
+      ADTs take the apply path" as originally worded contradicts §13.12
+      decision 2, which REJECTS storing a lambda inside a Tuple/Record/
+      ADT-ctor field at TYPING time — there is no apply-path for this
+      shape in v1 at all; it never reaches `Closure_spec`/F5. Replaced
+      with three rejection probes (one per field shape decision 2
+      names — tuple, record, ADT constructor), each pinning the exact
+      typing-error message (`"closures cannot be stored in a tuple in
+      v1"` / `"...as a record field in v1"` / `"...as an ADT field in
+      v1"`).
+
+      **Second, pre-existing gap found while wiring these up** (not
+      introduced this session, but newly exercised by these specific
+      probes): `main.ml`'s top-level handler catches `Typing.Error` and
+      prints it, but never sets a nonzero exit code — every OTHER
+      reject-probe harness in this test suite (`test_param_types.py`,
+      etc.) already works around this via `rejected = returncode <> 0
+      OR "Error" in output`; `test_lambdas.py`'s own `run_reject_probe`
+      (written for `ref_then_call`'s `Failure`-based rejection, which
+      DOES set a nonzero exit code) predates this and used a stricter
+      `returncode <> 0` check that would have spuriously failed on a
+      pure typing rejection. Aligned it with the same lenient check the
+      rest of the suite already uses rather than changing `main.ml`'s
+      exit-code behavior (a broader change with its own blast radius,
+      not something this session's task list asked for).
+
+      Added four `MCAML_STRICT_HOT` tests per the F6 task's own
+      corrected wording: (a) Escaping-in-hot-loop + flag → reject;
+      (b) same program, flag unset → compile (control); (c) Known
+      closure in the same hot loop + flag → NOT reject; (d) Escaping
+      closure with no loop + flag → NOT reject. All committed to
+      `/tmp/mcaml_out/test_lambdas.py` (uncommitted to the repo, same
+      convention as every prior Phase F/G harness).)
 
 ### Phase G — Remaining ML conveniences
 - [ ] G1. Mutual recursion: `fun f ... and g ...`
@@ -4683,6 +4887,84 @@ knormal message stays exactly as-is; `test_lambdas.py`'s new
 `ref_then_call` probe pins it as an intentional negative test (rejected
 with the same message) so a future session doesn't silently regress or
 accidentally "fix" this boundary without re-opening the decision.
+
+**9. F6 decisions (diagnostics threading, hot-loop check placement,
+attribution completeness).** Settled while implementing F6, per the
+same protocol as decisions 1–8.
+
+*Report data lives in `closure_spec.ml`, populated in two passes, not
+one.* The F6 kickoff explicitly left open how escape-reason data
+threads from `Closure_spec.run` (Phase 2, where the resolution logic
+already lives) to the hot-loop annotation (which needs `Loop_detect`,
+only meaningful post-`Optimize.run` in Phase 3). Rejected building a
+separate whole-program forward-reachability analysis (tracing every
+`IClosureMake` to every possible use site independently of the
+existing resolution passes) as unnecessary: `rewrite_same_function` and
+`rewrite_callers` already visit every `IApply`/`ICall` site exactly
+once each to DO the specialization rewrite; recording
+`resolved_sites`/`escape_reason`/`site_functions` at the exact point
+each of those functions already succeeds or gives up is strictly
+cheaper and can't drift out of sync with the rewrite it's describing.
+The hot-loop annotation is the one piece that genuinely can't be
+computed in Phase 2 (no loop structure exists yet) — it is filled in
+by a second function, `Closure_spec.check_hot_loop`, called once per
+non-template function from `codegen.ml`'s `compile_cfg_to_files`
+between `Optimize.run` and `Regalloc_cfg.alloc`. This is the same hook
+point F6b's `MCAML_STRICT_HOT` check uses (see below) — one new small
+addition to an existing sequential call, not a second whole-table pass,
+per decision 7's reverted-pass-reordering lesson.
+
+*`site_functions` is a best-effort index, not a precise points-to map,
+and is documented as such.* For an ambiguous-control-flow-merge
+Escaping reason, there is no single runtime-resolvable lambda identity
+to attribute the eventual hot-loop annotation or `MCAML_STRICT_HOT`
+error message to — `site_functions` maps a lambda name to the SET of
+function names whose body holds an unresolved use possibly
+attributable to it, and both `check_hot_loop`'s annotation and its
+error message tag/list every candidate rather than picking one. This
+is explicitly NOT a claim of precision; it is a diagnostic
+convenience, and the code comments say so at both definition and every
+call site, so a future session doesn't mistake it for a real
+whole-program closure analysis.
+
+*Not every theoretically-possible escape reason is attributable at the
+CFG level, and that gap is left as documented rather than closed.* The
+plan's own candidate reason list included "stored in a ref" and
+"returned from a function [and later called]" — investigated and
+confirmed that BOTH already fail earlier, at knormal's pre-existing
+`Hashtbl.mem Typing.fun_sigs` defensive check (the same one decision 8
+already named for `ref_then_call`), so neither shape can ever reach
+`Closure_spec.run` with a live `IClosureMake`/`IApply` pair to
+attribute a reason to in the first place. `note_unresolved_closure_use`
+therefore only implements attribution for the reasons that ARE
+reachable (ambiguous merge, 2+-hop forwarding, self-tail forwarding,
+budget-exceeded); the other two are left as comments explaining why
+they're absent rather than dead, unreachable branches pretending to
+handle them.
+
+*`MCAML_STRICT_HOT`'s "detected natural loop OR TCO self-tail loop
+body" is one check, not two — confirmed by direct read, not assumed.*
+`Dominators.extended_succs` already treats a self-tail `TTail` as a
+back-edge to the function's own entry (`TTail (f,_) when f = cfg.fname
+-> [cfg.entry]`), so `Loop_detect.find_loops` already reports a TCO'd
+self-recursive function as a loop with `header = cfg.entry`, with no
+special-casing needed beyond what LICM's own preheader-insertion logic
+already relies on (per `loop_detect.ml`'s module doc: "for TCO'd
+self-recursive loops... the preheader is virtual"). `check_hot_loop`
+reuses this directly; it does NOT duplicate `main.ml`'s own
+`has_self_tail` (that check exists for a different purpose — deciding
+whether to prepend a `$tick_iters` budget guard at all — and remains
+untouched).
+
+*F6c: verified, not re-opened.* F5's own decision 7 already named the
+save/restore-helper-cost gap in `cost.ml`'s flat `IApply` formula as a
+deliberate, deferred refinement. This session confirmed the formula IS
+load-bearing (a comparative test shows an Escaping-closure loop
+getting a measurably LOWER, safer `tick_guard` iteration budget than
+an equivalent known-call loop) and left the flat formula exactly as
+F5 landed it — tightening it further was explicitly out of scope for
+"verify the F5 integration," and the residual drift is in the safe
+(conservative) direction, not a correctness hazard.
 
 ## 13. Escalation triggers
 
