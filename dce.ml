@@ -15,16 +15,6 @@
 
 open Cfg
 
-(* Mirror of regalloc_cfg.ml / liveness.ml's is_reserved, kept local for
-   module decoupling. *)
-let is_reserved (n : string) : bool =
-  n = "$ret" || n = "$arr_result" || n = "$tick_iters" ||
-  (String.length n >= 5 && String.sub n 0 5 = "$ref_") ||
-  (String.length n > 6
-   && String.sub n 0 6 = "param_"
-   && let suf = String.sub n 6 (String.length n - 6) in
-      suf <> "" && String.for_all (function '0'..'9' -> true | _ -> false) suf)
-
 (* An instruction is "side-effecting" if removing it would change program
    behavior even when its def is not live downstream.
 

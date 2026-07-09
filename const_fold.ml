@@ -28,17 +28,8 @@ let floor_div (a : int) (b : int) : int =
 let floor_mod (a : int) (b : int) : int =
   a - (floor_div a b) * b
 
-(* Copy of regalloc_cfg.is_reserved — reserved vregs cross CFG boundaries
-   invisibly and must never be rewritten or tracked as constants. *)
-let is_reserved (n : vreg) : bool =
-  n = "$ret" || n = "$arr_result" || n = "$tick_iters" ||
-  (String.length n >= 5 && String.sub n 0 5 = "$ref_") ||
-  (String.length n > 6
-   && String.sub n 0 6 = "param_"
-   && let suf = String.sub n 6 (String.length n - 6) in
-      suf <> "" && String.for_all (function '0'..'9' -> true | _ -> false) suf)
-
-(* Look up [v] in the constant map. Reserved vregs are never known. *)
+(* Look up [v] in the constant map. Reserved vregs ([Cfg.is_reserved])
+   are never known. *)
 let get (m : int M.t) (v : vreg) : int option =
   if is_reserved v then None else M.find_opt v m
 

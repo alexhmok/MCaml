@@ -268,6 +268,66 @@ let instr_uses (i : instr) : vreg list =
   | IClosureMake (_, _, caps) -> caps
   | IApply (_, c, args)       -> c :: args
 
+(* ---- shared pass utilities ---- *)
+
+(* Reserved vregs are skipped by every optimization and by regalloc:
+   they name fixed scoreboard slots that cross function (or pass)
+   boundaries, so renaming/merging/deleting them would break the
+   calling convention.
+     - $ret         return slot, written by every function on exit
+     - $arr_result  macro-getter scratch slot
+     - $tick_iters  tick_guard's per-tick loop budget counter
+     - $ref_*       user refs + strength-reduction carriers; SR's
+                    preheader temps live outside the blocks regalloc
+                    walks, so the whole prefix must stay identity-mapped
+     - param_<N>    call parameters (digit suffix required: a user vreg
+                    like "param_x" is NOT reserved)
+   Two passes deliberately do NOT use this predicate:
+     - unroll.ml treats every "param_"-prefixed name as reserved (no
+       digit check) — its clones must never rename anything that even
+       looks like a parameter carrier.
+     - inline.ml *does* rewrite param_N (to the caller's argument) and
+       only pins $ret/$arr_result/$tick_iters/$ref_*; see
+       [Inline.make_rewriter]. *)
+let is_reserved (n : vreg) : bool =
+  n = "$ret" || n = "$arr_result" || n = "$tick_iters" ||
+  (String.length n >= 5 && String.sub n 0 5 = "$ref_") ||
+  (String.length n > 6
+   && String.sub n 0 6 = "param_"
+   && let suf = String.sub n 6 (String.length n - 6) in
+      suf <> "" && String.for_all (function '0'..'9' -> true | _ -> false) suf)
+
+(* A block is reachable iff it is the entry block or has at least one
+   predecessor. This is load-bearing, not cosmetic: after full unrolling,
+   unroll.ml leaves the original body block in [cfg.blocks] with a stale
+   self-[TTail] terminator and empty [preds]. Any pass that scans
+   terminators (codegen emission, main.ml's has_self_tail → tick_guard,
+   cost estimation) MUST filter through this predicate, or the stale
+   TTail is mistaken for a live self-loop. *)
+let block_is_reachable (cfg : cfg_func) (b : block) : bool =
+  b.label = cfg.entry || b.preds <> []
+
+(* Reverse postorder from [cfg.entry], following [succs]. The merge label
+   on a [TBranch] is NOT a successor edge of the branch block itself (it's
+   reached via the then/else arms' own terminators), so DFS naturally
+   linearizes branch structure then-side, else-side, merge-side. Blocks
+   unreachable from entry (e.g. unroll's stale body block) do not appear. *)
+let reverse_postorder (cfg : cfg_func) : label list =
+  let n = Array.length cfg.blocks in
+  let visited = Array.make n false in
+  let post = ref [] in
+  let rec dfs (l : label) : unit =
+    if l >= 0 && l < n && not visited.(l) then begin
+      visited.(l) <- true;
+      List.iter dfs (succs cfg.blocks.(l).term);
+      post := l :: !post
+    end
+  in
+  dfs cfg.entry;
+  (* prepending each node after its successors yields postorder
+     accumulated in reverse — exactly RPO *)
+  !post
+
 (* ---- debug dump ---- *)
 
 let string_of_binop op =

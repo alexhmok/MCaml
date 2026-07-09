@@ -115,7 +115,11 @@ let resolve_lo_hi
       in
       loop None sites
 
-(* Reserved vreg names that are NOT renamed during clone prefixing. *)
+(* Reserved vreg names that are NOT renamed during clone prefixing.
+   Deliberately broader than [Cfg.is_reserved]: no digit-suffix check on
+   "param_", so ANY name that even looks like a parameter carrier is
+   left alone in the per-iteration clones. Do not "fix" this to the
+   shared predicate. *)
 let is_reserved (v : vreg) : bool =
   v = "$ret"
   || v = "$arr_result"

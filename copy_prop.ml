@@ -21,15 +21,6 @@ open Cfg
 
 module M = Map.Make(String)
 
-(* Same predicate as regalloc_cfg.ml's is_reserved. *)
-let is_reserved (n : vreg) : bool =
-  n = "$ret" || n = "$arr_result" || n = "$tick_iters" ||
-  (String.length n >= 5 && String.sub n 0 5 = "$ref_") ||
-  (String.length n > 6
-   && String.sub n 0 6 = "param_"
-   && let suf = String.sub n 6 (String.length n - 6) in
-      suf <> "" && String.for_all (function '0'..'9' -> true | _ -> false) suf)
-
 (* Remove every entry that mentions [d] as either key or value. *)
 let kill_def (m : vreg M.t) (d : vreg) : vreg M.t =
   let m = M.remove d m in

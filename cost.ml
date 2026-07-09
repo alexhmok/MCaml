@@ -126,11 +126,6 @@ let estimate_block (b : block) : int =
   List.fold_left (fun acc i -> acc + estimate i) 0 b.instrs
   + estimate_term b.term
 
-(* A block emits commands iff codegen_cfg considers it reachable: it is
-   the entry block, or some predecessor lists it. Unreachable join
-   blocks left over from KIf-with-tail-call branches contribute zero. *)
-let block_is_reachable (cfg : cfg_func) (b : block) : bool =
-  b.label = cfg.entry || b.preds <> []
 
 (* Whole-function estimate. Sums every reachable block, plus the
    M4-LICM preheader instructions (which codegen lifts into a wrapper

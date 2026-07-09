@@ -20,15 +20,6 @@
 open Cfg
 open Ast
 
-(* Duplicated from regalloc_cfg.ml to avoid cross-module coupling in M3a. *)
-let is_reserved (n : vreg) : bool =
-  n = "$ret" || n = "$arr_result" || n = "$tick_iters" ||
-  (String.length n >= 5 && String.sub n 0 5 = "$ref_") ||
-  (String.length n > 6
-   && String.sub n 0 6 = "param_"
-   && let suf = String.sub n 6 (String.length n - 6) in
-      suf <> "" && String.for_all (function '0'..'9' -> true | _ -> false) suf)
-
 module IntMap = Map.Make (Int)
 
 module BKey = struct

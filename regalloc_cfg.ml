@@ -36,32 +36,9 @@
 
 module VSet = Liveness.VSet
 
-(* ---- reserved-vreg predicate, copied from regalloc.ml ---- *)
+let is_reserved = Cfg.is_reserved
 
-let is_reserved (n : string) : bool =
-  n = "$ret" || n = "$arr_result" || n = "$tick_iters" ||
-  (String.length n >= 5 && String.sub n 0 5 = "$ref_") ||
-  (String.length n > 6
-   && String.sub n 0 6 = "param_"
-   && let suf = String.sub n 6 (String.length n - 6) in
-      suf <> "" && String.for_all (function '0'..'9' -> true | _ -> false) suf)
-
-(* ---- reverse-postorder linearization ---- *)
-
-let reverse_postorder (cfg : Cfg.cfg_func) : int list =
-  let n = Array.length cfg.blocks in
-  let visited = Array.make n false in
-  let order = ref [] in
-  let rec dfs l =
-    if not visited.(l) then begin
-      visited.(l) <- true;
-      let b = cfg.blocks.(l) in
-      List.iter dfs (Cfg.succs b.term);
-      order := l :: !order
-    end
-  in
-  dfs cfg.entry;
-  !order  (* already in RPO since we prepend on post-visit *)
+let reverse_postorder = Cfg.reverse_postorder
 
 (* ---- main allocation pass ---- *)
 

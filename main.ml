@@ -504,14 +504,11 @@ let () =
        the unrolled helper bumps $tick_iters and can yield via
        `schedule ... 1t ; return 0`, corrupting any caller that
        depended on the unrolled body running to completion.
-       [block_is_reachable] mirrors codegen_cfg.ml's emission gate. *)
-    let block_is_reachable (cfg : Cfg.cfg_func) (b : Cfg.block) : bool =
-      b.Cfg.label = cfg.Cfg.entry || b.Cfg.preds <> []
-    in
+       [Cfg.block_is_reachable] is codegen_cfg's emission gate. *)
     let has_self_tail (cfg : Cfg.cfg_func) : bool =
       Array.exists
         (fun b ->
-          block_is_reachable cfg b
+          Cfg.block_is_reachable cfg b
           && (match b.Cfg.term with
               | Cfg.TTail (f, _) when f = cfg.Cfg.fname -> true
               | _ -> false))
@@ -534,7 +531,7 @@ let () =
            what Tick_guard's [entry_file_name] targets. *)
         let body_cost =
           Array.fold_left (fun acc b ->
-            if block_is_reachable cfg b then acc + Cost.estimate_block b
+            if Cfg.block_is_reachable cfg b then acc + Cost.estimate_block b
             else acc)
             0 cfg.Cfg.blocks
         in

@@ -401,35 +401,6 @@ let emit_term (st : state) (prefix : string) (t : terminator) : unit =
 
 (* ---- block walk ---- *)
 
-(* A block is "reachable for emission" iff it is the entry block or has at
-   least one predecessor. This also rules out [TUnreachable]-bodied merge
-   blocks left behind when both branches of a KIf tail-call out (e.g.,
-   [relu_loop]). *)
-let block_is_reachable (cfg : cfg_func) (b : block) : bool =
-  b.label = cfg.entry || b.preds <> []
-
-(* Reverse postorder from [cfg.entry]. Follows [Cfg.succs]; the merge label
-   on a [TBranch] is NOT a successor edge of the branch block itself (it's
-   reached via the then/else arms' own terminators), so DFS naturally
-   linearizes the branch structure with then-side, else-side, merge-side
-   ordering. *)
-let reverse_postorder (cfg : cfg_func) : label list =
-  let visited = Hashtbl.create (Array.length cfg.blocks) in
-  let post = ref [] in
-  let rec dfs (l : label) : unit =
-    if not (Hashtbl.mem visited l) then begin
-      Hashtbl.add visited l ();
-      let b = cfg.blocks.(l) in
-      List.iter dfs (succs b.term);
-      post := l :: !post
-    end
-  in
-  dfs cfg.entry;
-  (* [post] is currently in reverse-postorder already because we prepended
-     each node after visiting its successors — that's postorder accumulated
-     in reverse, which is exactly RPO. *)
-  !post
-
 let emit_block (st : state) (b : block) : unit =
   if block_is_reachable st.cfg b then begin
     let prefix = build_guard_prefix b.guards in

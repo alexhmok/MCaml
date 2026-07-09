@@ -32,15 +32,7 @@ type instr_liveness = {
        just before the terminator executes. Length is (num_instrs + 1). *)
 }
 
-(* ---- reserved predicate (copy of regalloc.ml's; kept local for
-   module decoupling per the M2 plan) ---- *)
-let is_reserved (n : string) : bool =
-  n = "$ret" || n = "$arr_result" || n = "$tick_iters" ||
-  (String.length n >= 5 && String.sub n 0 5 = "$ref_") ||
-  (String.length n > 6
-   && String.sub n 0 6 = "param_"
-   && let suf = String.sub n 6 (String.length n - 6) in
-      suf <> "" && String.for_all (function '0'..'9' -> true | _ -> false) suf)
+let is_reserved = Cfg.is_reserved
 
 let add_if_tracked (v : Cfg.vreg) (s : VSet.t) : VSet.t =
   if is_reserved v then s else VSet.add v s
@@ -60,21 +52,7 @@ let step (live : VSet.t) (def : Cfg.vreg option) (use : VSet.t) : VSet.t =
   in
   VSet.union live' use
 
-(* ---- reverse postorder from entry ---- *)
-let reverse_postorder (cfg : Cfg.cfg_func) : int list =
-  let n = Array.length cfg.blocks in
-  let visited = Array.make n false in
-  let post = ref [] in
-  let rec dfs (l : int) =
-    if l >= 0 && l < n && not visited.(l) then begin
-      visited.(l) <- true;
-      let b = cfg.blocks.(l) in
-      List.iter dfs (Cfg.succs b.term);
-      post := l :: !post
-    end
-  in
-  dfs cfg.entry;
-  !post  (* already reversed because we prepend on the way up *)
+let reverse_postorder = Cfg.reverse_postorder
 
 (* ---- main analysis ---- *)
 let analyze (cfg : Cfg.cfg_func) : instr_liveness =
