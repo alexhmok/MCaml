@@ -173,6 +173,31 @@ let rec all_ints (es : expr list) : int list option =
        | None -> None)
   | _ -> None
 
+(* ---- shared arm shapes ----
+
+   The [normalize_to] match below repeats a handful of lowering shapes.
+   Each helper here is one shape, extracted verbatim from the arms that
+   used it. All of them (and the [and]-helpers after [normalize_to])
+   preserve the exact order of [new_temp] calls the original arms made —
+   $tN numbering is part of byte-identical output. *)
+
+(* Leaf-value shape: bind an already-computed value into the ambient
+   dest, or emit nothing when the result is discarded. *)
+let bind_or_unit (dest : string option) (kv : kexpr) : kexpr =
+  match dest with Some d -> KLet (d, kv, KUnit) | None -> KUnit
+
+(* Allocation shape (Closure/Tuple/ctor App/Record): chain the element
+   computations [ks], then allocate via [mk] into the dest. With no
+   ambient dest the allocation is dropped (pure expression; regions
+   reclaim) but the element computations still run for their effects,
+   mirroring the Cons arm. *)
+let seq_alloc (dest : string option) (ks : kexpr list)
+    (mk : string -> kexpr) : kexpr =
+  let seq body = List.fold_right (fun k acc -> KSeq (k, acc)) ks body in
+  match dest with
+  | None -> seq KUnit
+  | Some d -> seq (KLet (d, KUnit, mk d))
+
 (* Normalize an expression, writing the result to 'dest' if provided *)
 let rec normalize_to (dest : string option) (e : expr) : kexpr =
   match e with
@@ -190,13 +215,13 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
               (representable range is approximately [-32768, 32768))"
              f);
       let i = int_of_float scaled in
-      (match dest with Some d -> KLet(d, KInt i, KUnit) | None -> KUnit)
+      bind_or_unit dest (KInt i)
   | Int i ->
-      (match dest with Some d -> KLet(d, KInt i, KUnit) | None -> KUnit)
-      
-  | Bool b -> 
+      bind_or_unit dest (KInt i)
+
+  | Bool b ->
       let i = if b then 1 else 0 in
-      (match dest with Some d -> KLet(d, KInt i, KUnit) | None -> KUnit)
+      bind_or_unit dest (KInt i)
 
   | Var x when Typing.is_constructor x ->
       (* Phase D / D5: a bare nullary ctor (`Point`) parses as Var.
@@ -212,14 +237,14 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
        | None -> KUnit)
 
   | Var x ->
-      (match dest with Some d -> KLet(d, KVar x, KUnit) | None -> KUnit)
+      bind_or_unit dest (KVar x)
 
-  | Str s | Selector s -> 
-      (match dest with Some d -> KLet(d, KStr s, KUnit) | None -> KUnit)
+  | Str s | Selector s ->
+      bind_or_unit dest (KStr s)
 
-  | Coord(x, y, z) -> 
+  | Coord(x, y, z) ->
       let s = Printf.sprintf "%s %s %s" (str_of_coord x) (str_of_coord y) (str_of_coord z) in
-      (match dest with Some d -> KLet(d, KStr s, KUnit) | None -> KUnit)
+      bind_or_unit dest (KStr s)
 
   | Command c -> KCommand c (* Commands never return values *)
 
@@ -239,7 +264,7 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
       )
 
   | Unit ->
-      (match dest with Some d -> KLet(d, KInt 0, KUnit) | None -> KUnit)
+      bind_or_unit dest (KInt 0)
 
   | Let (x, App ("array_make", [n_expr; v_expr]), e2) ->
       (* Phase A dynamic-heap allocation.
@@ -301,9 +326,7 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
         try Hashtbl.find ref_env r
         with Not_found -> failwith ("!" ^ r ^ ": not a ref-bound variable")
       in
-      (match dest with
-       | Some d -> KLet(d, KVar slot, KUnit)
-       | None -> KUnit)
+      bind_or_unit dest (KVar slot)
 
   | Deref _ -> failwith "!: operand must be a ref-bound variable"
 
@@ -358,31 +381,11 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
           let n_rows = List.length rows in
           let n_cols = match rows with [] -> 0 | r :: _ -> List.length r in
           Hashtbl.replace arr_dims x (n_rows, Some n_cols);
-          let flat = List.concat rows in
-          (match all_ints flat with
-           | Some ks -> KArrLitConst(id, ks)
-           | None ->
-               (* Normalize each element to a fresh temp and chain them. *)
-               let temps = List.map (fun _ -> new_temp ()) flat in
-               let lit = KArrLitDyn(id, temps) in
-               List.fold_right2
-                 (fun el t acc ->
-                    let k_el = normalize_to (Some t) el in
-                    KSeq(k_el, acc))
-                 flat temps lit)
+          emit_arr_lit id (List.concat rows)
         end else begin
           let n = List.length elems in
           Hashtbl.replace arr_dims x (n, None);
-          (match all_ints elems with
-           | Some ks -> KArrLitConst(id, ks)
-           | None ->
-               let temps = List.map (fun _ -> new_temp ()) elems in
-               let lit = KArrLitDyn(id, temps) in
-               List.fold_right2
-                 (fun el t acc ->
-                    let k_el = normalize_to (Some t) el in
-                    KSeq(k_el, acc))
-                 elems temps lit)
+          emit_arr_lit id elems
         end
       in
       Hashtbl.replace arr_env x id;
@@ -668,18 +671,12 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
               fname name name)
         | _ -> ()
       ) captured_exprs;
-      let temps = List.map (fun _ -> new_temp ()) captured_exprs in
-      let ks = List.map2 (fun e t -> normalize_to (Some t) e) captured_exprs temps in
-      let seq body = List.fold_right (fun k acc -> KSeq (k, acc)) ks body in
-      (match dest with
-       | None -> seq KUnit
-       | Some d -> seq (KLet (d, KUnit, KClosureMake (d, fname, temps))))
+      let (temps, ks) = normalize_each captured_exprs in
+      seq_alloc dest ks (fun d -> KClosureMake (d, fname, temps))
 
   | Nil ->
       (* Empty list sentinel: -1, per §4.2. *)
-      (match dest with
-       | None -> KUnit
-       | Some d -> KLet(d, KInt (-1), KUnit))
+      bind_or_unit dest (KInt (-1))
 
   | Cons (h, t) ->
       (* Evaluate both operands into temps regardless of dest, mirroring
@@ -703,24 +700,10 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
                    KLet(d, KUnit, KCons(d, t_h, t_t)))))))
 
   | App ("head", [arg]) ->
-      let t_l = new_temp () in
-      let k_l = normalize_to (Some t_l) arg in
-      (match dest with
-       | None -> KLet(t_l, KUnit, k_l)
-       | Some d ->
-           KLet(t_l, KUnit,
-             KSeq(k_l,
-               KLet(d, KUnit, KHead(d, t_l)))))
+      macro_read dest arg (fun d t -> KHead (d, t))
 
   | App ("tail", [arg]) ->
-      let t_l = new_temp () in
-      let k_l = normalize_to (Some t_l) arg in
-      (match dest with
-       | None -> KLet(t_l, KUnit, k_l)
-       | Some d ->
-           KLet(t_l, KUnit,
-             KSeq(k_l,
-               KLet(d, KUnit, KTail(d, t_l)))))
+      macro_read dest arg (fun d t -> KTail (d, t))
 
   (* Phase N / N11: int<->float conversions. to_float(a) = a * 65536;
      to_int(a) = a / 65536 (truncates fractional part). Both lower to
@@ -729,25 +712,9 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
      to_float(a) overflows int32 for |a| >= 32768 — caller's
      responsibility since we don't emit a runtime check. *)
   | App ("to_float", [a]) ->
-      let t_a = new_temp () in
-      let t_scale = new_temp () in
-      let k_a = normalize_to (Some t_a) a in
-      let op_instr = match dest with
-        | Some d -> KLet(d, KBinOp(Mult, t_a, t_scale), KUnit)
-        | None -> KUnit in
-      KLet(t_a, KUnit,
-        KSeq(k_a,
-          KLet(t_scale, KInt 65536, op_instr)))
+      scale_binop dest Mult a
   | App ("to_int", [a]) ->
-      let t_a = new_temp () in
-      let t_scale = new_temp () in
-      let k_a = normalize_to (Some t_a) a in
-      let op_instr = match dest with
-        | Some d -> KLet(d, KBinOp(Div, t_a, t_scale), KUnit)
-        | None -> KUnit in
-      KLet(t_a, KUnit,
-        KSeq(k_a,
-          KLet(t_scale, KInt 65536, op_instr)))
+      scale_binop dest Div a
 
   (* Phase N §12.1 + Phase Math: identity bit-reinterpretation. Both
      directions lower to the same code as the inner expression — the
@@ -776,12 +743,8 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
          single-ctor signature with zero tag tests). With no ambient
          dest the allocation is dropped but element sub-expressions
          still evaluate (Cons/ctor precedent). *)
-      let temps = List.map (fun _ -> new_temp ()) es in
-      let ks = List.map2 (fun a t -> normalize_to (Some t) a) es temps in
-      let seq body = List.fold_right (fun k acc -> KSeq (k, acc)) ks body in
-      (match dest with
-       | None -> seq KUnit
-       | Some d -> seq (KLet (d, KUnit, KAdtAlloc (d, 0, temps))))
+      let (temps, ks) = normalize_each es in
+      seq_alloc dest ks (fun d -> KAdtAlloc (d, 0, temps))
 
   | Record fields ->
       (* D8: same {tag:0, f0...} cell as a tuple. Fields evaluate in
@@ -797,16 +760,13 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
       let with_temps = List.map (fun (f, e) -> (f, new_temp (), e)) fields in
       let ks =
         List.map (fun (_, t, e) -> normalize_to (Some t) e) with_temps in
-      let seq body = List.fold_right (fun k acc -> KSeq (k, acc)) ks body in
       let ordered =
         List.map (fun (f, _) ->
           let (_, t, _) =
             List.find (fun (f', _, _) -> f' = f) with_temps in
           t) decl
       in
-      (match dest with
-       | None -> seq KUnit
-       | Some d -> seq (KLet (d, KUnit, KAdtAlloc (d, 0, ordered))))
+      seq_alloc dest ks (fun d -> KAdtAlloc (d, 0, ordered))
 
   | Field (e, f) ->
       (* D8: r.x — single-field read through the obj_f<k> macro getter
@@ -814,14 +774,7 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
          the read is skipped (KFieldGet is never DCE'd, so emitting it
          would cost 3 dead commands). *)
       let (_, idx, _) = Hashtbl.find Typing.record_fields f in
-      let t_r = new_temp () in
-      let k_r = normalize_to (Some t_r) e in
-      (match dest with
-       | None -> KLet (t_r, KUnit, k_r)
-       | Some d ->
-           KLet (t_r, KUnit,
-             KSeq (k_r,
-               KLet (d, KUnit, KFieldGet (d, t_r, idx)))))
+      macro_read dest e (fun d t -> KFieldGet (d, t, idx))
 
   | App (f, args) when Typing.is_constructor f ->
       (* Phase D / D5: constructor application. Normalize every field
@@ -830,12 +783,8 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
          regions reclaim) but field sub-expressions still evaluate,
          mirroring the Cons arm. *)
       let (_, _, tag) = Hashtbl.find Typing.ctor_info f in
-      let temps = List.map (fun _ -> new_temp ()) args in
-      let ks = List.map2 (fun a t -> normalize_to (Some t) a) args temps in
-      let seq body = List.fold_right (fun k acc -> KSeq (k, acc)) ks body in
-      (match dest with
-       | None -> seq KUnit
-       | Some d -> seq (KLet (d, KUnit, KAdtAlloc (d, tag, temps))))
+      let (temps, ks) = normalize_each args in
+      seq_alloc dest ks (fun d -> KAdtAlloc (d, tag, temps))
 
   (* Phase F (F2 completion): calling a closure handle held in a local
      var/param. Lowers uniformly to KApply regardless of the eventual
@@ -916,6 +865,64 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
    KIf — scoreboard-only, one storage read per occurrence via KTagGet.
    The 1-cmd [execute if score ... matches <k>] form is the same
    future peephole B7 documented for is_nil. *)
+(* ---- shared arm shapes that recurse into [normalize_to] ---- *)
+
+(* Normalize each expression into its own fresh temp. Mints ALL the
+   temps first, then normalizes via List.map2 — exactly the order the
+   Closure/Tuple/ctor-App arms used. NOT interchangeable with
+   [emit_arr_lit]'s fold_right2 scheme below: the two normalize
+   sub-expressions in opposite orders, and nested [new_temp] calls
+   inside those sub-expressions make the order observable in $tN
+   numbering. *)
+and normalize_each (es : expr list) : string list * kexpr list =
+  let temps = List.map (fun _ -> new_temp ()) es in
+  let ks = List.map2 (fun e t -> normalize_to (Some t) e) es temps in
+  (temps, ks)
+
+(* Array-literal shape (1D and flattened matrix): constant fold to
+   KArrLitConst when every element is a literal int, else normalize
+   each element to a fresh temp and chain them. *)
+and emit_arr_lit (id : string) (elems : expr list) : kexpr =
+  match all_ints elems with
+  | Some ks -> KArrLitConst(id, ks)
+  | None ->
+      let temps = List.map (fun _ -> new_temp ()) elems in
+      let lit = KArrLitDyn(id, temps) in
+      List.fold_right2
+        (fun el t acc ->
+           let k_el = normalize_to (Some t) el in
+           KSeq(k_el, acc))
+        elems temps lit
+
+(* to_float / to_int shape: binop the operand against the Q16.16 scale
+   constant 65536 (Mult to widen, Div to truncate). *)
+and scale_binop (dest : string option) (op : binop) (a : expr) : kexpr =
+  let t_a = new_temp () in
+  let t_scale = new_temp () in
+  let k_a = normalize_to (Some t_a) a in
+  let op_instr = match dest with
+    | Some d -> KLet(d, KBinOp(op, t_a, t_scale), KUnit)
+    | None -> KUnit in
+  KLet(t_a, KUnit,
+    KSeq(k_a,
+      KLet(t_scale, KInt 65536, op_instr)))
+
+(* Single-operand macro-getter read shape (head/tail/Field): normalize
+   the object into a temp, then read through [mk] into the dest. With
+   no ambient dest the read is skipped (the getter ops are never DCE'd,
+   so emitting one would cost 3 dead commands) but the operand still
+   evaluates for its effects. *)
+and macro_read (dest : string option) (e : expr)
+    (mk : string -> string -> kexpr) : kexpr =
+  let t = new_temp () in
+  let k = normalize_to (Some t) e in
+  match dest with
+  | None -> KLet(t, KUnit, k)
+  | Some d ->
+      KLet(t, KUnit,
+        KSeq(k,
+          KLet(d, KUnit, mk d t)))
+
 and compile_match (dest : string option) (occs : string list)
     (rows : (Ast.pattern list * (string * string) list * Ast.expr) list)
     : kexpr =

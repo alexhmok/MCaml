@@ -45,7 +45,14 @@ val register_global_array : string -> string -> int -> unit
 val reseed_globals : unit -> unit
 val ref_env : (string, string) Hashtbl.t
 val all_ints : Ast.expr list -> int list option
+val bind_or_unit : string option -> kexpr -> kexpr
+val seq_alloc : string option -> kexpr list -> (string -> kexpr) -> kexpr
 val normalize_to : string option -> Ast.expr -> kexpr
+val normalize_each : Ast.expr list -> string list * kexpr list
+val emit_arr_lit : string -> Ast.expr list -> kexpr
+val scale_binop : string option -> Ast.binop -> Ast.expr -> kexpr
+val macro_read :
+  string option -> Ast.expr -> (string -> string -> kexpr) -> kexpr
 val compile_match :
   string option ->
   string list ->
