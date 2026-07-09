@@ -1,0 +1,12 @@
+; Builds every .ml in src/ into the mcaml compiler executable.
+; Every module has a checked-in .mli (full inferred signature via
+; `ocamlc -i`) so build artifacts stay in _build/ and interfaces are
+; explicit. lexer.ml / parser.ml / parser.mli are the checked-in
+; ocamllex/menhir output and are compiled as plain modules — regenerate
+; them manually (ocamllex lexer.mll; menhir parser.mly) when the
+; .mll/.mly change.
+; (flags (-g)) deliberately drops dune's :standard dev-profile warning
+; set so warnings match a plain ocamlc build (non-fatal defaults).
+(executable
+ (name main)
+ (flags (-g)))

@@ -69,19 +69,24 @@ Historical note: before Milestone 2 the codegen emitted Minecraft commands direc
 
 ## Build & run
 
-Dune project. Rebuild:
+Dune project. All OCaml sources live in `src/` (one `.mli` per `.ml`;
+the interfaces are full inferred signatures, so if you change a
+module's public shape, refresh its `.mli` with `ocamlc -i`). Build
+artifacts stay under `_build/` — never commit `.cmi`/`.cmo` next to the
+sources. Rebuild:
 
 ```
 cd /Users/alexmok/MCaml
-dune build          # builds _build/default/main.exe; ./mcaml is a symlink to it
+dune build          # builds _build/default/src/main.exe; ./mcaml is a symlink to it
 ```
 
 Dune resolves module ordering automatically — no hand-maintained module
-list. The checked-in `lexer.ml` / `parser.ml` / `parser.mli` are compiled
-as plain modules; when `lexer.mll` or `parser.mly` change, regenerate
-them manually first:
+list. The checked-in `src/lexer.ml` / `src/parser.ml` / `src/parser.mli`
+are compiled as plain modules; when `lexer.mll` or `parser.mly` change,
+regenerate them manually first:
 
 ```
+cd src
 ocamllex lexer.mll                                   # regenerate lexer.ml
 menhir parser.mly                                    # regenerate parser.ml/.mli
 ```
