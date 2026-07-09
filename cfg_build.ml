@@ -100,11 +100,6 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
       lower b a ~dest:None;
       lower b c ~dest
 
-  | Knormal.KAssign (n, rhs) ->
-      (* Knormal doesn't currently emit KAssign; handle defensively as
-         "lower rhs writing into n". *)
-      lower b rhs ~dest:(Some n)
-
   | Knormal.KIf (c, t, e) ->
       let parent = b.cur in
       let parent_guards = parent.guards in

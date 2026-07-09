@@ -8,10 +8,8 @@
      - compile_cfg_to_files : cfg_func   -> (fname, cmds) list
          (optimize -> regalloc -> codegen_cfg)
 
-   [compile_def] is kept as a convenience that pipes one into the other —
-   used only by the legacy dump path. The real driver in main.ml calls the
-   two halves separately so it can run Inline.run on the full function
-   table after Phase 1. *)
+   The driver in main.ml calls the two halves separately so it can run
+   Inline.run on the full function table after Phase 1. *)
 
 open Ast
 
@@ -34,8 +32,3 @@ let compile_cfg_to_files
   Closure_spec.check_hot_loop cfg;
   Regalloc_cfg.alloc cfg;
   Codegen_cfg.emit ?closure_layout cfg
-
-let compile_def (d : def) : (string * string list) list =
-  match compile_def_to_cfg d with
-  | None -> []
-  | Some cfg -> compile_cfg_to_files cfg

@@ -14,7 +14,6 @@ type kexpr =
   | KCommand of string
   | KBinOp of binop * string * string
   | KLet of string * kexpr * kexpr
-  | KAssign of string * kexpr  (* NEW: Explicit assignment *)
   | KIf of string * kexpr * kexpr
   | KSeq of kexpr * kexpr
   | KCall of string * string list

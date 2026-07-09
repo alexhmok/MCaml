@@ -212,14 +212,6 @@ let rec unify (t1 : typ) (t2 : typ) : unit =
 let unify_msg (t1 : typ) (t2 : typ) (msg : string) : unit =
   try unify t1 t2 with Unify_fail _ -> raise (Error msg)
 
-(* Unify on a new (Phase E) path: the default diagnostic names both
-   types (E8 quality requirement). *)
-let unify_types (t1 : typ) (t2 : typ) : unit =
-  try unify t1 t2
-  with Unify_fail (a, b) ->
-    raise (Error (Printf.sprintf "cannot unify %s with %s"
-                    (string_of_typ a) (string_of_typ b)))
-
 (* Fully resolve a typ, binding any still-unbound tvar to TInt
    (§13.10 decision 5 — sound under §13.1 uniform representation).
    This is the knormal-boundary zonk (E6) and the Region typ-ref

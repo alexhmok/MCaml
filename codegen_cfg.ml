@@ -1,8 +1,7 @@
 (* codegen_cfg.ml — CFG-driven code generator (Milestone 2, §7).
 
-   Consumes a post-regalloc [Cfg.cfg_func] and produces the same
-   [(mcfunction_name, commands)] list shape as the legacy
-   [Codegen.compile_def]. The first pair is the top-level function body; the
+   Consumes a post-regalloc [Cfg.cfg_func] and produces a
+   [(mcfunction_name, commands)] list. The first pair is the top-level function body; the
    remaining pairs are helper mcfunctions (save/restore frames for non-tail
    calls, per-array macro getters for dynamic array indexing).
 
