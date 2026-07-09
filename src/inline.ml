@@ -67,15 +67,6 @@ let size_of (f : cfg_func) : int =
 
 (* ---- vreg rewriting ---- *)
 
-let is_param_name (v : vreg) : int option =
-  let n = String.length v in
-  if n > 6 && String.sub v 0 6 = "param_" then
-    let suf = String.sub v 6 (n - 6) in
-    if suf <> "" && String.for_all (function '0'..'9' -> true | _ -> false) suf
-    then Some (int_of_string suf)
-    else None
-  else None
-
 let is_ref_slot v =
   String.length v >= 5 && String.sub v 0 5 = "$ref_"
 
@@ -84,38 +75,9 @@ let make_rewriter ~event_id ~(args : vreg array) : vreg -> vreg =
   fun v ->
     if v = "$ret" || v = "$arr_result" || v = "$tick_iters" || is_ref_slot v then v
     else
-      match is_param_name v with
+      match param_index v with
       | Some idx when idx >= 0 && idx < Array.length args -> args.(idx)
       | _ -> prefix ^ v
-
-let rewrite_instr (rw : vreg -> vreg) (i : instr) : instr =
-  match i with
-  | IConst (d, k)           -> IConst (rw d, k)
-  | ICopy (d, v)            -> ICopy (rw d, rw v)
-  | ICommand _ as c         -> c
-  | IBinOp (d, op, a, b)    -> IBinOp (rw d, op, rw a, rw b)
-  | ICall (d_opt, f, args)  -> ICall (Option.map rw d_opt, f, List.map rw args)
-  | IArrLitConst _ as x     -> x
-  | IArrLitDyn (id, temps)  -> IArrLitDyn (id, List.map rw temps)
-  | IArrGetStatic (d, id, k)-> IArrGetStatic (rw d, id, k)
-  | IArrGet (d, id, idx)    -> IArrGet (rw d, id, rw idx)
-  | IArrSetStatic (id, k, v)-> IArrSetStatic (id, k, rw v)
-  | IArrSet (id, idx, v)    -> IArrSet (id, rw idx, rw v)
-  | IHeapAllocConst (d, p, n) -> IHeapAllocConst (rw d, p, n)
-  | IHeapAlloc (d, p, n)    -> IHeapAlloc (rw d, p, rw n)
-  | IHeapGet (d, p, b, idx) -> IHeapGet (rw d, p, rw b, rw idx)
-  | IHeapSet (p, b, idx, v) -> IHeapSet (p, rw b, rw idx, rw v)
-  | ICons (d, h, t)         -> ICons (rw d, rw h, rw t)
-  | IHead (d, c)            -> IHead (rw d, rw c)
-  | ITail (d, c)            -> ITail (rw d, rw c)
-  | IAdtAlloc (d, tag, args) -> IAdtAlloc (rw d, tag, List.map rw args)
-  | ITagGet (d, c)          -> ITagGet (rw d, rw c)
-  | IFieldGet (d, c, k)     -> IFieldGet (rw d, rw c, k)
-  | IRegionEnter _ as x     -> x
-  | IRegionExit (k, None, ty) -> IRegionExit (k, None, ty)
-  | IRegionExit (k, Some r, ty) -> IRegionExit (k, Some (rw r), ty)
-  | IClosureMake (d, fname, caps) -> IClosureMake (rw d, fname, List.map rw caps)
-  | IApply (d_opt, cl, args) -> IApply (Option.map rw d_opt, rw cl, List.map rw args)
 
 let rewrite_guards (rw : vreg -> vreg) (gs : (vreg * polarity) list) =
   List.map (fun (v, p) -> (rw v, p)) gs
@@ -201,7 +163,7 @@ let splice_once
   b_src.term <- TJump (clone_label_of callee.entry);
 
   let cloned = Array.map (fun (cb : block) ->
-    let new_instrs = List.map (rewrite_instr rw) cb.instrs in
+    let new_instrs = List.map (map_instr_vregs rw) cb.instrs in
     let new_term = rewrite_term ~label_map ~kont_label rw cb.term in
     let new_guards = b_guards @ rewrite_guards rw cb.guards in
     {

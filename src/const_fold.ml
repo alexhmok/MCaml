@@ -197,19 +197,6 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
         | None, None       -> simplify_binop_neither m i d op a b
       end
 
-  | ICommand _ ->
-      (i, m, false)
-
-  | ICall (None, _, _) ->
-      (i, m, false)
-  | ICall (Some d, _, _) ->
-      (i, kill m d, false)
-
-  | IArrLitConst _ | IArrLitDyn _ ->
-      (i, m, false)
-
-  | IArrGetStatic (d, _, _) ->
-      (i, kill m d, false)
   | IArrGet (d, id, idx) ->
       (* When the index resolves to a constant, rewrite to a static get
          so SROA can promote the array. This is the bridge from unrolling
@@ -218,9 +205,6 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
        | Some k -> (IArrGetStatic (d, id, k), kill m d, true)
        | None -> (i, kill m d, false))
 
-  | IArrSetStatic _ ->
-      (* Side-effecting store, no dest to track. Leave as-is. *)
-      (i, m, false)
   | IArrSet (id, idx, v) ->
       (* Same bridge as IArrGet: if the runtime index is a known constant,
          rewrite to IArrSetStatic so SROA can promote static-only arrays. *)
@@ -228,31 +212,16 @@ let rewrite_instr (m : int M.t) (i : instr) : instr * int M.t * bool =
        | Some k -> (IArrSetStatic (id, k, v), m, true)
        | None -> (i, m, false))
 
-  (* Dynamic-heap ops: kill the dest in the const map (the value is read
-     from NBT at runtime, not knowable here). No static-variant rewrite
-     in A3 — the plan lists this as optional in §6. *)
-  | IHeapAllocConst (d, _, _) -> (i, kill m d, false)
-  | IHeapAlloc (d, _, _) -> (i, kill m d, false)
-  | IHeapGet (d, _, _, _) -> (i, kill m d, false)
-  | IHeapSet _ -> (i, m, false)
-  (* Phase B cons ops: result is a runtime pool index / NBT read, so the
-     dest never holds a statically-knowable int. Kill the dest. *)
-  | ICons (d, _, _) -> (i, kill m d, false)
-  | IHead (d, _) -> (i, kill m d, false)
-  | ITail (d, _) -> (i, kill m d, false)
-  (* Phase D ADT ops: same treatment — pool index / NBT read, never a
-     statically-knowable int. Kill the dest. *)
-  | IAdtAlloc (d, _, _) -> (i, kill m d, false)
-  | ITagGet (d, _) -> (i, kill m d, false)
-  | IFieldGet (d, _, _) -> (i, kill m d, false)
-  (* Phase C region brackets: no vreg def (both pass map unchanged). *)
-  | IRegionEnter _ -> (i, m, false)
-  | IRegionExit _ -> (i, m, false)
-  (* Phase F closure ops: neither a closure handle nor an apply result is
-     ever a statically-knowable int. Kill the dest like ICons/IAdtAlloc. *)
-  | IClosureMake (d, _, _) -> (i, kill m d, false)
-  | IApply (None, _, _) -> (i, m, false)
-  | IApply (Some d, _, _) -> (i, kill m d, false)
+  (* Every other instruction is left as-is and only touches the map via
+     its def (if any). Call results, static-array reads, dynamic-heap /
+     cons / ADT reads (runtime pool indices or NBT values), and closure
+     handles / apply results are never statically-knowable ints — kill
+     the dest. Def-less instructions (commands, stores, array literals,
+     region brackets) pass the map through unchanged. *)
+  | _ ->
+      (match instr_def i with
+       | Some d -> (i, kill m d, false)
+       | None -> (i, m, false))
 
 let run (cfg : cfg_func) : bool =
   let changed = ref false in

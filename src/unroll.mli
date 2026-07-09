@@ -8,8 +8,6 @@ val resolve_lo_hi :
   (string, Cfg.cfg_func) Hashtbl.t -> string -> (int * int) option
 val is_reserved : Cfg.vreg -> bool
 val rename : (Cfg.vreg, unit) Hashtbl.t -> string -> Cfg.vreg -> Cfg.vreg
-val rename_instr :
-  (Cfg.vreg, unit) Hashtbl.t -> string -> Cfg.instr -> Cfg.instr
 val detect_shape :
   Cfg.cfg_func -> (Cfg.label * Cfg.label * Cfg.label * Cfg.vreg) option
 val run_on_cfg : (string, Cfg.cfg_func) Hashtbl.t -> Cfg.cfg_func -> bool

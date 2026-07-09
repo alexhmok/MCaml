@@ -43,86 +43,18 @@ let rw (m : vreg M.t) (changed : bool ref) (v : vreg) : vreg =
    whether any operand was rewritten. *)
 let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
   let c = ref false in
-  let i' =
-    match i with
-    | IConst (_, _) -> i
-    | ICopy (d, v) ->
-        let v' = rw !m c v in
-        if v' = v then i else ICopy (d, v')
-    | ICommand _ -> i
-    | IBinOp (d, op, a, b) ->
-        let a' = rw !m c a in
-        let b' = rw !m c b in
-        if a' = a && b' = b then i else IBinOp (d, op, a', b')
-    | ICall (d_opt, f, args) ->
-        let args' = List.map (rw !m c) args in
-        if List.for_all2 (=) args args' then i else ICall (d_opt, f, args')
-    | IArrLitConst (_, _) -> i
-    | IArrLitDyn (id, temps) ->
-        let temps' = List.map (rw !m c) temps in
-        if List.for_all2 (=) temps temps' then i
-        else IArrLitDyn (id, temps')
-    | IArrGetStatic (_, _, _) -> i
-    | IArrGet (d, id, idx) ->
-        let idx' = rw !m c idx in
-        if idx' = idx then i else IArrGet (d, id, idx')
-    | IArrSetStatic (id, k, v) ->
-        let v' = rw !m c v in
-        if v' = v then i else IArrSetStatic (id, k, v')
-    | IArrSet (id, idx, v) ->
-        let idx' = rw !m c idx in
-        let v' = rw !m c v in
-        if idx' = idx && v' = v then i else IArrSet (id, idx', v')
-    | IHeapAllocConst _ -> i
-    | IHeapAlloc (d, p, n) ->
-        let n' = rw !m c n in
-        if n' = n then i else IHeapAlloc (d, p, n')
-    | IHeapGet (d, p, b, idx) ->
-        let b' = rw !m c b in
-        let idx' = rw !m c idx in
-        if b' = b && idx' = idx then i else IHeapGet (d, p, b', idx')
-    | IHeapSet (p, b, idx, v) ->
-        let b' = rw !m c b in
-        let idx' = rw !m c idx in
-        let v' = rw !m c v in
-        if b' = b && idx' = idx && v' = v then i
-        else IHeapSet (p, b', idx', v')
-    | ICons (d, h, t) ->
-        let h' = rw !m c h in
-        let t' = rw !m c t in
-        if h' = h && t' = t then i else ICons (d, h', t')
-    | IHead (d, c0) ->
-        let c0' = rw !m c c0 in
-        if c0' = c0 then i else IHead (d, c0')
-    | ITail (d, c0) ->
-        let c0' = rw !m c c0 in
-        if c0' = c0 then i else ITail (d, c0')
-    | IAdtAlloc (d, tag, args) ->
-        let args' = List.map (rw !m c) args in
-        if args' = args then i else IAdtAlloc (d, tag, args')
-    | ITagGet (d, c0) ->
-        let c0' = rw !m c c0 in
-        if c0' = c0 then i else ITagGet (d, c0')
-    | IFieldGet (d, c0, k) ->
-        let c0' = rw !m c c0 in
-        if c0' = c0 then i else IFieldGet (d, c0', k)
-    | IRegionEnter _ -> i
-    | IRegionExit (_, None, _) -> i
-    | IRegionExit (k, Some r, ty) ->
-        let r' = rw !m c r in
-        if r' = r then i else IRegionExit (k, Some r', ty)
-    | IClosureMake (d, fname, caps) ->
-        let caps' = List.map (rw !m c) caps in
-        if caps' = caps then i else IClosureMake (d, fname, caps')
-    | IApply (d_opt, cl, args) ->
-        let cl' = rw !m c cl in
-        let args' = List.map (rw !m c) args in
-        if cl' = cl && args' = args then i else IApply (d_opt, cl', args')
-  in
-  (* Now update the map based on the def of the (rewritten) instruction. *)
+  (* Rewrite every USE through the map. Defs are deliberately identity-
+     mapped: the dest may still be a key in the pre-update copy map
+     (e.g. ICopy(a,b) followed by IConst(a,5) — rewriting IConst's def
+     through {a→b} would misdirect the store). The changed flag fires
+     inside [rw] per substituted use, exactly as before. *)
+  let i' = map_instr_operands ~def:(fun d -> d) ~use:(rw !m c) i in
+  (* Now update the map based on the def of the (rewritten) instruction.
+     ICopy is the one instruction that can RECORD a fact; everything
+     else just kills its dest (if any, and non-reserved) as both key
+     and value. No-def instructions (commands, stores, region brackets)
+     leave the map untouched. *)
   (match i' with
-   | IConst (d, _) ->
-       if not (is_reserved d) then m := kill_def !m d
    | ICopy (d, v) ->
        if is_reserved d then
          (* Reserved dest: don't touch the map at all. *)
@@ -141,60 +73,16 @@ let rewrite_instr (m : vreg M.t ref) (i : instr) : instr * bool =
          m := kill_def !m d;
          m := M.add d v !m
        end
-   | ICommand _ -> ()
-   | IBinOp (d, _, _, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | ICall (None, _, _) -> ()
-   | ICall (Some d, _, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | IArrLitConst _ -> ()
-   | IArrLitDyn _ -> ()
-   | IArrGetStatic (d, _, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | IArrGet (d, _, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | IArrSetStatic _ | IArrSet _ -> ()
-   | IHeapAllocConst (d, _, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | IHeapAlloc (d, _, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | IHeapGet (d, _, _, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | IHeapSet _ -> ()
-   | ICons (d, _, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | IHead (d, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | ITail (d, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | IAdtAlloc (d, _, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | ITagGet (d, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | IFieldGet (d, _, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | IRegionEnter _ -> ()
-   | IRegionExit _ -> ()
-   | IClosureMake (d, _, _) ->
-       if not (is_reserved d) then m := kill_def !m d
-   | IApply (None, _, _) -> ()
-   | IApply (Some d, _, _) ->
-       if not (is_reserved d) then m := kill_def !m d);
+   | _ ->
+       (match instr_def i' with
+        | Some d when not (is_reserved d) -> m := kill_def !m d
+        | _ -> ()));
   (i', !c)
 
 (* Rewrite uses within a terminator. *)
 let rewrite_term (m : vreg M.t) (t : terminator) : terminator * bool =
   let c = ref false in
-  let t' =
-    match t with
-    | TRet | TJump _ | TUnreachable -> t
-    | TBranch (cond, lt, le, lj) ->
-        let cond' = rw m c cond in
-        if cond' = cond then t else TBranch (cond', lt, le, lj)
-    | TTail (f, args) ->
-        let args' = List.map (rw m c) args in
-        if List.for_all2 (=) args args' then t else TTail (f, args')
-  in
+  let t' = map_term_vregs (rw m c) t in
   (t', !c)
 
 let run (cfg : cfg_func) : bool =

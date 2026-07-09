@@ -61,6 +61,11 @@ val succs : terminator -> label list
 val term_uses : terminator -> vreg list
 val instr_def : instr -> vreg option
 val instr_uses : instr -> vreg list
+val map_instr_operands :
+  def:(vreg -> vreg) -> use:(vreg -> vreg) -> instr -> instr
+val map_instr_vregs : (vreg -> vreg) -> instr -> instr
+val map_term_vregs : (vreg -> vreg) -> terminator -> terminator
+val param_index : vreg -> int option
 val is_reserved : vreg -> bool
 val block_is_reachable : cfg_func -> block -> bool
 val reverse_postorder : cfg_func -> label list

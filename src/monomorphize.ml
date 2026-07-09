@@ -32,16 +32,6 @@ let sentinel_index (a : aid) : int =
   (* "#param3" -> 3 *)
   int_of_string (String.sub a 6 (String.length a - 6))
 
-(* "param_5" -> Some 5 *)
-let param_slot_index (v : vreg) : int option =
-  let n = String.length v in
-  if n > 6 && String.sub v 0 6 = "param_" then
-    let suf = String.sub v 6 (n - 6) in
-    if suf <> "" && String.for_all (function '0'..'9' -> true | _ -> false) suf
-    then Some (int_of_string suf)
-    else None
-  else None
-
 (* ---- cfg deep clone ---- *)
 
 let clone_block (b : block) : block =
@@ -102,7 +92,7 @@ let specialize_cfg
          | None -> v)
       else v
     end else
-    match param_slot_index v with
+    match param_index v with
     | Some old_idx ->
         (match param_remap.(old_idx) with
          | Some new_idx -> Printf.sprintf "param_%d" new_idx
@@ -113,44 +103,24 @@ let specialize_cfg
   in
   let orig_fname = cfg.fname in
   let rewrite_instr (i : instr) : instr =
-    let v = rewrite_param_vreg in
+    (* Two layers. First, every vreg operand goes through
+       rewrite_param_vreg via the shared walker — this includes ICall's
+       pseudo-arr "#arr:" args (kept so a later mono iteration can
+       specialize the nested call; sentinel inner aids become concrete
+       there; the call target is deliberately not renamed here).
+       Second, the aid field on the six static-array constructors goes
+       through rewrite_aid — dynamic-heap/cons/ADT/closure ops carry no
+       static-array aid (pool enums are opaque), so the walker alone
+       covers them. *)
+    let i = map_instr_vregs rewrite_param_vreg i in
     match i with
-    | IConst (d, k) -> IConst (v d, k)
-    | ICopy (d, s) -> ICopy (v d, v s)
-    | ICommand _ as c -> c
-    | IBinOp (d, op, a, b) -> IBinOp (v d, op, v a, v b)
-    | ICall (dopt, f, args) ->
-        (* Keep pseudo-arr args so a later mono iteration can specialize
-           this call. Sentinel inner aids are rewritten to concrete aids
-           via rewrite_param_vreg. Do not rename the target here — the
-           next iteration will handle that. *)
-        ICall ((match dopt with Some d -> Some (v d) | None -> None),
-               f, List.map v args)
     | IArrLitConst (id, ints) -> IArrLitConst (rewrite_aid id, ints)
-    | IArrLitDyn (id, temps) -> IArrLitDyn (rewrite_aid id, List.map v temps)
-    | IArrGetStatic (d, id, k) -> IArrGetStatic (v d, rewrite_aid id, k)
-    | IArrGet (d, id, idx) -> IArrGet (v d, rewrite_aid id, v idx)
-    | IArrSetStatic (id, k, vr) -> IArrSetStatic (rewrite_aid id, k, v vr)
-    | IArrSet (id, idx, vr) -> IArrSet (rewrite_aid id, v idx, v vr)
-    (* Dynamic-heap ops: rewrite operand vregs, pool enum is opaque.
-       Monomorphization only touches static-array aid sentinels. *)
-    | IHeapAllocConst (d, p, n) -> IHeapAllocConst (v d, p, n)
-    | IHeapAlloc (d, p, n) -> IHeapAlloc (v d, p, v n)
-    | IHeapGet (d, p, b, idx) -> IHeapGet (v d, p, v b, v idx)
-    | IHeapSet (p, b, idx, vr) -> IHeapSet (p, v b, v idx, v vr)
-    | ICons (d, h, t) -> ICons (v d, v h, v t)
-    | IHead (d, c) -> IHead (v d, v c)
-    | ITail (d, c) -> ITail (v d, v c)
-    | IAdtAlloc (d, tag, args) -> IAdtAlloc (v d, tag, List.map v args)
-    | ITagGet (d, c) -> ITagGet (v d, v c)
-    | IFieldGet (d, c, k) -> IFieldGet (v d, v c, k)
-    | IRegionEnter _ as x -> x
-    | IRegionExit (k, None, ty) -> IRegionExit (k, None, ty)
-    | IRegionExit (k, Some r, ty) -> IRegionExit (k, Some (v r), ty)
-    | IClosureMake (d, fname, caps) -> IClosureMake (v d, fname, List.map v caps)
-    | IApply (dopt, cl, args) ->
-        IApply ((match dopt with Some d -> Some (v d) | None -> None),
-                v cl, List.map v args)
+    | IArrLitDyn (id, temps) -> IArrLitDyn (rewrite_aid id, temps)
+    | IArrGetStatic (d, id, k) -> IArrGetStatic (d, rewrite_aid id, k)
+    | IArrGet (d, id, idx) -> IArrGet (d, rewrite_aid id, idx)
+    | IArrSetStatic (id, k, vr) -> IArrSetStatic (rewrite_aid id, k, vr)
+    | IArrSet (id, idx, vr) -> IArrSet (rewrite_aid id, idx, vr)
+    | _ -> i
   in
   let rewrite_term (t : terminator) : terminator =
     let v = rewrite_param_vreg in

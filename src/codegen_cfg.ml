@@ -134,9 +134,11 @@ let push_cmds (st : state) (prefix : string) (cmds : string list) : unit =
 (* Reserved-vreg predicate for filtering save/restore sets. We never save
    reserved slots: $ret carries the return value (and is overwritten by
    the call anyway), $arr_result is a transient scratch slot used by macro
-   helpers, and param_N is set per-call so its old value is meaningless. *)
+   helpers, and param_N is set per-call so its old value is meaningless.
+   This is [Cfg.is_reserved] ($ret, $arr_result, $tick_iters, $ref_*,
+   strict param_N) extended with codegen-only runtime slots. *)
 let is_reserved_slot (s : string) : bool =
-  s = "$ret" || s = "$arr_result" || s = "$tick_iters" ||
+  Cfg.is_reserved s ||
   s = "$scratch_next" || s = "$permheap_next" || s = "$objpool_next" ||
   s = "$arr_idx" ||
   (* Phase C §4.1: region save slots, one pair per nesting level
@@ -163,12 +165,7 @@ let is_reserved_slot (s : string) : bool =
      a whole-program constant (K_max_apply_args) sized by
      closure_layout.ml, not a small fixed set like the region levels. *)
   s = "$code" ||
-  (String.length s >= 11 && String.sub s 0 11 = "$apply_arg_") ||
-  (String.length s >= 5 && String.sub s 0 5 = "$ref_") ||
-  (String.length s > 6
-   && String.sub s 0 6 = "param_"
-   && let suf = String.sub s 6 (String.length s - 6) in
-      suf <> "" && String.for_all (function '0'..'9' -> true | _ -> false) suf)
+  (String.length s >= 11 && String.sub s 0 11 = "$apply_arg_")
 
 (* Compute the slots that must be saved across an ICall at position [i] in
    block [b]. Equals [live_after(b, i) \ {dest_of_call} \ reserved_slots].

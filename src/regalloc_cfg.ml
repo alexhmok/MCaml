@@ -174,47 +174,8 @@ let alloc (cfg : Cfg.cfg_func) : unit =
       | Some s -> s
       | None -> v
   in
-  let rewrite_instr (i : Cfg.instr) : Cfg.instr =
-    match i with
-    | IConst (d, k) -> IConst (rw d, k)
-    | ICopy (d, v) -> ICopy (rw d, rw v)
-    | ICommand _ as x -> x
-    | IBinOp (d, op, a, b) -> IBinOp (rw d, op, rw a, rw b)
-    | ICall (d_opt, f, args) ->
-        ICall ((match d_opt with Some d -> Some (rw d) | None -> None),
-               f, List.map rw args)
-    | IArrLitConst _ as x -> x
-    | IArrLitDyn (id, temps) -> IArrLitDyn (id, List.map rw temps)
-    | IArrGetStatic (d, id, k) -> IArrGetStatic (rw d, id, k)
-    | IArrGet (d, id, idx) -> IArrGet (rw d, id, rw idx)
-    | IArrSetStatic (id, k, v) -> IArrSetStatic (id, k, rw v)
-    | IArrSet (id, idx, v) -> IArrSet (id, rw idx, rw v)
-    | IHeapAllocConst (d, p, n) -> IHeapAllocConst (rw d, p, n)
-    | IHeapAlloc (d, p, n) -> IHeapAlloc (rw d, p, rw n)
-    | IHeapGet (d, p, b, idx) -> IHeapGet (rw d, p, rw b, rw idx)
-    | IHeapSet (p, b, idx, v) -> IHeapSet (p, rw b, rw idx, rw v)
-    | ICons (d, h, t) -> ICons (rw d, rw h, rw t)
-    | IHead (d, c) -> IHead (rw d, rw c)
-    | ITail (d, c) -> ITail (rw d, rw c)
-    | IAdtAlloc (d, tag, args) -> IAdtAlloc (rw d, tag, List.map rw args)
-    | ITagGet (d, c) -> ITagGet (rw d, rw c)
-    | IFieldGet (d, c, k) -> IFieldGet (rw d, rw c, k)
-    | IRegionEnter _ as x -> x
-    | IRegionExit (k, None, ty) -> IRegionExit (k, None, ty)
-    | IRegionExit (k, Some r, ty) -> IRegionExit (k, Some (rw r), ty)
-    | IClosureMake (d, fname, caps) -> IClosureMake (rw d, fname, List.map rw caps)
-    | IApply (d_opt, cl, args) ->
-        IApply ((match d_opt with Some d -> Some (rw d) | None -> None),
-                rw cl, List.map rw args)
-  in
-  let rewrite_term (t : Cfg.terminator) : Cfg.terminator =
-    match t with
-    | TRet | TUnreachable | TJump _ -> t
-    | TBranch (c, lt, le, lj) -> TBranch (rw c, lt, le, lj)
-    | TTail (f, args) -> TTail (f, List.map rw args)
-  in
   Array.iter (fun (b : Cfg.block) ->
-    b.instrs <- List.map rewrite_instr b.instrs;
-    b.term <- rewrite_term b.term;
+    b.instrs <- List.map (Cfg.map_instr_vregs rw) b.instrs;
+    b.term <- Cfg.map_term_vregs rw b.term;
     b.guards <- List.map (fun (v, p) -> (rw v, p)) b.guards
   ) cfg.blocks

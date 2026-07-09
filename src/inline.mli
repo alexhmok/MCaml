@@ -4,11 +4,9 @@ val event_counter : int ref
 val fresh_event : unit -> int
 val is_leaf : Cfg.cfg_func -> bool
 val size_of : Cfg.cfg_func -> int
-val is_param_name : Cfg.vreg -> int option
 val is_ref_slot : string -> bool
 val make_rewriter :
   event_id:int -> args:Cfg.vreg array -> Cfg.vreg -> Cfg.vreg
-val rewrite_instr : (Cfg.vreg -> Cfg.vreg) -> Cfg.instr -> Cfg.instr
 val rewrite_guards :
   (Cfg.vreg -> Cfg.vreg) ->
   (Cfg.vreg * Cfg.polarity) list -> (Cfg.vreg * Cfg.polarity) list

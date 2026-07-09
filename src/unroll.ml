@@ -138,37 +138,6 @@ let rename (body_defs : (vreg, unit) Hashtbl.t) (prefix : string) (v : vreg) : v
   else if Hashtbl.mem body_defs v then prefix ^ v
   else v
 
-let rename_instr (body_defs : (vreg, unit) Hashtbl.t) (prefix : string) (i : instr) : instr =
-  let r = rename body_defs prefix in
-  match i with
-  | IConst (d, k) -> IConst (r d, k)
-  | ICopy (d, s) -> ICopy (r d, r s)
-  | ICommand _ -> i
-  | IBinOp (d, op, a, b) -> IBinOp (r d, op, r a, r b)
-  | ICall (dopt, f, args) ->
-      ICall (Option.map r dopt, f, List.map r args)
-  | IArrLitConst _ -> i
-  | IArrLitDyn (id, ts) -> IArrLitDyn (id, List.map r ts)
-  | IArrGetStatic (d, id, k) -> IArrGetStatic (r d, id, k)
-  | IArrGet (d, id, idx) -> IArrGet (r d, id, r idx)
-  | IArrSetStatic (id, k, v) -> IArrSetStatic (id, k, r v)
-  | IArrSet (id, idx, v) -> IArrSet (id, r idx, r v)
-  | IHeapAllocConst (d, p, n) -> IHeapAllocConst (r d, p, n)
-  | IHeapAlloc (d, p, n) -> IHeapAlloc (r d, p, r n)
-  | IHeapGet (d, p, b, idx) -> IHeapGet (r d, p, r b, r idx)
-  | IHeapSet (p, b, idx, v) -> IHeapSet (p, r b, r idx, r v)
-  | ICons (d, h, t) -> ICons (r d, r h, r t)
-  | IHead (d, c) -> IHead (r d, r c)
-  | ITail (d, c) -> ITail (r d, r c)
-  | IAdtAlloc (d, tag, args) -> IAdtAlloc (r d, tag, List.map r args)
-  | ITagGet (d, c) -> ITagGet (r d, r c)
-  | IFieldGet (d, c, k) -> IFieldGet (r d, r c, k)
-  | IRegionEnter _ -> i
-  | IRegionExit (_, None, _) -> i
-  | IRegionExit (k, Some r0, ty) -> IRegionExit (k, Some (r r0), ty)
-  | IClosureMake (d, fname, caps) -> IClosureMake (r d, fname, List.map r caps)
-  | IApply (dopt, cl, args) -> IApply (Option.map r dopt, r cl, List.map r args)
-
 (* Detect a v1 unrollable shape. Returns
    [Some (header, body, exit, loop_var)] on success. The loop_var is the
    vreg defined as [ICopy(d, "param_0")] in the entry block — i.e., the
@@ -234,7 +203,10 @@ let run_on_cfg
                for k = 0 to n - 1 do
                  let lbl = iter_labels.(k) in
                  let prefix = Printf.sprintf "$un%d_" k in
-                 let cloned = List.map (rename_instr body_defs prefix) body_instrs in
+                 let cloned =
+                   List.map (map_instr_vregs (rename body_defs prefix))
+                     body_instrs
+                 in
                  let renamed_lv = rename body_defs prefix loop_var in
                  let init = IConst (renamed_lv, lo + k) in
                  let next_lbl =

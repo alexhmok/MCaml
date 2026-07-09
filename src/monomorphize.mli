@@ -2,7 +2,6 @@ val is_pseudo_arr : Cfg.vreg -> bool
 val aid_of_pseudo : Cfg.vreg -> string
 val is_sentinel_aid : Cfg.aid -> bool
 val sentinel_index : Cfg.aid -> int
-val param_slot_index : Cfg.vreg -> int option
 val clone_block : Cfg.block -> Cfg.block
 val clone_cfg : Cfg.cfg_func -> Cfg.cfg_func
 val specialize_cfg :

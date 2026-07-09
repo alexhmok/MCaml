@@ -268,7 +268,82 @@ let instr_uses (i : instr) : vreg list =
   | IClosureMake (_, _, caps) -> caps
   | IApply (_, c, args)       -> c :: args
 
+(* Structural operand map over one instruction: [def] is applied to the
+   destination vreg (if any), [use] to every read operand. Non-vreg
+   fields (aids, ints, pool tags, opcodes, callee names, types) are
+   untouched. IRegionExit's [ret] slot is classified as a use, matching
+   [instr_uses]/[instr_def] (it is read, and also rewritten in place at
+   runtime, but no pass tracks it as a def). The def/use split exists
+   for copy_prop, which must NOT rewrite defs (the dest may still be a
+   key in its pre-update copy map); every other caller substitutes the
+   same function in both positions via [map_instr_vregs]. Per-caller
+   filtering (reserved-slot skips etc.) lives in the callbacks, not
+   here — the walker is pure structure. *)
+let map_instr_operands ~(def : vreg -> vreg) ~(use : vreg -> vreg)
+    (i : instr) : instr =
+  match i with
+  | IConst (d, k)            -> IConst (def d, k)
+  | ICopy (d, v)             -> ICopy (def d, use v)
+  | ICommand _               -> i
+  | IBinOp (d, op, a, b)     -> IBinOp (def d, op, use a, use b)
+  | ICall (d_opt, f, args)   -> ICall (Option.map def d_opt, f, List.map use args)
+  | IArrLitConst _           -> i
+  | IArrLitDyn (id, temps)   -> IArrLitDyn (id, List.map use temps)
+  | IArrGetStatic (d, id, k) -> IArrGetStatic (def d, id, k)
+  | IArrGet (d, id, idx)     -> IArrGet (def d, id, use idx)
+  | IArrSetStatic (id, k, v) -> IArrSetStatic (id, k, use v)
+  | IArrSet (id, idx, v)     -> IArrSet (id, use idx, use v)
+  | IHeapAllocConst (d, p, n) -> IHeapAllocConst (def d, p, n)
+  | IHeapAlloc (d, p, n)     -> IHeapAlloc (def d, p, use n)
+  | IHeapGet (d, p, b, idx)  -> IHeapGet (def d, p, use b, use idx)
+  | IHeapSet (p, b, idx, v)  -> IHeapSet (p, use b, use idx, use v)
+  | ICons (d, h, t)          -> ICons (def d, use h, use t)
+  | IHead (d, c)             -> IHead (def d, use c)
+  | ITail (d, c)             -> ITail (def d, use c)
+  | IAdtAlloc (d, tag, args) -> IAdtAlloc (def d, tag, List.map use args)
+  | ITagGet (d, c)           -> ITagGet (def d, use c)
+  | IFieldGet (d, c, k)      -> IFieldGet (def d, use c, k)
+  | IRegionEnter _           -> i
+  | IRegionExit (_, None, _) -> i
+  | IRegionExit (k, Some r, ty) -> IRegionExit (k, Some (use r), ty)
+  | IClosureMake (d, fname, caps) -> IClosureMake (def d, fname, List.map use caps)
+  | IApply (d_opt, cl, args) ->
+      IApply (Option.map def d_opt, use cl, List.map use args)
+
+(* The common single-substitution case: apply [f] to every vreg operand,
+   def and use alike. This is the canonical walker for passes that
+   rename/rewrite vregs wholesale (inline, unroll, regalloc,
+   monomorphize) — their per-vreg functions do their own filtering. *)
+let map_instr_vregs (f : vreg -> vreg) (i : instr) : instr =
+  map_instr_operands ~def:f ~use:f i
+
+(* Vreg map over a terminator's operands ([term_uses] positions).
+   Labels are untouched. Two passes keep bespoke terminator rewriters
+   and must NOT be collapsed onto this: inline.ml (label mapping +
+   TRet→TJump kont redirection) and monomorphize.ml (TTail self-target
+   rename + array-arg dropping). *)
+let map_term_vregs (f : vreg -> vreg) (t : terminator) : terminator =
+  match t with
+  | TRet | TJump _ | TUnreachable -> t
+  | TBranch (c, lt, le, lj) -> TBranch (f c, lt, le, lj)
+  | TTail (fn, args) -> TTail (fn, List.map f args)
+
 (* ---- shared pass utilities ---- *)
+
+(* Strict parameter-slot parse: "param_" + non-empty all-digit suffix
+   yields [Some index]; anything else ("param_x", "param_", a bare
+   prefix match) yields [None]. Single source of truth for the
+   calling-convention name check — [is_reserved] below, codegen_cfg's
+   [is_reserved_slot], inline's argument substitution, and
+   monomorphize's param renumbering all route through it. *)
+let param_index (v : vreg) : int option =
+  let n = String.length v in
+  if n > 6 && String.sub v 0 6 = "param_" then
+    let suf = String.sub v 6 (n - 6) in
+    if String.for_all (function '0'..'9' -> true | _ -> false) suf
+    then Some (int_of_string suf)
+    else None
+  else None
 
 (* Reserved vregs are skipped by every optimization and by regalloc:
    they name fixed scoreboard slots that cross function (or pass)
@@ -292,10 +367,7 @@ let instr_uses (i : instr) : vreg list =
 let is_reserved (n : vreg) : bool =
   n = "$ret" || n = "$arr_result" || n = "$tick_iters" ||
   (String.length n >= 5 && String.sub n 0 5 = "$ref_") ||
-  (String.length n > 6
-   && String.sub n 0 6 = "param_"
-   && let suf = String.sub n 6 (String.length n - 6) in
-      suf <> "" && String.for_all (function '0'..'9' -> true | _ -> false) suf)
+  param_index n <> None
 
 (* A block is reachable iff it is the entry block or has at least one
    predecessor. This is load-bearing, not cosmetic: after full unrolling,
