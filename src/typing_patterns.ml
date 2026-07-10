@@ -272,6 +272,24 @@ let default_matrix (matrix : pattern list list) =
     | (PWild | PVar _) :: rest -> Some rest
     | _ -> None) matrix
 
+(* Witness reconstruction, shared by every specialized [useful] call
+   below: the recursive call answered on the EXPANDED row ([ar]
+   sub-columns spliced in front), so fold the first [ar] witness
+   entries back into one constructor pattern via [mk]. *)
+let rebuild (ar : int) (mk : pattern list -> pattern)
+    (w : pattern list option) : pattern list option =
+  match w with
+  | Some w -> let (wf, wr) = split_at ar w in Some (mk wf :: wr)
+  | None -> None
+
+(* The two composite [mk]s used from more than one arm. *)
+let rebuild_record (decl : (string * typ) list) =
+  rebuild (List.length decl)
+    (fun wf -> PRecord (List.map2 (fun (f, _) p -> (f, p)) decl wf))
+
+let rebuild_cons =
+  rebuild 2 (function [wh; wt] -> PCons (wh, wt) | _ -> assert false)
+
 (* Usefulness with witness: is there a value vector that [q] matches
    but no row of [matrix] does? Returns an example as a pattern vector
    (PWild = don't-care). Exhaustiveness = usefulness of the all-wild
@@ -300,12 +318,9 @@ let rec useful (tys : typ list) (matrix : pattern list list)
              | _ -> raw_fields
            in
            let ar = List.length fields in
-           (match useful (fields @ trest)
-                    (specialize_ctor c ar matrix) (ps @ qrest) with
-            | Some w ->
-                let (wf, wr) = split_at ar w in
-                Some (PCtor (c, wf) :: wr)
-            | None -> None)
+           rebuild ar (fun wf -> PCtor (c, wf))
+             (useful (fields @ trest)
+                (specialize_ctor c ar matrix) (ps @ qrest))
        | PInt i ->
            (match useful trest (specialize_int i matrix) qrest with
             | Some w -> Some (PInt i :: w)
@@ -320,12 +335,9 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                     match analysis")
            in
            let ar = List.length ps in
-           (match useful (ts @ trest)
-                    (specialize_tuple ar matrix) (ps @ qrest) with
-            | Some w ->
-                let (wf, wr) = split_at ar w in
-                Some (PTuple wf :: wr)
-            | None -> None)
+           rebuild ar (fun wf -> PTuple wf)
+             (useful (ts @ trest)
+                (specialize_tuple ar matrix) (ps @ qrest))
        | PRecord qfields ->
            let decl =
              match resolve ty with
@@ -336,16 +348,10 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                    "internal: record pattern on a non-record column in \
                     match analysis")
            in
-           let ar = List.length decl in
-           (match useful (List.map snd decl @ trest)
-                    (specialize_record decl matrix)
-                    (record_row decl qfields @ qrest) with
-            | Some w ->
-                let (wf, wr) = split_at ar w in
-                Some (PRecord
-                        (List.map2 (fun (f, _) p -> (f, p)) decl wf)
-                      :: wr)
-            | None -> None)
+           rebuild_record decl
+             (useful (List.map snd decl @ trest)
+                (specialize_record decl matrix)
+                (record_row decl qfields @ qrest))
        | PNil ->
            (match useful trest (specialize_nil matrix) qrest with
             | Some w -> Some (PNil :: w)
@@ -357,14 +363,9 @@ let rec useful (tys : typ list) (matrix : pattern list list)
            let elem =
              match resolve ty with TList e -> e | _ -> TInt
            in
-           (match useful (elem :: TList elem :: trest)
-                    (specialize_cons matrix) (ph :: pt :: qrest) with
-            | Some w ->
-                let (wf, wr) = split_at 2 w in
-                (match wf with
-                 | [wh; wt] -> Some (PCons (wh, wt) :: wr)
-                 | _ -> assert false)
-            | None -> None)
+           rebuild_cons
+             (useful (elem :: TList elem :: trest)
+                (specialize_cons matrix) (ph :: pt :: qrest))
        | PWild | PVar _ ->
            let head_ctor_names =
              List.filter_map (fun row ->
@@ -389,16 +390,10 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                     matrix
                 in
                 if has_rec then
-                  (match useful (List.map snd decl @ trest)
-                           (specialize_record decl matrix)
-                           (wilds ar @ qrest) with
-                   | Some w ->
-                       let (wf, wr) = split_at ar w in
-                       Some (PRecord
-                               (List.map2 (fun (f, _) p -> (f, p))
-                                  decl wf)
-                             :: wr)
-                   | None -> None)
+                  rebuild_record decl
+                    (useful (List.map snd decl @ trest)
+                       (specialize_record decl matrix)
+                       (wilds ar @ qrest))
                 else
                   (match useful trest (default_matrix matrix) qrest with
                    | Some w -> Some (PWild :: w)
@@ -415,13 +410,10 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                     List.map (subst_typarams mapping) raw_fields
                   in
                   let ar = List.length fields in
-                  match useful (fields @ trest)
-                          (specialize_ctor cname ar matrix)
-                          (wilds ar @ qrest) with
-                  | Some w ->
-                      let (wf, wr) = split_at ar w in
-                      Some (PCtor (cname, wf) :: wr)
-                  | None -> None
+                  rebuild ar (fun wf -> PCtor (cname, wf))
+                    (useful (fields @ trest)
+                       (specialize_ctor cname ar matrix)
+                       (wilds ar @ qrest))
                 in
                 let complete =
                   List.for_all
@@ -461,15 +453,10 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                   (match useful trest (specialize_nil matrix) qrest with
                    | Some w -> Some (PNil :: w)
                    | None ->
-                       (match useful (elem :: TList elem :: trest)
-                                (specialize_cons matrix)
-                                (PWild :: PWild :: qrest) with
-                        | Some w ->
-                            let (wf, wr) = split_at 2 w in
-                            (match wf with
-                             | [wh; wt] -> Some (PCons (wh, wt) :: wr)
-                             | _ -> assert false)
-                        | None -> None))
+                       rebuild_cons
+                         (useful (elem :: TList elem :: trest)
+                            (specialize_cons matrix)
+                            (PWild :: PWild :: qrest)))
                 else
                   (match useful trest (default_matrix matrix) qrest with
                    | Some w ->
@@ -492,13 +479,10 @@ let rec useful (tys : typ list) (matrix : pattern list list)
                     matrix
                 in
                 if has_tuple then
-                  (match useful (ts @ trest)
-                           (specialize_tuple ar matrix)
-                           (wilds ar @ qrest) with
-                   | Some w ->
-                       let (wf, wr) = split_at ar w in
-                       Some (PTuple wf :: wr)
-                   | None -> None)
+                  rebuild ar (fun wf -> PTuple wf)
+                    (useful (ts @ trest)
+                       (specialize_tuple ar matrix)
+                       (wilds ar @ qrest))
                 else
                   (match useful trest (default_matrix matrix) qrest with
                    | Some w -> Some (PWild :: w)

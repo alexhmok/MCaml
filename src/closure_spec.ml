@@ -48,6 +48,9 @@
 
 open Cfg
 
+(* Hashtbl lookup with a default for the miss case. *)
+let find_or tbl k default = try Hashtbl.find tbl k with Not_found -> default
+
 (* ---- per-function def bookkeeping (shared by both cases) ---- *)
 
 type def_info = {
@@ -65,9 +68,9 @@ let collect_defs (cfg : cfg_func) : def_info =
   let def_instr = Hashtbl.create 16 in
   let all_defs = Hashtbl.create 16 in
   let note d i =
-    Hashtbl.replace def_count d (1 + (try Hashtbl.find def_count d with Not_found -> 0));
+    Hashtbl.replace def_count d (1 + find_or def_count d 0);
     if not (Hashtbl.mem def_instr d) then Hashtbl.replace def_instr d i;
-    Hashtbl.replace all_defs d (i :: (try Hashtbl.find all_defs d with Not_found -> []))
+    Hashtbl.replace all_defs d (i :: find_or all_defs d [])
   in
   Array.iter (fun (b : block) ->
     List.iter (fun i -> match instr_def i with
@@ -76,27 +79,36 @@ let collect_defs (cfg : cfg_func) : def_info =
   ) cfg.blocks;
   { def_count; def_instr; all_defs }
 
-(* Resolve [v]'s origin within one function: [Some (lam_fname, captures)]
-   iff [v] is defined exactly once and that definition is (transitively,
-   through single-def ICopy chains) an IClosureMake. Cycle-safe via a
-   visited set (pathological input only; well-formed programs never
-   cycle here). *)
-let resolve_origin (info : def_info) (v : vreg) : (string * vreg list) option =
+(* Follow single-def ICopy links from [v] to the end of the chain and
+   return the terminal vreg. Cycle-safe via a visited set (pathological
+   input only; well-formed programs never cycle here): a revisit returns
+   the revisited vreg, whose def is a single-def ICopy, so both callers'
+   terminal checks below fail exactly as their old early-exits did. *)
+let chase_copies (info : def_info) (v : vreg) : vreg =
   let visited = Hashtbl.create 8 in
   let rec go v =
-    if Hashtbl.mem visited v then None
+    if Hashtbl.mem visited v then v
     else begin
       Hashtbl.replace visited v ();
-      match Hashtbl.find_opt info.def_count v with
-      | Some 1 ->
-          (match Hashtbl.find_opt info.def_instr v with
-           | Some (IClosureMake (_, fname, caps)) -> Some (fname, caps)
-           | Some (ICopy (_, s)) -> go s
-           | _ -> None)
-      | _ -> None
+      match Hashtbl.find_opt info.def_count v,
+            Hashtbl.find_opt info.def_instr v with
+      | Some 1, Some (ICopy (_, s)) -> go s
+      | _ -> v
     end
   in
   go v
+
+(* Resolve [v]'s origin within one function: [Some (lam_fname, captures)]
+   iff [v] is defined exactly once and that definition is (transitively,
+   through single-def ICopy chains) an IClosureMake. *)
+let resolve_origin (info : def_info) (v : vreg) : (string * vreg list) option =
+  let t = chase_copies info v in
+  match Hashtbl.find_opt info.def_count t with
+  | Some 1 ->
+      (match Hashtbl.find_opt info.def_instr t with
+       | Some (IClosureMake (_, fname, caps)) -> Some (fname, caps)
+       | _ -> None)
+  | _ -> None
 
 (* ---- F6a: per-lambda specialize/escape diagnostic report ----
 
@@ -182,26 +194,15 @@ let note_escape (lam_fname : string) (fname : string) (reason : string) : unit =
    escape reason is attributable at the CFG level; documented as a
    known, deliberate gap rather than silently pretended-complete. *)
 let note_unresolved_closure_use (info : def_info) (fname : string) (v : vreg) : unit =
-  let visited = Hashtbl.create 8 in
-  let rec go v =
-    if Hashtbl.mem visited v then ()
-    else begin
-      Hashtbl.replace visited v ();
-      match Hashtbl.find_opt info.def_count v with
-      | Some 1 ->
-          (match Hashtbl.find_opt info.def_instr v with
-           | Some (ICopy (_, s)) -> go s
-           | _ -> ())
-      | Some n when n <> 1 ->
-          List.iter (fun i -> match i with
-            | IClosureMake (_, lam_fname, _) ->
-                note_escape lam_fname fname "ambiguous control-flow merge"
-            | _ -> ()
-          ) (try Hashtbl.find info.all_defs v with Not_found -> [])
-      | _ -> ()
-    end
-  in
-  go v
+  let t = chase_copies info v in
+  match Hashtbl.find_opt info.def_count t with
+  | Some n when n <> 1 ->
+      List.iter (fun i -> match i with
+        | IClosureMake (_, lam_fname, _) ->
+            note_escape lam_fname fname "ambiguous control-flow merge"
+        | _ -> ()
+      ) (find_or info.all_defs t [])
+  | _ -> ()
 
 (* ---- same-function case ---- *)
 
@@ -311,7 +312,7 @@ let ensure_clone
   let key = mangle callee_name resolved in
   if Hashtbl.mem clones key then Some key
   else begin
-    let n = try Hashtbl.find clone_count callee_name with Not_found -> 0 in
+    let n = find_or clone_count callee_name 0 in
     if n >= limit then None
     else begin
       Hashtbl.replace clone_count callee_name (n + 1);
@@ -672,7 +673,7 @@ let print_report () : unit =
           Printf.eprintf "[closure] %s: specialized (%d call site%s)\n%!"
             lam_fname e.resolved_sites (if e.resolved_sites = 1 then "" else "s")
       | Some reason ->
-          let caps = try Hashtbl.find caps_count lam_fname with Not_found -> 0 in
+          let caps = find_or caps_count lam_fname 0 in
           let cost = 4 + 2 * caps in
           let hot = match e.hot_loop with
             | Some l -> Printf.sprintf ", inside hot loop %s" l

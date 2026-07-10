@@ -62,6 +62,14 @@ val specialize_record :
 val specialize_nil : Ast.pattern list list -> Ast.pattern list list
 val specialize_cons : Ast.pattern list list -> Ast.pattern list list
 val default_matrix : Ast.pattern list list -> Ast.pattern list list
+val rebuild :
+  int ->
+  (Ast.pattern list -> Ast.pattern) ->
+  Ast.pattern list option -> Ast.pattern list option
+val rebuild_record :
+  (string * Ast.typ) list ->
+  Ast.pattern list option -> Ast.pattern list option
+val rebuild_cons : Ast.pattern list option -> Ast.pattern list option
 val useful :
   Ast.typ list ->
   Ast.pattern list list -> Ast.pattern list -> Ast.pattern list option
