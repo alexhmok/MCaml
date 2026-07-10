@@ -67,8 +67,7 @@ let size_of (f : cfg_func) : int =
 
 (* ---- vreg rewriting ---- *)
 
-let is_ref_slot v =
-  String.length v >= 5 && String.sub v 0 5 = "$ref_"
+let is_ref_slot v = String.starts_with ~prefix:"$ref_" v
 
 let make_rewriter ~event_id ~(args : vreg array) : vreg -> vreg =
   let prefix = Printf.sprintf "$in%d_" event_id in

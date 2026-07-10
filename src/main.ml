@@ -484,9 +484,7 @@ let reset_cmds = [
 let append_reset (name : string)
     (files : (string * string list) list)
     : (string * string list) list =
-  let body_name = name ^ "__body" in
-  let has_body = List.exists (fun (f, _) -> f = body_name) files in
-  let target = if has_body then body_name else name in
+  let target = Tick_guard.entry_file_name files name in
   List.map (fun (f, cmds) ->
     if f = target then (f, cmds @ reset_cmds) else (f, cmds)
   ) files

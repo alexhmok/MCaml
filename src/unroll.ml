@@ -124,8 +124,8 @@ let is_reserved (v : vreg) : bool =
   v = "$ret"
   || v = "$arr_result"
   || v = "$tick_iters"
-  || (String.length v >= 6 && String.sub v 0 6 = "param_")
-  || (String.length v >= 5 && String.sub v 0 5 = "$ref_")
+  || String.starts_with ~prefix:"param_" v
+  || String.starts_with ~prefix:"$ref_" v
 
 (* Rename only body-defined vregs; everything else (reserved, or
    loop-invariant vregs defined in the header/preheader) is left

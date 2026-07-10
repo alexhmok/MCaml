@@ -82,7 +82,7 @@ type basic_iv = {
    param_<decimal> names that actually occur the two agree, but this
    pass keeps its historical semantics. *)
 let param_slot_of (s : vreg) : int option =
-  if String.length s >= 6 && String.sub s 0 6 = "param_" then
+  if String.starts_with ~prefix:"param_" s then
     (try Some (int_of_string (String.sub s 6 (String.length s - 6)))
      with Failure _ -> None)
   else None
@@ -109,7 +109,7 @@ let param_copies_in_entry (cfg : cfg_func) : (vreg * int) list =
   List.iter (fun instr ->
     match instr with
     | ICopy (d, s)
-      when String.length s >= 6 && String.sub s 0 6 = "param_" ->
+      when String.starts_with ~prefix:"param_" s ->
         (* The prefix-only guard (not [param_slot_of s <> None]) is
            load-bearing: a prefix-matching source with an unparsable
            suffix (e.g. a user var alpha-renamed to "param_x_7") takes

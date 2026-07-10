@@ -363,7 +363,9 @@ let ensure_clone
          cases that check doesn't rule out, not dead code). *)
       let entry_blk = cfg.blocks.(cfg.entry) in
       entry_blk.instrs <- List.filter_map (fun i -> match i with
-        | ICopy (d, s) when String.length s > 6 && String.sub s 0 6 = "param_" ->
+        | ICopy (d, s)
+          when String.length s > 6
+               && String.starts_with ~prefix:"param_" s ->
             (match int_of_string_opt (String.sub s 6 (String.length s - 6)) with
              | Some k when k < orig_arity ->
                  if List.mem k resolved_idxs then None

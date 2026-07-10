@@ -19,14 +19,14 @@ open Cfg
 (* ---- predicates & helpers ---- *)
 
 let is_pseudo_arr (v : vreg) : bool =
-  String.length v >= 5 && String.sub v 0 5 = "#arr:"
+  String.starts_with ~prefix:"#arr:" v
 
 let aid_of_pseudo (v : vreg) : string =
   (* strip the "#arr:" prefix *)
   String.sub v 5 (String.length v - 5)
 
 let is_sentinel_aid (a : aid) : bool =
-  String.length a >= 6 && String.sub a 0 6 = "#param"
+  String.starts_with ~prefix:"#param" a
 
 let sentinel_index (a : aid) : int =
   (* "#param3" -> 3 *)

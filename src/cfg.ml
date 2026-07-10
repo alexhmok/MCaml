@@ -338,7 +338,7 @@ let map_term_vregs (f : vreg -> vreg) (t : terminator) : terminator =
    monomorphize's param renumbering all route through it. *)
 let param_index (v : vreg) : int option =
   let n = String.length v in
-  if n > 6 && String.sub v 0 6 = "param_" then
+  if n > 6 && String.starts_with ~prefix:"param_" v then
     let suf = String.sub v 6 (n - 6) in
     if String.for_all (function '0'..'9' -> true | _ -> false) suf
     then Some (int_of_string suf)
@@ -366,7 +366,7 @@ let param_index (v : vreg) : int option =
        [Inline.make_rewriter]. *)
 let is_reserved (n : vreg) : bool =
   n = "$ret" || n = "$arr_result" || n = "$tick_iters" ||
-  (String.length n >= 5 && String.sub n 0 5 = "$ref_") ||
+  String.starts_with ~prefix:"$ref_" n ||
   param_index n <> None
 
 (* A block is reachable iff it is the entry block or has at least one

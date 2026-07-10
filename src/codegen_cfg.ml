@@ -179,7 +179,7 @@ let is_reserved_slot (s : string) : bool =
      a whole-program constant (K_max_apply_args) sized by
      closure_layout.ml, not a small fixed set like the region levels. *)
   s = "$code" ||
-  (String.length s >= 11 && String.sub s 0 11 = "$apply_arg_")
+  String.starts_with ~prefix:"$apply_arg_" s
 
 (* Compute the slots that must be saved across an ICall at position [i] in
    block [b]. Equals [live_after(b, i) \ {dest_of_call} \ reserved_slots].

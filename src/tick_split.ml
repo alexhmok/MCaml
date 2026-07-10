@@ -58,12 +58,10 @@ let budget () : int =
    walker helpers used to get split exactly this way, since only the
    [_call<N>]/[_get] shapes were excluded here). *)
 let has_suffix (s : string) (suf : string) : bool =
-  let ns = String.length s and nu = String.length suf in
-  ns >= nu && String.sub s (ns - nu) nu = suf
+  String.ends_with ~suffix:suf s
 
 let has_prefix (s : string) (pre : string) : bool =
-  let ns = String.length s and np = String.length pre in
-  ns >= np && String.sub s 0 np = pre
+  String.starts_with ~prefix:pre s
 
 let is_call_helper (name : string) : bool =
   let n = String.length name in

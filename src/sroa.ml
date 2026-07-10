@@ -40,12 +40,12 @@ let no_sroa = Cfg.pass_disabled "MCAML_NO_SROA"
 let pseudo_arr_aid (v : vreg) : aid option =
   let p = "#arr:" in
   let lp = String.length p in
-  if String.length v >= lp && String.sub v 0 lp = p
+  if String.starts_with ~prefix:p v
   then Some (String.sub v lp (String.length v - lp))
   else None
 
 let is_sentinel_aid (a : aid) : bool =
-  String.length a >= 6 && String.sub a 0 6 = "#param"
+  String.starts_with ~prefix:"#param" a
 
 (* Per-aid info we collect in a single pass. *)
 type info = {
