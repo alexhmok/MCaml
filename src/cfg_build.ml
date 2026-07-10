@@ -143,68 +143,52 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
       seal b.cur (TTail (f, args))
 
   | Knormal.KArrLitConst (id, ints) ->
-      let _ = dest in
       add_instr b.cur (IArrLitConst (id, ints))
 
   | Knormal.KArrLitDyn (id, temps) ->
-      let _ = dest in
       add_instr b.cur (IArrLitDyn (id, temps))
 
   | Knormal.KArrGetStatic (d, id, k_idx) ->
       (* This kexpr carries its own dest; ignore ambient [dest]. *)
-      let _ = dest in
       add_instr b.cur (IArrGetStatic (d, id, k_idx))
 
   | Knormal.KArrGet (d, id, idx) ->
-      let _ = dest in
       add_instr b.cur (IArrGet (d, id, idx))
 
   | Knormal.KArrSetStatic (id, k_idx, v) ->
-      let _ = dest in
       add_instr b.cur (IArrSetStatic (id, k_idx, v))
 
   | Knormal.KArrSet (id, idx, v) ->
-      let _ = dest in
       add_instr b.cur (IArrSet (id, idx, v))
 
   | Knormal.KDynAllocConst (d, p, n) ->
-      let _ = dest in
       add_instr b.cur (IHeapAllocConst (d, p, n))
 
   | Knormal.KDynAlloc (d, p, n) ->
-      let _ = dest in
       add_instr b.cur (IHeapAlloc (d, p, n))
 
   | Knormal.KHeapGet (d, p, base, idx) ->
-      let _ = dest in
       add_instr b.cur (IHeapGet (d, p, base, idx))
 
   | Knormal.KHeapSet (p, base, idx, v) ->
-      let _ = dest in
       add_instr b.cur (IHeapSet (p, base, idx, v))
 
   | Knormal.KCons (d, h, t) ->
-      let _ = dest in
       add_instr b.cur (ICons (d, h, t))
 
   | Knormal.KHead (d, c) ->
-      let _ = dest in
       add_instr b.cur (IHead (d, c))
 
   | Knormal.KTail (d, c) ->
-      let _ = dest in
       add_instr b.cur (ITail (d, c))
 
   | Knormal.KAdtAlloc (d, tag, args) ->
-      let _ = dest in
       add_instr b.cur (IAdtAlloc (d, tag, args))
 
   | Knormal.KTagGet (d, c) ->
-      let _ = dest in
       add_instr b.cur (ITagGet (d, c))
 
   | Knormal.KFieldGet (d, c, k) ->
-      let _ = dest in
       add_instr b.cur (IFieldGet (d, c, k))
 
   | Knormal.KRegion (body, ret_typ, region_dest) ->
@@ -212,7 +196,6 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
       if k > 3 then
         failwith
           "mcaml: region nesting exceeds v1 ceiling of 4 levels (§4.1)";
-      let _ = dest in
       (* [region_dest] is the ambient let-binder the knormal pass
          captured on KRegion — preferred over the cfg_build [~dest]
          parameter because an enclosing KSeq (produced by a flattened
@@ -236,11 +219,9 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
         add_instr b.cur (IRegionExit (k, region_dest, ret_typ))
 
   | Knormal.KClosureMake (d, fname, caps) ->
-      let _ = dest in
       add_instr b.cur (IClosureMake (d, fname, caps))
 
   | Knormal.KApply (d_opt, closure_v, args) ->
-      let _ = dest in
       add_instr b.cur (IApply (d_opt, closure_v, args))
 
 (* ---- finalization: reverse instrs, populate preds ---- *)

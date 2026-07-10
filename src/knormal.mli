@@ -47,6 +47,10 @@ val ref_env : (string, string) Hashtbl.t
 val all_ints : Ast.expr list -> int list option
 val bind_or_unit : string option -> kexpr -> kexpr
 val seq_alloc : string option -> kexpr list -> (string -> kexpr) -> kexpr
+val resolve_arr_base : string -> Ast.expr -> string * string
+val matrix_cols : string -> string -> int
+val set_result : string option -> kexpr -> kexpr
+val record_decl_of_field : string -> (string * Ast.typ) list
 val normalize_to : string option -> Ast.expr -> kexpr
 val normalize_each : Ast.expr list -> string list * kexpr list
 val emit_arr_lit : string -> Ast.expr list -> kexpr

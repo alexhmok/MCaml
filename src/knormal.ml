@@ -198,6 +198,42 @@ let seq_alloc (dest : string option) (ks : kexpr list)
   | None -> seq KUnit
   | Some d -> seq (KLet (d, KUnit, mk d))
 
+(* Indexing shape (Index1/Index2/IndexSet1/IndexSet2): resolve the base
+   expression to its user-level name and compile-time storage id. [tag]
+   is the arm name, reconstructing each arm's error prefix verbatim. *)
+let resolve_arr_base (tag : string) (base : expr) : string * string =
+  let name = match base with
+    | Var n -> n
+    | _ -> failwith (tag ^ ": base must be an array-bound variable")
+  in
+  let id =
+    try Hashtbl.find arr_env name
+    with Not_found ->
+      failwith (tag ^ ": base must be an array-bound variable: " ^ name)
+  in
+  (name, id)
+
+(* Matrix shape (Index2/IndexSet2): column count for flat-index math. *)
+let matrix_cols (tag : string) (name : string) : int =
+  match Hashtbl.find_opt arr_dims name with
+  | Some (_, Some c) -> c
+  | _ -> failwith (tag ^ ": " ^ name ^ " is not a matrix")
+
+(* Unit-typed store shape (IndexSet1/IndexSet2/dyn array_set): the write
+   is the whole result; a provided ambient dest is still bound to
+   unit (=0) after the write runs. *)
+let set_result (dest : string option) (assign : kexpr) : kexpr =
+  match dest with
+  | None -> assign
+  | Some d -> KSeq (assign, KLet (d, KInt 0, KUnit))
+
+(* Record shape (Record literal / PRecord match column): map any one
+   field name to its owner's decl-order field list. Callers keep their
+   own empty-fields failwith — the two error strings differ. *)
+let record_decl_of_field (f0 : string) =
+  let (owner, _, _) = Hashtbl.find Typing.record_fields f0 in
+  Hashtbl.find Typing.record_decls owner
+
 (* Normalize an expression, writing the result to 'dest' if provided *)
 let rec normalize_to (dest : string option) (e : expr) : kexpr =
   match e with
@@ -417,15 +453,7 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
       failwith "bare array literal must be bound with let"
 
   | Index1 (base, idx) ->
-      let name = match base with
-        | Var n -> n
-        | _ -> failwith "Index1: base must be an array-bound variable"
-      in
-      let id =
-        try Hashtbl.find arr_env name
-        with Not_found ->
-          failwith ("Index1: base must be an array-bound variable: " ^ name)
-      in
+      let (_, id) = resolve_arr_base "Index1" base in
       (match dest with
        | None ->
            (* Pure read with discarded result — no-op. *)
@@ -440,20 +468,8 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
                   KSeq(k_idx, KLet(d, KUnit, KArrGet(d, id, t_idx))))))
 
   | Index2 (base, i, j) ->
-      let name = match base with
-        | Var n -> n
-        | _ -> failwith "Index2: base must be an array-bound variable"
-      in
-      let id =
-        try Hashtbl.find arr_env name
-        with Not_found ->
-          failwith ("Index2: base must be an array-bound variable: " ^ name)
-      in
-      let cols =
-        match Hashtbl.find_opt arr_dims name with
-        | Some (_, Some c) -> c
-        | _ -> failwith ("Index2: " ^ name ^ " is not a matrix")
-      in
+      let (name, id) = resolve_arr_base "Index2" base in
+      let cols = matrix_cols "Index2" name in
       (match dest with
        | None -> KUnit
        | Some d ->
@@ -480,17 +496,7 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
                               KLet(d, KUnit, KArrGet(d, id, t_flat)))))))))))
 
   | IndexSet1 (base, idx, v) ->
-      let name = match base with
-        | Var n -> n
-        | _ -> failwith "IndexSet1: base must be an array-bound variable"
-      in
-      let id =
-        try Hashtbl.find arr_env name
-        with Not_found ->
-          failwith ("IndexSet1: base must be an array-bound variable: " ^ name)
-      in
-      (* IndexSet is unit-typed; ambient dest is ignored for the write,
-         but if a dest is provided we still bind it to unit (=0). *)
+      let (_, id) = resolve_arr_base "IndexSet1" base in
       let assign =
         match idx with
         | Int k ->
@@ -507,25 +513,11 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
                 KLet(tv, KUnit,
                   KSeq(kv, KArrSet(id, t_idx, tv)))))
       in
-      (match dest with
-       | None -> assign
-       | Some d -> KSeq(assign, KLet(d, KInt 0, KUnit)))
+      set_result dest assign
 
   | IndexSet2 (base, i, j, v) ->
-      let name = match base with
-        | Var n -> n
-        | _ -> failwith "IndexSet2: base must be an array-bound variable"
-      in
-      let id =
-        try Hashtbl.find arr_env name
-        with Not_found ->
-          failwith ("IndexSet2: base must be an array-bound variable: " ^ name)
-      in
-      let cols =
-        match Hashtbl.find_opt arr_dims name with
-        | Some (_, Some c) -> c
-        | _ -> failwith ("IndexSet2: " ^ name ^ " is not a matrix")
-      in
+      let (name, id) = resolve_arr_base "IndexSet2" base in
+      let cols = matrix_cols "IndexSet2" name in
       let assign =
         match i, j with
         | Int ki, Int kj ->
@@ -553,9 +545,7 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
                           KLet(tv, KUnit,
                             KSeq(kv, KArrSet(id, t_flat, tv))))))))))
       in
-      (match dest with
-       | None -> assign
-       | Some d -> KSeq(assign, KLet(d, KInt 0, KUnit)))
+      set_result dest assign
 
   | App ("array_get", [Var a; i_expr]) when Hashtbl.mem dyn_env a ->
       (* Phase A dyn-array read. Base handle lives in the vreg named [a];
@@ -581,9 +571,7 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
             KLet(t_v, KUnit,
               KSeq(k_v, KHeapSet(PoolScratch, a, t_i, t_v)))))
       in
-      (match dest with
-       | None -> assign
-       | Some d -> KSeq(assign, KLet(d, KInt 0, KUnit)))
+      set_result dest assign
 
   | App ("array_make", _) ->
       failwith "array_make must appear as the rhs of a let binding"
@@ -750,13 +738,11 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
       (* D8: same {tag:0, f0...} cell as a tuple. Fields evaluate in
          SOURCE order (the literal's order), then the allocation takes
          the temps in DECL order so f<k> always means decl field k. *)
-      let owner =
+      let decl =
         match fields with
-        | (f0, _) :: _ ->
-            let (o, _, _) = Hashtbl.find Typing.record_fields f0 in o
+        | (f0, _) :: _ -> record_decl_of_field f0
         | [] -> failwith "knormal: empty record literal survived typing"
       in
-      let decl = Hashtbl.find Typing.record_decls owner in
       let with_temps = List.map (fun (f, e) -> (f, new_temp (), e)) fields in
       let ks =
         List.map (fun (_, t, e) -> normalize_to (Some t) e) with_temps in
@@ -1101,16 +1087,13 @@ and compile_match (dest : string option) (occs : string list)
               this is exactly the tuple case: always-complete single-
               ctor signature, no test, used-fields filter (an omitted
               or `_` field emits NO obj_f<k> read). *)
-           let owner =
+           let decl =
              match fields0 with
-             | (f0, _) :: _ ->
-                 let (o, _, _) = Hashtbl.find Typing.record_fields f0 in
-                 o
+             | (f0, _) :: _ -> record_decl_of_field f0
              | [] ->
                  failwith
                    "match lowering: empty record pattern survived typing"
            in
-           let decl = Hashtbl.find Typing.record_decls owner in
            let ar = List.length decl in
            let to_vec fields =
              List.map (fun (f, _) ->
