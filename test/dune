@@ -1,0 +1,4 @@
+(test
+ (name test_mcaml)
+ (libraries alcotest mcaml)
+ (flags (-g)))

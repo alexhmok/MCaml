@@ -1,4 +1,9 @@
-; Builds every .ml in src/ into the mcaml compiler executable.
+; Builds every .ml in src/ except main.ml into the `mcaml` library,
+; plus a thin `main` executable that links it. The split exists so
+; test/ can link the compiler modules; (wrapped false) keeps module
+; names unchanged (Cfg, Const_fold, ...), so no source edits were
+; needed. main.exe stays at _build/default/src/main.exe — the ./mcaml
+; symlink and tools/verify_canary.py are unaffected.
 ; Every module has a checked-in .mli (full inferred signature via
 ; `ocamlc -i`) so build artifacts stay in _build/ and interfaces are
 ; explicit. lexer.ml / parser.ml / parser.mli are the checked-in
@@ -7,6 +12,14 @@
 ; .mll/.mly change.
 ; (flags (-g)) deliberately drops dune's :standard dev-profile warning
 ; set so warnings match a plain ocamlc build (non-fatal defaults).
+(library
+ (name mcaml)
+ (wrapped false)
+ (modules :standard \ main)
+ (flags (-g)))
+
 (executable
  (name main)
+ (modules main)
+ (libraries mcaml)
  (flags (-g)))

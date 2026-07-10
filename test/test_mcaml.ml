@@ -1,0 +1,4 @@
+let () =
+  Alcotest.run "mcaml"
+    (Test_const_fold.suite @ Test_codegen_helpers.suite
+    @ Test_dominators.suite @ Test_liveness.suite)
