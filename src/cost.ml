@@ -29,11 +29,9 @@ open Cfg
    else needs it. *)
 let k_max_captured = ref 0
 
-let is_comparison (op : Ast.binop) : bool =
-  let open Ast in
-  match op with
-  | Eq | Neq | Lt | Gt | Leq | Geq -> true
-  | _ -> false
+(* Same predicate the lowering itself uses — the cost model must agree
+   with codegen_helpers on which binops take the 1-command path. *)
+let is_comparison = Codegen_helpers.is_comparison
 
 (* Per-instruction cost. Mirrors the actual lowering rules in
    [codegen_helpers.ml]:

@@ -54,6 +54,12 @@ let step (live : VSet.t) (def : Cfg.vreg option) (use : VSet.t) : VSet.t =
 
 let reverse_postorder = Cfg.reverse_postorder
 
+(* Use set of an instruction/terminator with the block's guard pins
+   added — guard-chain pinning treats every guard cond as an implicit
+   use at every step (see the header comment). *)
+let use_with_pin (pin : VSet.t) (uses : Cfg.vreg list) : VSet.t =
+  VSet.union (vset_of_list uses) pin
+
 (* ---- main analysis ---- *)
 let analyze (cfg : Cfg.cfg_func) : instr_liveness =
   let n = Array.length cfg.blocks in
@@ -79,15 +85,13 @@ let analyze (cfg : Cfg.cfg_func) : instr_liveness =
   let transfer (b : Cfg.block) (lout : VSet.t) : VSet.t =
     let pin = pinned.(b.label) in
     (* Terminator first. *)
-    let term_use = VSet.union (vset_of_list (Cfg.term_uses b.term)) pin in
+    let term_use = use_with_pin pin (Cfg.term_uses b.term) in
     let live = step lout None term_use in
     (* Terminators never define a vreg; def is None. *)
     (* Walk instructions in reverse. b.instrs is in forward order post-seal. *)
     let rev_instrs = List.rev b.instrs in
     List.fold_left (fun live i ->
-      let d = Cfg.instr_def i in
-      let u = VSet.union (vset_of_list (Cfg.instr_uses i)) pin in
-      step live d u
+      step live (Cfg.instr_def i) (use_with_pin pin (Cfg.instr_uses i))
     ) live rev_instrs
   in
 
@@ -141,7 +145,7 @@ let analyze (cfg : Cfg.cfg_func) : instr_liveness =
       let pin = pinned.(l) in
       (* Start from live_out[B]; transfer across terminator to get the set
          live just before the terminator — this is arr.(num_instrs). *)
-      let term_use = VSet.union (vset_of_list (Cfg.term_uses b.term)) pin in
+      let term_use = use_with_pin pin (Cfg.term_uses b.term) in
       let live_at_term_in = step live_out.(l) None term_use in
       arr.(num_instrs) <- live_at_term_in;
       (* Walk instructions in reverse. For instr index i, arr.(i) is the
@@ -156,9 +160,8 @@ let analyze (cfg : Cfg.cfg_func) : instr_liveness =
       let i = ref (num_instrs - 1) in
       List.iter (fun instr ->
         arr.(!i) <- !live;
-        let d = Cfg.instr_def instr in
-        let u = VSet.union (vset_of_list (Cfg.instr_uses instr)) pin in
-        live := step !live d u;
+        live := step !live (Cfg.instr_def instr)
+                  (use_with_pin pin (Cfg.instr_uses instr));
         decr i
       ) rev_instrs
       (* After the loop, !live should equal live_in.(l) (sanity — unchecked). *)

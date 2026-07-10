@@ -111,18 +111,25 @@ let fresh_helper_name (st : state) : string =
   st.helper_ctr <- st.helper_ctr + 1;
   Printf.sprintf "%s_call%d" st.cfg.fname st.helper_ctr
 
+(* Record a helper file. Prepended; the List.rev at assembly time
+   restores emission order. *)
+let add_helper (st : state) (name : string) (body : string list) : unit =
+  st.helpers <- (name, body) :: st.helpers
+
+(* Add-if-absent for the small flag lists recording which shared helper
+   files this function needs (pools, field indices, region levels). *)
+let cons_uniq x xs = if List.mem x xs then xs else x :: xs
+
 let ensure_macro_helper (st : state) (id : aid) : unit =
   if not (Hashtbl.mem st.emitted_macros id) then begin
     Hashtbl.add st.emitted_macros id ();
-    let helper_name = Printf.sprintf "%s_get" id in
-    st.helpers <- (helper_name, [macro_helper_body id]) :: st.helpers
+    add_helper st (Printf.sprintf "%s_get" id) [macro_helper_body id]
   end
 
 let ensure_macro_setter (st : state) (id : aid) : unit =
   if not (Hashtbl.mem st.emitted_setters id) then begin
     Hashtbl.add st.emitted_setters id ();
-    let helper_name = Printf.sprintf "%s_set" id in
-    st.helpers <- (helper_name, [macro_setter_body id]) :: st.helpers
+    add_helper st (Printf.sprintf "%s_set" id) [macro_setter_body id]
   end
 
 let push_cmd (st : state) (prefix : string) (inner : string) : unit =
@@ -130,6 +137,13 @@ let push_cmd (st : state) (prefix : string) (inner : string) : unit =
 
 let push_cmds (st : state) (prefix : string) (cmds : string list) : unit =
   List.iter (fun c -> push_cmd st prefix c) cmds
+
+(* Shared tail of the ICall/IApply lowerings: copy $ret into the call's
+   dest, unless there is no dest or the dest IS $ret. *)
+let push_ret_copy (st : state) (prefix : string) (d_opt : vreg option) : unit =
+  match d_opt with
+  | Some d when d <> "$ret" -> push_cmd st prefix (cmd_score_copy d "$ret")
+  | _ -> ()
 
 (* Reserved-vreg predicate for filtering save/restore sets. We never save
    reserved slots: $ret carries the return value (and is overwritten by
@@ -205,26 +219,18 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
       push_cmds st prefix (cmd_score_binop d op a b')
   | ICall (d_opt, f, args) ->
       let slots = slots_live_across_call st b i d_opt in
-      if slots = [] then begin
+      if slots = [] then
         (* Direct call: no slots live across the call (either because nothing
            is live downstream or because the only thing live IS the call's
            dest, which we don't need to save). Emit param sets + function
            call inline; no helper file. *)
-        push_cmds st prefix (cmd_tail_jump f args);
-        (match d_opt with
-         | Some d when d <> "$ret" ->
-             push_cmd st prefix (cmd_score_copy d "$ret")
-         | _ -> ())
-      end else begin
+        push_cmds st prefix (cmd_tail_jump f args)
+      else begin
         let helper = fresh_helper_name st in
-        let helper_body = cmd_call_helper_body_narrow ~slots ~target:f ~args in
-        st.helpers <- (helper, helper_body) :: st.helpers;
-        push_cmd st prefix (Printf.sprintf "function mcaml:%s" helper);
-        (match d_opt with
-         | Some d when d <> "$ret" ->
-             push_cmd st prefix (cmd_score_copy d "$ret")
-         | _ -> ())
-      end
+        add_helper st helper (cmd_call_helper_body_narrow ~slots ~target:f ~args);
+        push_cmd st prefix (Printf.sprintf "function mcaml:%s" helper)
+      end;
+      push_ret_copy st prefix d_opt
   | IArrLitConst (id, ints) ->
       ensure_macro_helper st id;
       push_cmd st prefix (cmd_arr_lit_const id ints)
@@ -245,12 +251,10 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
   | IHeapAllocConst (d, p, n) ->
       push_cmds st prefix (cmd_heap_alloc_const d p n)
   | IHeapGet (d, p, base, idx) ->
-      if not (List.mem p st.heap_get_pools) then
-        st.heap_get_pools <- p :: st.heap_get_pools;
+      st.heap_get_pools <- cons_uniq p st.heap_get_pools;
       push_cmds st prefix (cmd_heap_get d p base idx)
   | IHeapSet (p, base, idx, v) ->
-      if not (List.mem p st.heap_set_pools) then
-        st.heap_set_pools <- p :: st.heap_set_pools;
+      st.heap_set_pools <- cons_uniq p st.heap_set_pools;
       push_cmds st prefix (cmd_heap_set p base idx v)
   | IHeapAlloc _ ->
       failwith
@@ -276,14 +280,10 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
         push_cmds st prefix (cmd_apply cl args)
       else begin
         let helper = fresh_helper_name st in
-        let helper_body = cmd_apply_helper_body ~slots ~cl ~args in
-        st.helpers <- (helper, helper_body) :: st.helpers;
+        add_helper st helper (cmd_apply_helper_body ~slots ~cl ~args);
         push_cmd st prefix (Printf.sprintf "function mcaml:%s" helper)
       end;
-      (match d_opt with
-       | Some d when d <> "$ret" ->
-           push_cmd st prefix (cmd_score_copy d "$ret")
-       | _ -> ())
+      push_ret_copy st prefix d_opt
   | ICons (d, h, t) ->
       push_cmds st prefix (cmd_cons d h t)
   | IHead (d, c) ->
@@ -298,14 +298,12 @@ let emit_instr (st : state) (prefix : string) (b : block) (i : int) (instr : ins
       st.emit_obj_tag <- true;
       push_cmds st prefix (cmd_obj_tag_get d c)
   | IFieldGet (d, c, k) ->
-      if not (List.mem k st.obj_field_indices) then
-        st.obj_field_indices <- k :: st.obj_field_indices;
+      st.obj_field_indices <- cons_uniq k st.obj_field_indices;
       push_cmds st prefix (cmd_obj_field_get d c k)
   | IRegionEnter k ->
       push_cmds st prefix (cmd_region_enter k)
   | IRegionExit (k, ret, ret_typ) ->
-      if not (List.mem k st.region_exit_levels) then
-        st.region_exit_levels <- k :: st.region_exit_levels;
+      st.region_exit_levels <- cons_uniq k st.region_exit_levels;
       (* Dispatch on the return type from cfg_build. Primitive returns
          use the 2-command C4 path; TList TInt returns run the stash+
          truncate+rebuild Strategy-B walker from C5; other heap types
@@ -407,77 +405,47 @@ let emit_block (st : state) (b : block) : unit =
 
 (* ---- entry point ---- *)
 
-let emit ?(closure_layout = Closure_layout.empty) (cfg : cfg_func) : (string * string list) list =
-  let liveness = Liveness.analyze cfg in
-  let st = {
-    cfg;
-    liveness;
-    main_cmds   = [];
-    helpers     = [];
-    helper_ctr  = 0;
-    emitted_macros = Hashtbl.create 8;
-    emitted_setters = Hashtbl.create 8;
-    heap_get_pools = [];
-    heap_set_pools = [];
-    emit_cons_head = false;
-    emit_cons_tail = false;
-    emit_obj_tag = false;
-    obj_field_indices = [];
-    region_exit_levels = [];
-    emit_region_walker_list = false;
-    closure_layout;
-  } in
-  let order = reverse_postorder cfg in
-  List.iter (fun l -> emit_block st cfg.blocks.(l)) order;
-  (* Phase A: append per-pool shared macro helpers whose usage this
-     function flagged. Filename is [<pool>_get] / [<pool>_set] — identical
-     across functions, so main.ml dedupes all_files by filename before
-     writing. *)
+(* Append the shared macro-helper files whose usage this function
+   flagged during block emission (pools, cons fields, ADT getters,
+   region truncation/walkers). Every filename here is global —
+   identical across functions — so main.ml's filename dedupe collapses
+   the copies produced by multiple functions. *)
+let append_flagged_helpers (st : state) : unit =
+  (* Phase A: per-pool shared macro helpers. *)
   List.iter (fun p ->
-    let name = Printf.sprintf "%s_get" (pool_name p) in
-    st.helpers <- (name, [pool_get_body p]) :: st.helpers
+    add_helper st (Printf.sprintf "%s_get" (pool_name p)) [pool_get_body p]
   ) st.heap_get_pools;
   List.iter (fun p ->
-    let name = Printf.sprintf "%s_set" (pool_name p) in
-    st.helpers <- (name, [pool_set_body p]) :: st.helpers
+    add_helper st (Printf.sprintf "%s_set" (pool_name p)) [pool_set_body p]
   ) st.heap_set_pools;
-  (* Phase B: per-field cons macro helpers. Filename is global ([cons_head]
-     / [cons_tail]), so main.ml's filename dedupe collapses the multiple
-     copies produced across functions. *)
-  if st.emit_cons_head then
-    st.helpers <- ("cons_head", [cons_head_body]) :: st.helpers;
-  if st.emit_cons_tail then
-    st.helpers <- ("cons_tail", [cons_tail_body]) :: st.helpers;
+  (* Phase B: cons-cell macro helpers. *)
+  if st.emit_cons_head then add_helper st "cons_head" [cons_head_body];
+  if st.emit_cons_tail then add_helper st "cons_tail" [cons_tail_body];
   (* Phase D / D5: ADT macro getters — one obj_tag plus one obj_f<k>
-     per distinct field index this function read. Filenames are global
-     so main.ml's dedupe collapses copies across functions. *)
-  if st.emit_obj_tag then
-    st.helpers <- ("obj_tag", [obj_tag_body]) :: st.helpers;
+     per distinct field index this function read. *)
+  if st.emit_obj_tag then add_helper st "obj_tag" [obj_tag_body];
   List.iter (fun k ->
-    st.helpers <-
-      (Printf.sprintf "obj_f%d" k, [obj_field_body k]) :: st.helpers
+    add_helper st (Printf.sprintf "obj_f%d" k) [obj_field_body k]
   ) (List.sort compare st.obj_field_indices);
   (* Phase C: per-level truncation helpers, one scratch and one
-     objpool helper per level observed in this function. Filenames
-     are global so main.ml's filename dedupe collapses copies from
-     multiple functions sharing the same levels. *)
+     objpool helper per level observed in this function. *)
   List.iter (fun k ->
-    let sname = Printf.sprintf "region_truncate_%d_scratch" k in
-    let cname = Printf.sprintf "region_truncate_%d_objpool" k in
-    st.helpers <- (sname, region_truncate_scratch_body k) :: st.helpers;
-    st.helpers <- (cname, region_truncate_objpool_body k) :: st.helpers
+    add_helper st (Printf.sprintf "region_truncate_%d_scratch" k)
+      (region_truncate_scratch_body k);
+    add_helper st (Printf.sprintf "region_truncate_%d_objpool" k)
+      (region_truncate_objpool_body k)
   ) st.region_exit_levels;
   (* Phase C / C5: TList-return walker helpers. Level-independent —
      the stash walker walks the child chain and the rebuild walker
      empties region_tmp objpool into the parent objpool, neither
-     referencing the per-level save slots. Single shared filename
-     per walker, deduped across all functions by main.ml. *)
+     referencing the per-level save slots. *)
   if st.emit_region_walker_list then begin
-    st.helpers <-
-      ("region_walker_list_stash", region_walker_list_stash_body) :: st.helpers;
-    st.helpers <-
-      ("region_walker_list_rebuild", region_walker_list_rebuild_body) :: st.helpers
-  end;
+    add_helper st "region_walker_list_stash" region_walker_list_stash_body;
+    add_helper st "region_walker_list_rebuild" region_walker_list_rebuild_body
+  end
+
+(* Assemble the final (filename, commands) list from the emitted state. *)
+let assemble_output (st : state) (cfg : cfg_func) : (string * string list) list =
   let body_cmds = List.rev st.main_cmds in
   if cfg.preheader_instrs = [] then
     (cfg.fname, body_cmds) :: List.rev st.helpers
@@ -502,3 +470,28 @@ let emit ?(closure_layout = Closure_layout.empty) (cfg : cfg_func) : (string * s
     :: (body_name, body_cmds)
     :: List.rev st.helpers
   end
+
+let emit ?(closure_layout = Closure_layout.empty) (cfg : cfg_func) : (string * string list) list =
+  let liveness = Liveness.analyze cfg in
+  let st = {
+    cfg;
+    liveness;
+    main_cmds   = [];
+    helpers     = [];
+    helper_ctr  = 0;
+    emitted_macros = Hashtbl.create 8;
+    emitted_setters = Hashtbl.create 8;
+    heap_get_pools = [];
+    heap_set_pools = [];
+    emit_cons_head = false;
+    emit_cons_tail = false;
+    emit_obj_tag = false;
+    obj_field_indices = [];
+    region_exit_levels = [];
+    emit_region_walker_list = false;
+    closure_layout;
+  } in
+  let order = reverse_postorder cfg in
+  List.iter (fun l -> emit_block st cfg.blocks.(l)) order;
+  append_flagged_helpers st;
+  assemble_output st cfg

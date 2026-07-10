@@ -56,4 +56,5 @@ val add_if_tracked : Cfg.vreg -> VSet.t -> VSet.t
 val vset_of_list : Cfg.vreg list -> VSet.t
 val step : VSet.t -> Cfg.vreg option -> VSet.t -> VSet.t
 val reverse_postorder : Cfg.cfg_func -> Cfg.label list
+val use_with_pin : VSet.t -> Cfg.vreg list -> VSet.t
 val analyze : Cfg.cfg_func -> instr_liveness

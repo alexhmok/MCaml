@@ -19,16 +19,21 @@ type state = {
   closure_layout : Closure_layout.t;
 }
 val fresh_helper_name : state -> string
+val add_helper : state -> string -> string list -> unit
+val cons_uniq : 'a -> 'a list -> 'a list
 val ensure_macro_helper : state -> Cfg.aid -> unit
 val ensure_macro_setter : state -> Cfg.aid -> unit
 val push_cmd : state -> string -> string -> unit
 val push_cmds : state -> string -> string list -> unit
+val push_ret_copy : state -> string -> Cfg.vreg option -> unit
 val is_reserved_slot : string -> bool
 val slots_live_across_call :
   state -> Cfg.block -> int -> Cfg.vreg option -> string list
 val emit_instr : state -> string -> Cfg.block -> int -> Cfg.instr -> unit
 val emit_term : state -> string -> Cfg.terminator -> unit
 val emit_block : state -> Cfg.block -> unit
+val append_flagged_helpers : state -> unit
+val assemble_output : state -> Cfg.cfg_func -> (string * string list) list
 val emit :
   ?closure_layout:Closure_layout.t ->
   Cfg.cfg_func -> (string * string list) list
