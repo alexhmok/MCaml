@@ -156,7 +156,13 @@ let capture_list (env : typ M.t) (fvs : S.t) : (string * typ) list =
        | None -> None)
   |> List.filter (fun (_, t) -> match t with TRef _ -> false | _ -> true)
 
-(* Walk an expression carrying a type env. Returns (new_expr, extra_defs). *)
+(* Walk an expression carrying a type env. Returns (new_expr, extra_defs).
+
+   The purely-structural arms (no binder, no name minting) all route
+   through [walk1]/[walk2]/[walk3] below, which sequence the child
+   walks with explicit [let]s — left-to-right child order is what keeps
+   fresh-name minting (a nested For/Lambda in a left child must number
+   before one in a right child) and def-list concatenation stable. *)
 let rec walk (parent : string) (env : typ M.t) (e : expr)
   : expr * def list =
   match e with
@@ -202,18 +208,11 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
       let (e2', d2) = walk parent env' e2 in
       (Let (x, e1', e2'), d1 @ d2)
   | BinOp (op, a, b) ->
-      let (a', d1) = walk parent env a in
-      let (b', d2) = walk parent env b in
-      (BinOp (op, a', b'), d1 @ d2)
+      walk2 parent env (fun a b -> BinOp (op, a, b)) a b
   | If (c, a, b) ->
-      let (c', d1) = walk parent env c in
-      let (a', d2) = walk parent env a in
-      let (b', d3) = walk parent env b in
-      (If (c', a', b'), d1 @ d2 @ d3)
+      walk3 parent env (fun c a b -> If (c, a, b)) c a b
   | Seq (a, b) ->
-      let (a', d1) = walk parent env a in
-      let (b', d2) = walk parent env b in
-      (Seq (a', b'), d1 @ d2)
+      walk2 parent env (fun a b -> Seq (a, b)) a b
   | App (f, args) ->
       let (args', defs) = walk_list parent env args in
       (App (f, args'), defs)
@@ -221,19 +220,11 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
       let (es', defs) = walk_list parent env es in
       (Array es', defs)
   | Index1 (a, i) ->
-      let (a', d1) = walk parent env a in
-      let (i', d2) = walk parent env i in
-      (Index1 (a', i'), d1 @ d2)
+      walk2 parent env (fun a i -> Index1 (a, i)) a i
   | Index2 (a, i, j) ->
-      let (a', d1) = walk parent env a in
-      let (i', d2) = walk parent env i in
-      let (j', d3) = walk parent env j in
-      (Index2 (a', i', j'), d1 @ d2 @ d3)
+      walk3 parent env (fun a i j -> Index2 (a, i, j)) a i j
   | IndexSet1 (a, i, v) ->
-      let (a', d1) = walk parent env a in
-      let (i', d2) = walk parent env i in
-      let (v', d3) = walk parent env v in
-      (IndexSet1 (a', i', v'), d1 @ d2 @ d3)
+      walk3 parent env (fun a i v -> IndexSet1 (a, i, v)) a i v
   | IndexSet2 (a, i, j, v) ->
       let (a', d1) = walk parent env a in
       let (i', d2) = walk parent env i in
@@ -241,20 +232,14 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
       let (v', d4) = walk parent env v in
       (IndexSet2 (a', i', j', v'), d1 @ d2 @ d3 @ d4)
   | Ref e ->
-      let (e', d) = walk parent env e in
-      (Ref e', d)
+      walk1 parent env (fun e -> Ref e) e
   | Deref e ->
-      let (e', d) = walk parent env e in
-      (Deref e', d)
+      walk1 parent env (fun e -> Deref e) e
   | RefSet (r, v) ->
-      let (r', d1) = walk parent env r in
-      let (v', d2) = walk parent env v in
-      (RefSet (r', v'), d1 @ d2)
+      walk2 parent env (fun r v -> RefSet (r, v)) r v
   | Nil -> (Nil, [])
   | Cons (h, t) ->
-      let (h', d1) = walk parent env h in
-      let (t', d2) = walk parent env t in
-      (Cons (h', t'), d1 @ d2)
+      walk2 parent env (fun h t -> Cons (h, t)) h t
   | Tuple es ->
       let (es', defs) = walk_list parent env es in
       (Tuple es', defs)
@@ -265,11 +250,9 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
       in
       (Record (List.map fst pairs), List.concat_map snd pairs)
   | Field (e, f) ->
-      let (e', d) = walk parent env e in
-      (Field (e', f), d)
+      walk1 parent env (fun e -> Field (e, f)) e
   | Region (tr, e) ->
-      let (e', d) = walk parent env e in
-      (Region (tr, e'), d)  (* share tr *)
+      walk1 parent env (fun e -> Region (tr, e)) e  (* share tr *)
   (* Phase F: closure conversion. Structurally identical to the For
      case above — hoist the lambda's body into a synthetic top-level
      helper taking its free variables as extra (leading) params, and
@@ -325,6 +308,24 @@ and walk_list (parent : string) (env : typ M.t) (es : expr list)
   : expr list * def list =
   let pairs = List.map (walk parent env) es in
   (List.map fst pairs, List.concat_map snd pairs)
+
+(* Structural-arm combinators: walk 1/2/3 children left-to-right with
+   explicit sequential [let]s (see the note on [walk]), rebuild with
+   [mk], concatenate the hoisted defs in child order. *)
+and walk1 parent env mk a =
+  let (a', d) = walk parent env a in
+  (mk a', d)
+
+and walk2 parent env mk a b =
+  let (a', d1) = walk parent env a in
+  let (b', d2) = walk parent env b in
+  (mk a' b', d1 @ d2)
+
+and walk3 parent env mk a b c =
+  let (a', d1) = walk parent env a in
+  let (b', d2) = walk parent env b in
+  let (c', d3) = walk parent env c in
+  (mk a' b' c', d1 @ d2 @ d3)
 
 let lift_def (d : def) : def list =
   match d with

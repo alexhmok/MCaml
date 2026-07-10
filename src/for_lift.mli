@@ -106,5 +106,19 @@ val capture_list : Ast.typ M.t -> S.t -> (string * Ast.typ) list
 val walk : string -> Ast.typ M.t -> Ast.expr -> Ast.expr * Ast.def list
 val walk_list :
   string -> Ast.typ M.t -> Ast.expr list -> Ast.expr list * Ast.def list
+val walk1 :
+  string ->
+  Ast.typ M.t ->
+  (Ast.expr -> Ast.expr) -> Ast.expr -> Ast.expr * Ast.def list
+val walk2 :
+  string ->
+  Ast.typ M.t ->
+  (Ast.expr -> Ast.expr -> Ast.expr) ->
+  Ast.expr -> Ast.expr -> Ast.expr * Ast.def list
+val walk3 :
+  string ->
+  Ast.typ M.t ->
+  (Ast.expr -> Ast.expr -> Ast.expr -> Ast.expr) ->
+  Ast.expr -> Ast.expr -> Ast.expr -> Ast.expr * Ast.def list
 val lift_def : Ast.def -> Ast.def list
 val run : Ast.program -> Ast.program
