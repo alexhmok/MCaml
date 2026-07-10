@@ -5,9 +5,6 @@ val is_sentinel_aid : Cfg.aid -> bool
 type info = {
   mutable inits : int;
   mutable length : int;
-  mutable values : int list;
-  mutable temps : Cfg.vreg list;
-  mutable is_const : bool;
   mutable dynamic_get : bool;
   mutable dynamic_put : bool;
   mutable static_max : int;

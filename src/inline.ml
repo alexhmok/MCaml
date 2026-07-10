@@ -94,15 +94,7 @@ let rewrite_term ~(label_map : label -> label) ~(kont_label : label)
 
 (* ---- preds recompute (no instr reversal — unlike cfg_build.finalize_all) ---- *)
 
-let recompute_preds (blocks : block array) : unit =
-  Array.iter (fun b -> b.preds <- []) blocks;
-  Array.iter (fun (b : block) ->
-    List.iter (fun s ->
-      let succ = blocks.(s) in
-      if not (List.mem b.label succ.preds) then
-        succ.preds <- b.label :: succ.preds
-    ) (succs b.term)
-  ) blocks
+let recompute_preds : block array -> unit = Cfg.populate_preds
 
 (* ---- one splice event ---- *)
 

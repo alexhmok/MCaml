@@ -7,7 +7,6 @@ val ctor_info : (string, string * Ast.typ list * int) Hashtbl.t
 val is_constructor : string -> bool
 val record_decls : (string, (string * Ast.typ) list) Hashtbl.t
 val record_fields : (string, string * int * Ast.typ) Hashtbl.t
-val is_record_type : string -> bool
 val resolve : Ast.typ -> Ast.typ
 val fresh_tvar : unit -> Ast.typ
 val tvar_names : (Ast.typ option ref * string) list ref

@@ -1,12 +1,14 @@
 (* closure_layout.ml — Phase F5: whole-program closure-shape table.
 
-   Computed once in main.ml, immediately after [Closure_spec.run] (§13.12
-   decision 5's own framing: "after F3's whole-program escape analysis has
-   enumerated every Escaping closure shape") and before [Monomorphize.run]
-   (monomorphize never touches TFun/closure machinery per decision 3, so
-   ordering relative to it doesn't matter for correctness — this module
-   only needs Closure_spec's rewrite to have already resolved away every
-   Known instance).
+   Computed once in main.ml, after [Closure_spec.run] (§13.12 decision
+   5's own framing: "after F3's whole-program escape analysis has
+   enumerated every Escaping closure shape") AND after [Monomorphize.run].
+   The ordering relative to monomorphize is load-bearing: [compute] skips
+   is_template functions, so running before monomorphize would miss every
+   IClosureMake inside an array-parameterized template's clones and
+   [code_of] would crash on them at codegen — see the long comment at the
+   call site in main.ml for the full story (this was a real bug, not a
+   hypothetical).
 
    Scans every non-template [cfg_func] for [IClosureMake] instructions and
    assigns each distinct lambda-helper name a dense, whole-program integer

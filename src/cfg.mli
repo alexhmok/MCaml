@@ -68,6 +68,7 @@ val map_term_vregs : (vreg -> vreg) -> terminator -> terminator
 val param_index : vreg -> int option
 val is_reserved : vreg -> bool
 val block_is_reachable : cfg_func -> block -> bool
+val populate_preds : block array -> unit
 val reverse_postorder : cfg_func -> label list
 val string_of_binop : Ast.binop -> string
 val string_of_instr : instr -> string

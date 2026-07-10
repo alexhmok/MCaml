@@ -51,9 +51,6 @@ let is_sentinel_aid (a : aid) : bool =
 type info = {
   mutable inits      : int;          (* count of IArrLit* writes *)
   mutable length     : int;
-  mutable values     : int list;     (* IArrLitConst payload *)
-  mutable temps      : vreg list;    (* IArrLitDyn payload *)
-  mutable is_const   : bool;         (* true iff initializer is IArrLitConst *)
   mutable dynamic_get: bool;         (* saw an IArrGet on this aid *)
   mutable dynamic_put: bool;         (* saw an IArrSet on this aid *)
   mutable static_max : int;          (* max k seen in IArrGetStatic/IArrSetStatic *)
@@ -61,8 +58,8 @@ type info = {
 }
 
 let fresh_info () = {
-  inits = 0; length = 0; values = []; temps = [];
-  is_const = false; dynamic_get = false; dynamic_put = false;
+  inits = 0; length = 0;
+  dynamic_get = false; dynamic_put = false;
   static_max = -1; escapes = false;
 }
 
@@ -87,16 +84,12 @@ let collect (cfg : cfg_func) : (aid, info) Hashtbl.t =
        | IArrLitConst (id, ks) ->
            let info = info_for id in
            info.inits <- info.inits + 1;
-           info.is_const <- true;
            info.length <- List.length ks;
-           info.values <- ks;
            if is_sentinel_aid id then info.escapes <- true
        | IArrLitDyn (id, ts) ->
            let info = info_for id in
            info.inits <- info.inits + 1;
-           info.is_const <- false;
            info.length <- List.length ts;
-           info.temps <- ts;
            if is_sentinel_aid id then info.escapes <- true
        | IArrGetStatic (_, id, k) ->
            let info = info_for id in

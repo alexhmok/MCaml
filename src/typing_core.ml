@@ -60,4 +60,3 @@ let record_decls : (string, (string * typ) list) Hashtbl.t =
 let record_fields : (string, string * int * typ) Hashtbl.t =
   Hashtbl.create 16
 
-let is_record_type (name : string) : bool = Hashtbl.mem record_decls name

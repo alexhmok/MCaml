@@ -85,10 +85,11 @@ let run (cfg : cfg_func) : bool =
                  bin_map   := BMap.add (op, na, nb) d !bin_map;
                  i)
         | _ ->
-            (* Every other instruction: if it defines a non-reserved dest,
-               kill that dest from both maps. Do not attempt CSE.
-               Covers ICopy, ICall, IArrGet, IArrGetStatic. ICommand and
-               the IArrLit* forms have no dest and leave the maps alone. *)
+            (* Every remaining instruction (ICopy, ICall, the array/heap/
+               cons/ADT/region/closure reads, IApply, ...): if it defines
+               a non-reserved dest, kill that dest from both maps. Do not
+               attempt CSE. Dest-less forms (ICommand, IArrLit*, stores)
+               fall through the instr_def match and leave the maps alone. *)
             (match Cfg.instr_def i with
              | Some d when not (is_reserved d) ->
                  const_map := kill_const !const_map d;

@@ -379,6 +379,20 @@ let is_reserved (n : vreg) : bool =
 let block_is_reachable (cfg : cfg_func) (b : block) : bool =
   b.label = cfg.entry || b.preds <> []
 
+(* Rebuild every block's [preds] from the terminators: clear them all,
+   then one scan adds each block's label to each successor's preds.
+   Shared by cfg_build's finalization and the inliner's post-splice
+   recompute (which, unlike finalization, does no instr reversal). *)
+let populate_preds (blocks : block array) : unit =
+  Array.iter (fun b -> b.preds <- []) blocks;
+  Array.iter (fun (b : block) ->
+    List.iter (fun (s : label) ->
+      let succ = blocks.(s) in
+      if not (List.mem b.label succ.preds) then
+        succ.preds <- b.label :: succ.preds
+    ) (succs b.term)
+  ) blocks
+
 (* Reverse postorder from [cfg.entry], following [succs]. The merge label
    on a [TBranch] is NOT a successor edge of the branch block itself (it's
    reached via the then/else arms' own terminators), so DFS naturally

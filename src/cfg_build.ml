@@ -228,17 +228,7 @@ let rec lower (b : builder) (k : Knormal.kexpr) ~(dest : vreg option) : unit =
 
 let finalize_all (blocks : block array) : unit =
   Array.iter finalize_block blocks;
-  (* Clear any stale preds. *)
-  Array.iter (fun b -> b.preds <- []) blocks;
-  (* One scan: for every block's terminator, add the block's label to
-     each successor's preds. *)
-  Array.iter (fun (b : block) ->
-    List.iter (fun (s : label) ->
-      let succ = blocks.(s) in
-      if not (List.mem b.label succ.preds) then
-        succ.preds <- b.label :: succ.preds
-    ) (succs b.term)
-  ) blocks
+  populate_preds blocks
 
 (* Convert the hashtable of blocks into a densely-packed array where
    [blocks.(i).label = i]. We assigned labels as sequential integers, so
