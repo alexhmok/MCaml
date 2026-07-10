@@ -49,24 +49,6 @@ module M :
   end
 val floor_div : int -> int -> int
 val floor_mod : int -> int -> int
-val get : int M.t -> Cfg.vreg -> int option
-val kill : int M.t -> Cfg.vreg -> int M.t
 val set_const : int M.t -> Cfg.vreg -> int -> int M.t
-val fold_binop_const :
-  int M.t ->
-  Cfg.instr ->
-  Cfg.vreg -> Ast.binop -> int -> int -> Cfg.instr * int M.t * bool
-val simplify_binop_left :
-  int M.t ->
-  Cfg.instr ->
-  Cfg.vreg -> Ast.binop -> int -> Cfg.vreg -> Cfg.instr * int M.t * bool
-val simplify_binop_right :
-  int M.t ->
-  Cfg.instr ->
-  Cfg.vreg -> Ast.binop -> Cfg.vreg -> int -> Cfg.instr * int M.t * bool
-val simplify_binop_neither :
-  int M.t ->
-  Cfg.instr ->
-  Cfg.vreg -> Ast.binop -> Cfg.vreg -> Cfg.vreg -> Cfg.instr * int M.t * bool
 val rewrite_instr : int M.t -> Cfg.instr -> Cfg.instr * int M.t * bool
 val run : Cfg.cfg_func -> bool

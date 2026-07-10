@@ -101,9 +101,4 @@ module BMap :
     val add_seq : (key * 'a) Seq.t -> 'a t -> 'a t
     val of_seq : (key * 'a) Seq.t -> 'a t
   end
-val is_commutative : Ast.binop -> bool
-val normalize_operands :
-  Ast.binop -> Cfg.vreg -> Cfg.vreg -> Cfg.vreg * Cfg.vreg
-val kill_const : Cfg.vreg IntMap.t -> Cfg.vreg -> Cfg.vreg IntMap.t
-val kill_bin : Cfg.vreg BMap.t -> Cfg.vreg -> Cfg.vreg BMap.t
 val run : Cfg.cfg_func -> bool

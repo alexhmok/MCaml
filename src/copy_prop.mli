@@ -47,9 +47,4 @@ module M :
     val add_seq : (key * 'a) Seq.t -> 'a t -> 'a t
     val of_seq : (key * 'a) Seq.t -> 'a t
   end
-val kill_def : Cfg.vreg M.t -> Cfg.vreg -> Cfg.vreg M.t
-val rewrite : Cfg.vreg M.t -> Cfg.vreg -> Cfg.vreg
-val rw : Cfg.vreg M.t -> bool ref -> Cfg.vreg -> Cfg.vreg
-val rewrite_instr : Cfg.vreg M.t ref -> Cfg.instr -> Cfg.instr * bool
-val rewrite_term : Cfg.vreg M.t -> Cfg.terminator -> Cfg.terminator * bool
 val run : Cfg.cfg_func -> bool

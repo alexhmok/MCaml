@@ -69,11 +69,21 @@ Historical note: before Milestone 2 the codegen emitted Minecraft commands direc
 
 ## Build & run
 
-Dune project. All OCaml sources live in `src/` (one `.mli` per `.ml`;
-the interfaces are full inferred signatures, so if you change a
-module's public shape, refresh its `.mli` with `ocamlc -i`). Build
-artifacts stay under `_build/` — never commit `.cmi`/`.cmo` next to the
-sources. Rebuild:
+Dune project. All OCaml sources live in `src/` (one `.mli` per `.ml`).
+Interfaces are CURATED, not inferred dumps (narrowed 2026-07-09): an
+`.mli` exports only what other modules — `src/` or `test/` — actually
+consume; helpers stay private. When new cross-module code needs a
+symbol, add just that one `val` (run `ocamlc -i` to print the full
+signature and copy the line out of it; don't paste the whole dump).
+The exceptions are the generated `parser.mli`/`lexer.mli` and
+`main.mli`, which stay as-is. `src/`
+builds as library `mcaml` (`(wrapped false)`, so module names are
+unchanged: `Cfg`, `Const_fold`, …) plus a thin `main` executable that
+links it — the split exists so `test/` can link the compiler modules;
+narrowing an `.mli` therefore narrows what tests can see, so tests
+count as consumers when deciding what to export.
+Build artifacts stay under `_build/` — never commit `.cmi`/`.cmo` next
+to the sources. Rebuild:
 
 ```
 cd /Users/alexmok/MCaml
@@ -97,6 +107,14 @@ plain `ocamlc` defaults instead of dune's fatal dev-profile set.
 Refactor gate: `python3 tools/verify_canary.py` compiles the 5 test
 suites, runs their sim checkers, and prints a sha256 canary hash per
 build — compare across commits to prove a change is byte-identical.
+
+Unit tests: alcotest suites in `test/` (the repo's only external dep,
+test-only — `opam install alcotest`), run with `dune test`. Tranche 1
+covers `const_fold` floor-division parity, `codegen_helpers` golden
+command strings, `dominators`/`loop_detect` on hand-built CFGs, and
+the `liveness` guard-chain pinning invariant. `test/cfg_fixtures.ml`
+builds fixture CFGs and enforces the label-equals-array-index and
+populated-`preds` invariants the analyses rely on.
 
 Invoke:
 
