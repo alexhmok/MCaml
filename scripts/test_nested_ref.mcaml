@@ -1,0 +1,37 @@
+(* Regression for the for_lift nested-ref ordering bug (fixed by the
+   Knormal.seed_ref_env prepass): a ref bound INSIDE an outer for body
+   must be readable and writable from a nested inner for. for_lift
+   appends a For body's helpers before the helper that contains them
+   (`d1 @ d2 @ d3 @ [helper]`), so without the prepass the inner
+   helper was knormal-processed before the outer helper's `let s =
+   ref 0` registered its slot — "not a ref-bound variable" at compile
+   time. graph_algos.mcaml's eord_min_from documents the old
+   workaround (hoist the inner-loop-with-ref to a top-level fun). *)
+
+(* Ref bound in the outer for body, written from the inner loop and
+   read back in the outer body. i in 0..2, s = 0+1+2 = 3 each round. *)
+fun nested_sum(): int =
+  let r = ref 0 in
+  (for i = 0 to 3 do
+    let s = ref 0 in
+    (for j = 0 to 3 do
+      s := !s + j
+    done);
+    r := !r + !s
+  done);
+  !r
+
+(* Two levels down: ref bound in the outer body, mutated from the
+   innermost of two nested loops. m = 1 + 2*2 = 5 per outer round. *)
+fun deep_sum(): int =
+  let acc = ref 0 in
+  (for i = 0 to 2 do
+    let m = ref 1 in
+    (for j = 0 to 2 do
+      (for k = 0 to 2 do
+        m := !m + 1
+      done)
+    done);
+    acc := !acc + !m
+  done);
+  !acc

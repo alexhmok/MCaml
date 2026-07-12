@@ -31,4 +31,5 @@ type kexpr =
   | KClosureMake of string * string * string list
   | KApply of string option * string * string list
 val register_global_array : string -> string -> int -> unit
+val seed_ref_env : Ast.program -> unit
 val normalize_fun : (string * Ast.typ) list -> Ast.expr -> kexpr

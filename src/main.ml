@@ -188,6 +188,11 @@ let zonk_program program =
 
 let build_fn_table program
   : (string, Cfg.cfg_func) Hashtbl.t * string list =
+  (* Pre-seed ref slots for the WHOLE program before any def is
+     normalized: for_lift emits an inner loop's helper before the outer
+     helper whose body binds the ref, so knormal's normalize-time
+     registration alone misses refs read from a nested lifted loop. *)
+  Knormal.seed_ref_env program;
   let fn_table : (string, Cfg.cfg_func) Hashtbl.t = Hashtbl.create 16 in
   let fn_order : string list ref = ref [] in
   List.iter (fun def ->

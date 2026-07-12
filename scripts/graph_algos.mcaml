@@ -320,9 +320,11 @@ fun prim_step () : unit =
 fun dsu_find (x: int) : int =
   if dsu[x] = x then x else dsu_find(dsu[x])
 
-(* Index of the lightest edge in eord[i..gsz[1]-1]. Top-level (not inline
-   in the sort loop) because a ref bound inside an outer for body can't be
-   dereferenced from a nested lifted loop. *)
+(* Index of the lightest edge in eord[i..gsz[1]-1]. Top-level as a
+   historical workaround: a ref bound inside an outer for body couldn't
+   be dereferenced from a nested lifted loop until Knormal.seed_ref_env
+   fixed the helper ordering (see scripts/test_nested_ref.mcaml). Kept
+   top-level to preserve this suite's canary bytes. *)
 fun eord_min_from (i: int) : int =
   let m = ref i in
   for j = i + 1 to gsz[1] do

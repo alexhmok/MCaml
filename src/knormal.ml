@@ -163,6 +163,46 @@ let reseed_globals () : unit =
    name. Alpha-renaming guarantees names are globally unique. *)
 let ref_env : (string, string) Hashtbl.t = Hashtbl.create 16
 
+(* Pre-seed ref_env with every `let x = ref e in ...` binder in the whole
+   post-for_lift program, before any def is normalized. Fixes the
+   nested-for ordering bug: for_lift appends a For body's helpers BEFORE
+   the helper that contains them (`d1 @ d2 @ d3 @ [helper]`), so an inner
+   loop's helper is normalized before the outer helper whose body binds
+   the ref — the per-arm registration at normalize time comes too late
+   for that lookup. Slot names are "$ref_" ^ alpha-renamed binder, so
+   registration order can't change what any lookup resolves to; for every
+   program that already compiled, this is a no-op superset. *)
+let rec seed_refs_expr (e : expr) : unit =
+  match e with
+  | Let (x, Ref e1, e2) ->
+      Hashtbl.replace ref_env x ("$ref_" ^ x);
+      seed_refs_expr e1; seed_refs_expr e2
+  | Int _ | Float _ | Bool _ | Str _ | Var _ | Selector _ | Coord _
+  | Command _ | Unit | Nil -> ()
+  | BinOp (_, a, b) | Let (_, a, b) | Seq (a, b) | Cons (a, b)
+  | RefSet (a, b) | Index1 (a, b) ->
+      seed_refs_expr a; seed_refs_expr b
+  | If (a, b, c) | Index2 (a, b, c) | IndexSet1 (a, b, c)
+  | For (_, a, b, c) ->
+      seed_refs_expr a; seed_refs_expr b; seed_refs_expr c
+  | IndexSet2 (a, b, c, d) ->
+      seed_refs_expr a; seed_refs_expr b; seed_refs_expr c; seed_refs_expr d
+  | App (_, es) | Array es | Tuple es | Closure (_, es) ->
+      List.iter seed_refs_expr es
+  | Ref e1 | Deref e1 | Region (_, e1) | Field (e1, _) | Lambda (_, e1) ->
+      seed_refs_expr e1
+  | Match (scrut, arms) ->
+      seed_refs_expr scrut;
+      List.iter (fun (_, body) -> seed_refs_expr body) arms
+  | Record fields ->
+      List.iter (fun (_, fe) -> seed_refs_expr fe) fields
+
+let seed_ref_env (program : Ast.program) : unit =
+  List.iter (function
+    | Ast.Fun (_, _, _, body) -> seed_refs_expr body
+    | Ast.Val (_, e) -> seed_refs_expr e
+    | Ast.TypeDecl _ | Ast.RecordDecl _ -> ()) program
+
 (* Is every element of this expression list a constant Int? *)
 let rec all_ints (es : expr list) : int list option =
   match es with
