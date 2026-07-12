@@ -62,13 +62,18 @@ containing the self-`TTail` is the last commands in the file (the exit
 branch runs before the recurse line; whichever branch is not taken is
 a guard-skipped no-op, and nothing remains to re-run after unwind).
 
-## Compiler exits 0 on type errors
+## RESOLVED 2026-07-11: compiler exits nonzero on all error classes
 
-`main.ml`'s top-level handler prints `Type Error: …` to stderr and
-emits no files, but never calls `exit 1`. Scripted builds (MineTorch,
-CI, `&&` chains) cannot detect the failure from the exit status. Same
-applies to the other `| Exception -> eprintf` arms. One-line fix per
-arm.
+The Lexer/Typing/Parser handler arms had already gained `exit 2` in
+commit 9e40441 (2026-07-08) — this entry was stale. Remaining gap
+closed 2026-07-11: `failwith`-raised pipeline errors (reserved names,
+v1-unsupported shapes, codegen invariant violations) exited 2 only via
+OCaml's uncaught-exception path, printing a `Fatal error: exception
+Failure(...)` backtrace line; a `| Failure m` arm now prints the bare
+message and exits 2 like the others. `tools/verify_canary.py` now
+pins the contract permanently: four deliberately broken programs (one
+per error class) must each yield nonzero exit AND zero emitted
+`.mcfunction` files.
 
 ## RESOLVED 2026-07-07: `/` and `%` are floor semantics (vanilla-measured)
 

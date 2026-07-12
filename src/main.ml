@@ -727,3 +727,9 @@ let () =
   | Lexer.SyntaxError m -> Printf.eprintf "Lexer: %s\n" m; exit 2
   | Typing.Error m -> Printf.eprintf "Type Error: %s\n" m; exit 2
   | Parser.Error -> Printf.eprintf "Parser Error\n"; exit 2
+  (* Internal pipeline errors (reserved names, unsupported v1 shapes,
+     codegen invariant violations) are raised with [failwith]. Without
+     this arm they still exit nonzero (OCaml's uncaught-exception exit
+     is 2) but print a "Fatal error: exception Failure(...)" backtrace
+     line; catch them for a clean one-line message and the same code. *)
+  | Failure m -> Printf.eprintf "%s\n" m; exit 2

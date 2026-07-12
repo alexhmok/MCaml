@@ -32,9 +32,42 @@ def canary_hash(outdir: str) -> str:
     return h.hexdigest()
 
 
+# Deliberately broken programs, one per error class main.ml reports.
+# Each must exit nonzero AND emit zero .mcfunction files, so scripted
+# builds (MineTorch, CI, `&&` chains) can trust the exit status.
+BROKEN = [
+    ("type error", b"fun f (x: int) : int = x + true\n"),
+    ("parse error", b"fun f (x: int : int = x\n"),
+    ("reserved name", b"fun init () : int = 1\n"),
+    ("bad val RHS", b"val g = 3\n"),
+]
+
+
+def check_error_exits() -> bool:
+    outdir = "/tmp/build_err"
+    ok = True
+    for label, src in BROKEN:
+        if os.path.isdir(outdir):
+            for name in os.listdir(outdir):
+                if name.endswith(".mcfunction"):
+                    os.unlink(os.path.join(outdir, name))
+        r = subprocess.run(["./mcaml", "-o", outdir], input=src,
+                           capture_output=True)
+        emitted = [n for n in os.listdir(outdir)
+                   if n.endswith(".mcfunction")] if os.path.isdir(outdir) else []
+        if r.returncode == 0 or emitted:
+            print(f"FAIL error-exit ({label}): rc={r.returncode} "
+                  f"files={emitted}")
+            ok = False
+    if ok:
+        print(f"PASS error-exit checks ({len(BROKEN)} broken programs: "
+              "nonzero exit, no files)")
+    return ok
+
+
 def main() -> int:
     os.chdir(REPO)
-    ok = True
+    ok = check_error_exits()
     for sources, outdir, checker in SUITES:
         # Wipe stale output so files removed by a compiler change can't
         # linger from a previous run and mask a hash difference.
