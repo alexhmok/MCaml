@@ -86,10 +86,24 @@ the divisions inside the FMult pre-shift and FDiv scale-up — with
 `floor_div`/`floor_mod`, and sim.py's `/=`/`%=` handlers floor. Suite
 checks t04/t05, t07/t08, t61/t62 pin fold/runtime parity permanently.
 
+RESOLVED 2026-07-11 (int32 overflow divergence): `const_fold.ml` now
+wraps every arithmetic fold result to int32 via `wrap32`
+(`Add`/`Sub`/`Mult`/`FAdd`/`FSub`, the `FMult`/`FDiv` internal multiply
+steps, and `Div`'s single `MIN_INT / -1` floorDiv overflow case).
+**Semantics decision: fold WITH the int32 wrap, not refuse-to-fold** —
+scoreboard values are Java 32-bit ints and `+= -= *=` wrap two's-
+complement (and `Math.floorDiv(MIN_INT, -1)` returns `MIN_INT`), so
+wrapping is exactly what vanilla computes; it is deterministic, keeps
+the fold profitable, and the old FMult/FDiv decline-on-overflow guards
+were replaced by the same wrap. Inferred from Java int semantics of
+the vanilla scoreboard implementation; flagged for in-game spot-check
+alongside the next MANUAL_TEST run. `sim.py` wraps identically in its
+`+= -= *= /=` / `add`/`remove` handlers so it stays a faithful oracle.
+Pinned by `test/test_const_fold.ml` wrap suites (fold path) and an
+opt-vs-O0 sim parity check (2000000000+2000000000 → -294967296 both
+ways). No canary hash moved (no suite folds overflowing constants).
+
 Still open from this investigation:
-- `const_fold.ml` folds `Mult`/`Add`/`Sub` with OCaml 63-bit ints and
-  no int32 overflow guard (`FMult`/`FDiv` have one), so overflowing
-  constant arithmetic diverges from the runtime's 32-bit wrap.
 - **MineTorch re-audit needed:** `int8_ref.py` was aligned to the old
   trunc sim (`_trunc_div`, Stage 11 LayerNorm). Now that sim.py
   floors, host validation will surface the divergence — switch the

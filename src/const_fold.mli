@@ -49,6 +49,7 @@ module M :
   end
 val floor_div : int -> int -> int
 val floor_mod : int -> int -> int
+val wrap32 : int -> int
 val set_const : int M.t -> Cfg.vreg -> int -> int M.t
 val rewrite_instr : int M.t -> Cfg.instr -> Cfg.instr * int M.t * bool
 val run : Cfg.cfg_func -> bool

@@ -43,6 +43,16 @@ def load(name: str) -> list[str]:
     return [l.strip() for l in lines if l.strip()]
 
 
+def _wrap32(n: int) -> int:
+    """Scoreboard values are Java 32-bit ints: += -= *= wrap two's-
+    complement (and floorDiv's MIN_INT / -1 case wraps to MIN_INT).
+    Python ints are unbounded, so every arithmetic result must wrap
+    or the sim diverges from vanilla on overflow. Mirrors
+    const_fold.ml's wrap32 (fold/runtime/sim parity)."""
+    m = n & 0xFFFFFFFF
+    return m - 0x100000000 if m >= 0x80000000 else m
+
+
 def _floor_div(a: int, b: int) -> int:
     """Vanilla scoreboard /= is Math.floorDiv (confirmed in-game
     2026-07-07 on 1.21.x via mc_test_suite t05), not Java's truncating
@@ -246,16 +256,18 @@ def _exec_plain(world: World, cmd: str, depth: int, macros: dict | None = None) 
     if m:
         name, val = m.group(1), int(m.group(3))
         cur = world.scores.get(name, 0)
-        world.scores[name] = cur + val
-        return cur + val
+        result = _wrap32(cur + val)
+        world.scores[name] = result
+        return result
 
     # scoreboard players remove X obj N
     m = re.match(r'scoreboard players remove (\S+) (\S+) (-?\d+)$', cmd)
     if m:
         name, val = m.group(1), int(m.group(3))
         cur = world.scores.get(name, 0)
-        world.scores[name] = cur - val
-        return cur - val
+        result = _wrap32(cur - val)
+        world.scores[name] = result
+        return result
 
     # scoreboard players operation X obj <op> Y obj
     m = re.match(r'scoreboard players operation (\S+) (\S+) ([+\-*/%<>=]+) (\S+) (\S+)$', cmd)
@@ -266,13 +278,14 @@ def _exec_plain(world: World, cmd: str, depth: int, macros: dict | None = None) 
         if op == '=':
             result = s_val
         elif op == '+=':
-            result = d_val + s_val
+            result = _wrap32(d_val + s_val)
         elif op == '-=':
-            result = d_val - s_val
+            result = _wrap32(d_val - s_val)
         elif op == '*=':
-            result = d_val * s_val
+            result = _wrap32(d_val * s_val)
         elif op == '/=':
-            result = _floor_div(d_val, s_val)
+            # floorDiv's single overflow case (MIN_INT / -1) wraps too.
+            result = _wrap32(_floor_div(d_val, s_val))
         elif op == '%=':
             result = _floor_mod(d_val, s_val)
         elif op == '<':

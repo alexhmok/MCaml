@@ -28,6 +28,20 @@ let floor_div (a : int) (b : int) : int =
 let floor_mod (a : int) (b : int) : int =
   a - (floor_div a b) * b
 
+(* Scoreboard values are Java 32-bit ints: += -= *= wrap two's-
+   complement, and Math.floorDiv's single overflow case
+   (MIN_INT / -1) wraps to MIN_INT too. OCaml's native int is 63-bit,
+   so every fold that models a runtime scoreboard op must wrap its
+   result to int32 or folded and unfolded code paths diverge the
+   moment constant arithmetic overflows (e.g. 2000000000 + 2000000000
+   folds to 4000000000 host-side but the runtime computes
+   -294967296). Semantics decision (TODO.md 2026-07-11): fold WITH
+   the wrap — deterministic and exactly what vanilla does — rather
+   than refuse to fold. *)
+let wrap32 (n : int) : int =
+  let m = n land 0xFFFFFFFF in
+  if m >= 0x80000000 then m - 0x100000000 else m
+
 (* Look up [v] in the constant map. Reserved vregs ([Cfg.is_reserved])
    are never known. *)
 let get (m : int M.t) (v : vreg) : int option =
@@ -43,28 +57,31 @@ let set_const (m : int M.t) (d : vreg) (k : int) : int M.t =
   if is_reserved d then M.remove d m else M.add d k m
 
 (* IBinOp with both operands constant: full fold. [i] is returned
-   unchanged when the fold must be declined (div-by-zero, int32
-   overflow). *)
+   unchanged when the fold must be declined (div-by-zero). Every
+   arithmetic result is wrapped to int32 via [wrap32] — the runtime
+   is Java int scoreboard ops, which wrap at every step. *)
 let fold_binop_const (m : int M.t) (i : instr) (d : vreg)
     (op : Ast.binop) (ka : int) (kb : int) : instr * int M.t * bool =
   let open Ast in
   let fold k = (IConst (d, k), set_const m d k, true) in
   let bool_int x = if x then 1 else 0 in
   match op with
-  | Add  -> fold (ka + kb)
-  | Sub  -> fold (ka - kb)
+  | Add  -> fold (wrap32 (ka + kb))
+  | Sub  -> fold (wrap32 (ka - kb))
   (* FAdd/FSub are scalar-identical to Add/Sub on Q16.16
      encoding (see typing.ml's BinOp comment) — no rescale
      needed for constant folding either. *)
-  | FAdd -> fold (ka + kb)
-  | FSub -> fold (ka - kb)
-  | Mult -> fold (ka * kb)
+  | FAdd -> fold (wrap32 (ka + kb))
+  | FSub -> fold (wrap32 (ka - kb))
+  | Mult -> fold (wrap32 (ka * kb))
   | Div  ->
       if kb = 0 then
         (* Do not fold div-by-zero; let runtime handle it. *)
         (i, kill m d, false)
       else
-        fold (floor_div ka kb)
+        (* wrap32 covers the single floorDiv overflow case:
+           MIN_INT / -1 wraps back to MIN_INT, as Java does. *)
+        fold (wrap32 (floor_div ka kb))
   | Mod  ->
       if kb = 0 then
         (i, kill m d, false)
@@ -74,36 +91,27 @@ let fold_binop_const (m : int M.t) (i : instr) (d : vreg)
      lowering EXACTLY including precision loss — folded and
      unfolded code paths must produce byte-identical
      scoreboard results or any bisect across a fold boundary
-     would yield a false positive. Skip fold on int32
-     overflow since the runtime would wrap differently from
-     OCaml's 63-bit native int. *)
+     would yield a false positive. Overflow at any multiply
+     step wraps to int32, exactly as the runtime's scoreboard
+     ops do (these arms used to decline the fold instead —
+     also correct, but wrap is what vanilla computes, so
+     folding stays legal AND profitable). *)
   | FMult ->
       (* Matches codegen_helpers N6 pre-shift: (a/256)*(b/256).
          The pre-shifts lower to scoreboard /=, so they floor. *)
       let a' = floor_div ka 256 in
       let b' = floor_div kb 256 in
-      let product = a' * b' in
-      if product > 2147483647 || product < -2147483648 then
-        (i, kill m d, false)
-      else
-        fold product
+      fold (wrap32 (a' * b'))
   | FDiv ->
       (* Matches codegen_helpers N7 scale-up-numerator:
-         ((a*256)/b)*256. Guard against div-by-zero AND
-         int32 overflow at either multiply step. *)
+         ((a*256)/b)*256, wrapping at each multiply step like
+         the scoreboard ops it models. *)
       if kb = 0 then
         (i, kill m d, false)
       else begin
-        let first = ka * 256 in
-        if first > 2147483647 || first < -2147483648 then
-          (i, kill m d, false)
-        else
-          let divided = floor_div first kb in
-          let result = divided * 256 in
-          if result > 2147483647 || result < -2147483648 then
-            (i, kill m d, false)
-          else
-            fold result
+        let first = wrap32 (ka * 256) in
+        let divided = floor_div first kb in
+        fold (wrap32 (divided * 256))
       end
   | Eq   -> fold (bool_int (ka = kb))
   | Neq  -> fold (bool_int (ka <> kb))
