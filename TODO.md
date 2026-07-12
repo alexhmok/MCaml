@@ -4,38 +4,35 @@ Cross-cutting issues that don't belong in a single module's docstring.
 Things that are urgent or in-flight live in a plan doc instead
 (`DYNMEM_PLAN.md` is the current example).
 
-## Dead `val` elimination at the global-init level
+## PARTIALLY RESOLVED 2026-07-11: dead `val` elimination at the global-init level
 
-**Severity:** wart, not a bug. Costs disk, not runtime correctness.
+Landed (`src/deadval.ml`, wired between Phase 2 and Phase 3 in
+main.ml, `MCAML_NO_DEADVAL=1` / `MCAML_O0` to disable):
+- a `val` referenced by NO non-template function is dropped from the
+  `__globals_init` synthesis (post-monomorphize walk, so clones'
+  concrete aids count as references);
+- a referenced `val` with no surviving dynamic-index read loses its
+  `__g_<name>_get` macro file, which `ensure_macro_helper` over-emits
+  for static reads and literals (static gets read storage directly).
+Unit-covered in `test/test_deadval.ml`; canary diff was exactly three
+dropped static-only `_get` files across the suites, zero
+`__globals_init` changes, all checkers pass.
 
-`main.ml` emits one `data modify storage mcaml:heap __g_<name> set value [...]`
-command per top-level `val` declaration into `__globals_init.mcfunction`,
-and one `<name>_get.mcfunction` macro getter per `val` if it's read with
-a dynamic index anywhere. There is no dead-val elimination: every `val`
-in the source survives to load-time, even if no compiled function reads
-it.
-
-This becomes painful when downstream consumers (notably MineTorch)
-concatenate `lib/math.mcaml` in front of generated code to pick up one
-or two helper functions like `relu_f` — the whole library's LUT vals
-(`int_exp_lut`, `frac_exp_lut`, `log_frac_lut`, `sigmoid_lut`,
-`tanh_lut`, `gelu_lut`, ~1024 entries combined) get baked into
-`__globals_init` even when none of the LUT-using helpers are called.
-Surfaced by `MineTorch/validation/test_matmul_stage2.py`: 35 KB of
-generated source for 16 four-term dot products, the bulk of it
-unreferenced LUTs.
-
-**Fix sketch:** between Phase 2 (inline) and Phase 3 (per-fn optimize),
-walk the live function table from the program's entry points and
-collect the set of `val` names actually referenced. Drop unreferenced
-`val` declarations from `main.ml`'s `globals` list before
-`__globals_init` synthesis. Same pass can also drop the `__g_<name>_get`
-macro file when no dynamic-index read survives. Cheap dataflow — just
-a `Hashtbl.t` of names mentioned.
-
-**Why it can wait:** load-time only, no runtime cost. The disk bloat
-is annoying for hand inspection of generated code but doesn't impede
-correctness or in-game performance.
+**Still open — the MineTorch LUT case.** The original pain
+(`lib/math.mcaml` concatenated for one or two helpers bakes ~1024 LUT
+entries into `__globals_init`) is NOT fixed by this pass, and cannot
+be by any val-only pass: MCaml has no dead-function elimination and no
+entry-point declaration, so every compiled function — including the
+never-called LUT helpers — is chat-invocable and its val references
+must stay initialized (dropping them would make `/function
+mcaml:sigmoid_f` silently read empty storage). The TODO sketch's "walk
+from the program's entry points" presupposed an entry-point set that
+doesn't exist; `compute_entry_info`'s "public = called by no one"
+definition makes every uncalled library helper a root, so
+entry-rooted reachability degenerates to "referenced by anyone".
+Follow-up that would close it: an explicit entry list (e.g.
+`MCAML_ENTRIES=f,g` or a `pub fun` marker) rooting a dead-FUNCTION
+pass, with dead-val elimination then running on the surviving table.
 
 ---
 

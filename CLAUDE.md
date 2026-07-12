@@ -129,7 +129,9 @@ MCAML_NO_LICM=1 ./mcaml < …                  # M4: skip LICM hoisting
 MCAML_NO_SR=1 ./mcaml < …                    # SR: skip strength-reduction rewrite
 MCAML_NO_UNROLL=1 ./mcaml < …                # M4: skip loop unrolling
 MCAML_NO_SROA=1 ./mcaml < …                  # M4: skip array→scalar promotion
-MCAML_O0=1 ./mcaml < …                       # unoptimized baseline: implies ALL six MCAML_NO_* pass flags above.
+MCAML_NO_DEADVAL=1 ./mcaml < …               # skip dead global-val elimination (unreferenced vals dropped
+                                             # from __globals_init; static-only vals lose their _get file)
+MCAML_O0=1 ./mcaml < …                       # unoptimized baseline: implies ALL seven MCAML_NO_* pass flags above.
                                              # Monomorphize (required for array params), tick_split, and tick_guard
                                              # still run — those are correctness mechanisms, not optimizations.
                                              # Implemented as Cfg.pass_disabled, which every pass flag reads through.

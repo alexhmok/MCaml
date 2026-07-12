@@ -719,12 +719,29 @@ let () =
     let fn_order = extend_fn_order fn_table fn_order in
     run_dump_hooks fn_table fn_order;
 
+    (* Dead-val elimination (TODO.md): post-inline/monomorphize (so
+       clones' concrete aids are visible), pre-Phase 3. Drops
+       unreferenced vals from __globals_init and static-only vals'
+       over-emitted `__g_<name>_get` macro files. MCAML_NO_DEADVAL=1
+       (or the MCAML_O0 umbrella) keeps every val, e.g. for manual
+       in-game LUT inspection. *)
+    let no_deadval = Cfg.pass_disabled "MCAML_NO_DEADVAL" in
+    let globals, dead_get_filter =
+      if no_deadval then globals, (fun files -> files)
+      else begin
+        let referenced, dyn_read = Deadval.collect_refs fn_table in
+        (Deadval.filter_globals referenced globals,
+         Deadval.drop_dead_get_files dyn_read)
+      end
+    in
+
     let any_dyn_heap_use, is_public_entry =
       compute_entry_info fn_table closure_layout in
     let all_files, guarded_funs =
       emit_functions ~fn_table ~closure_layout ~fn_order
         ~any_dyn_heap_use ~is_public_entry
     in
+    let all_files = dead_get_filter all_files in
 
     (* F6a: per-lambda specialize/escape report, once every function has
        been through Phase 3 (so [Closure_spec.check_hot_loop]'s hot-loop
