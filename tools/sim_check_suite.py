@@ -57,14 +57,25 @@ def main() -> int:
     for line in w2.say:
         print(f"  [say] {line}")
     ret = w2.scores.get("$ret", 0)
+    # The exit branch is deliberately non-idempotent: before the TTail
+    # `return run` fix (21bc459, 2026-07-08), every stacked frame re-ran
+    # the exit commands on unwind, so the say fired once per frame and
+    # $async_exit_runs counted the frame depth instead of 1.
+    pass_says = sum(1 for s in w2.say if "PASS" in s)
+    exit_runs = w2.scores.get("$async_exit_runs", 0)
     if ret != ASYNC_EXPECT or ticks < 1:
         print(f"FAIL: async ret={ret} (want {ASYNC_EXPECT}), resumed ticks={ticks}")
         ok = False
-    elif not any("PASS" in s for s in w2.say):
-        print("FAIL: async loop finished but did not self-report PASS")
+    elif pass_says != 1:
+        print(f"FAIL: async PASS say fired {pass_says} times (want exactly 1: "
+              "exit branch re-executed per stacked frame?)")
+        ok = False
+    elif exit_runs != 1:
+        print(f"FAIL: async exit branch ran {exit_runs} times (want exactly 1)")
         ok = False
     else:
-        print(f"OK: async_sum ret={ret} after {ticks} resumed ticks")
+        print(f"OK: async_sum ret={ret} after {ticks} resumed ticks, "
+              "exit branch ran once")
 
     print("SUITE " + ("PASSED" if ok else "FAILED"))
     return 0 if ok else 1

@@ -660,20 +660,23 @@ fun run_all () : int =
    multiple ticks.
    ================================================================== *)
 
-(* The say lines below are gated on `$async_done matches 0` and the
-   done-flag is set afterwards, so the message prints exactly once.
-   Without the gate it would print once per stacked frame: codegen
-   emits the loop's exit-branch commands AFTER the self-call line, so
-   when the innermost frame takes the exit branch, every enclosing
-   frame re-executes the (guard-wrapped, now-true) exit commands as
-   the call stack unwinds. All other exit-branch effects here are
-   idempotent, so the re-execution is otherwise harmless. *)
+(* The exit branch below is deliberately NON-idempotent: the ungated
+   say lines and the $async_exit_runs increment must each fire exactly
+   once. Historically they had to be gated on `$async_done matches 0`
+   because codegen emitted the self-call as a bare `function` dispatch
+   with the exit-branch commands after it, so when the innermost frame
+   took the exit branch, every stacked frame re-ran the (guard-wrapped,
+   now-true) exit commands on unwind — one say per frame. The TTail
+   `return run` emission (2026-07-08) terminates each frame atomically
+   at the dispatch line, so nothing re-executes; sim_check_suite.py
+   asserts $async_exit_runs = 1 and exactly one PASS say to pin that. *)
 fun async_sum (i: int, acc: int) : int =
   if i > 60000 then (
     (if acc = 1800030000 then
-       cmd! "execute if score $async_done vars matches 0 run say [MCaml async] PASS: sum(1..60000) = 1800030000 across ticks"
+       cmd! "say [MCaml async] PASS: sum(1..60000) = 1800030000 across ticks"
      else
-       cmd! "execute if score $async_done vars matches 0 run say [MCaml async] FAIL: wrong final sum - run /scoreboard players get $ret vars");
+       cmd! "say [MCaml async] FAIL: wrong final sum - run /scoreboard players get $ret vars");
+    cmd! "scoreboard players add $async_exit_runs vars 1";
     cmd! "scoreboard players set $async_done vars 1";
     acc)
   else async_sum(i + 1, acc + i)
@@ -681,4 +684,5 @@ fun async_sum (i: int, acc: int) : int =
 fun async_start () : int =
   cmd! "say [MCaml async] starting sum(1..60000); yields across ticks...";
   cmd! "scoreboard players set $async_done vars 0";
+  cmd! "scoreboard players set $async_exit_runs vars 0";
   async_sum(1, 0)

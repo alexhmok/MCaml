@@ -39,28 +39,24 @@ correctness or in-game performance.
 
 ---
 
-## TCO'd loop exit branches re-execute once per stacked frame
+## RESOLVED 2026-07-11: TCO'd loop exit branches re-executed once per stacked frame
 
-**Severity:** correctness for non-idempotent exit effects; found while
-building `scripts/mc_test_suite.mcaml`.
+Fixed by 21bc459 (2026-07-08): every `TTail` dispatch is emitted as
+`return run function mcaml:<self>`, which terminates the caller frame
+atomically at the dispatch line — stacked frames can never fall
+through into the guard-wrapped exit commands on unwind, regardless of
+where those commands sit in the file. The old fix sketch here (reorder
+block emission so the self-`TTail` block is last) is moot: with
+`return run`, emission order is irrelevant to the unwind path.
 
-A self-recursive tail call lowers to a `function mcaml:<self>` line in
-the middle of the file, with the loop's exit-branch commands emitted
-AFTER it (guard-wrapped on the branch cond vreg). When the innermost
-frame takes the exit branch, the cond slot flips globally, and every
-enclosing frame — thousands, up to the tick_guard iteration limit —
-re-executes the now-true exit commands as the call stack unwinds. Pure
-scoreboard writes are idempotent (they recompute the same values from
-the same global slots), so `$ret`-style exits are unaffected; but a
-`cmd!` (chat spam observed: one `say` per frame), a cons allocation, a
-`array_make`, or any `add`-style command in exit position runs once
-per frame. Reproduces in sim.py; see the gated `say` workaround in
-`mc_test_suite.mcaml`'s `async_sum`.
-
-**Fix sketch:** in `codegen_cfg.ml`, order block emission so the block
-containing the self-`TTail` is the last commands in the file (the exit
-branch runs before the recurse line; whichever branch is not taken is
-a guard-skipped no-op, and nothing remains to re-run after unwind).
+Proven 2026-07-11: `async_sum`'s gated-`say` workaround was removed
+and its exit branch made deliberately non-idempotent (ungated `say`s
+plus a `$async_exit_runs` counter); `sim_check_suite.py` asserts the
+exit branch runs exactly once. Teeth check: reverting the dispatch to
+a bare `function` line makes the checker fail with the PASS say fired
+40× (once per stacked frame), reproducing the original report.
+Unit-level pin: `test/test_codegen_cfg.ml` asserts a self-`TTail`
+lowers to a `return run function mcaml:<self>` line.
 
 ## RESOLVED 2026-07-11: compiler exits nonzero on all error classes
 
