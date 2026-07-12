@@ -1,0 +1,15 @@
+(* multirun_guard.mcaml — minimal guarded self-tail loop for the
+   multi-invocation $tick_iters reset check (tools/sim_check_multirun.py).
+
+   msum(i, n, acc) = acc + i + (i+1) + ... + n, TCO'd so tick_guard
+   instruments it. The checker invokes it twice back to back with
+   per-run iteration counts chosen (from the emitted guard limit) so
+   that each run fits comfortably inside the per-tick budget but the
+   two runs together cross it: with a stale counter carried over from
+   run 1, run 2 yields mid-loop and leaves $ret holding run 1's value;
+   with the counter reset at natural loop exit, both runs complete
+   synchronously. *)
+
+fun msum (i: int, n: int, acc: int) : int =
+  if i > n then acc
+  else msum(i + 1, n, acc + i)

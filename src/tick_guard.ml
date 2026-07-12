@@ -128,6 +128,28 @@ let guard_cmds ~(target_fname : string) ~(limit : int) : string list =
     Printf.sprintf "execute if score %s vars matches 0 run return 0" ctr;
   ]
 
+(* Counter reset for the natural-exit path. The guard's own reset
+   (line 2 above) only fires on the yield path; when the loop instead
+   exits normally, the counter used to keep its accumulated value, so
+   the NEXT invocation of the same loop in the same session — a second
+   run of the entry point, or an inner guarded loop re-entered by an
+   enclosing loop — started with a stale budget and could yield
+   mid-run even though the run itself fits comfortably under the
+   limit, leaving any synchronous reader of $ret with a partial
+   result. The fix is one command appended at the very end of the
+   guarded entry file: every self-[TTail] iteration leaves the file
+   early via `return run`, and a yield leaves via `return 0`, so the
+   trailing reset runs exactly once, in the single frame that takes
+   the natural exit branch. main.ml appends it BEFORE tick_split runs
+   (same pattern as the §4.4 heap reset) so it rides into the
+   terminal __cont slice if the file ever gets split. Deliberate
+   trade-off: per-tick accounting no longer accumulates across
+   consecutive invocations of the same loop within one tick — the
+   guard's budget is per-invocation, which is what its per-loop
+   design already promised. *)
+let reset_cmd ~(target_fname : string) : string =
+  Printf.sprintf "scoreboard players set %s vars 0" (counter_for target_fname)
+
 (* Pick the file name to inject the guard into for a guarded function
    [fname]. If [<fname>__body] exists in the file list, that's the
    LICM-split body that self-[TTail] back-edges target; otherwise the

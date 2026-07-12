@@ -572,20 +572,36 @@ let emit_functions ~fn_table ~closure_layout ~fn_order
       then append_reset name files
       else files
     in
-    if has_self_tail cfg then begin
-      (* Per-iter cost = the body of the loop as lowered to commands,
-         i.e. the reachable blocks of the CFG plus their terminator.
-         Excludes the LICM preheader (which runs once at entry, not
-         per iteration) and the wrapper's dispatch line. Matches
-         what Tick_guard's [entry_file_name] targets. *)
-      let body_cost =
-        Array.fold_left (fun acc b ->
-          if Cfg.block_is_reachable cfg b then acc + Cost.estimate_block b
-          else acc)
-          0 cfg.Cfg.blocks
-      in
-      guarded_funs := (name, body_cost) :: !guarded_funs
-    end;
+    let files =
+      if has_self_tail cfg then begin
+        (* Per-iter cost = the body of the loop as lowered to commands,
+           i.e. the reachable blocks of the CFG plus their terminator.
+           Excludes the LICM preheader (which runs once at entry, not
+           per iteration) and the wrapper's dispatch line. Matches
+           what Tick_guard's [entry_file_name] targets. *)
+        let body_cost =
+          Array.fold_left (fun acc b ->
+            if Cfg.block_is_reachable cfg b then acc + Cost.estimate_block b
+            else acc)
+            0 cfg.Cfg.blocks
+        in
+        guarded_funs := (name, body_cost) :: !guarded_funs;
+        (* Stale-counter fix: append the $tick_iters reset to the tail
+           of the guarded entry file so it fires exactly once, on the
+           natural-exit frame (iterations leave early via `return run`,
+           yields via `return 0`). Appended pre-tick_split, like
+           [append_reset], so it rides into the terminal __cont slice.
+           Skipped when tick_guard itself is disabled — no guard, no
+           counter to reset. *)
+        if Tick_guard.disabled () then files
+        else begin
+          let target = Tick_guard.entry_file_name files name in
+          let reset = Tick_guard.reset_cmd ~target_fname:target in
+          List.map (fun (f, cmds) ->
+            if f = target then (f, cmds @ [reset]) else (f, cmds)) files
+        end
+      end else files
+    in
     if dump_costs then report_costs name cfg files;
     if dump_cfg then report_cfg name cfg files;
     all_files := !all_files @ files

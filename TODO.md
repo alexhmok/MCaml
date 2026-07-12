@@ -108,4 +108,32 @@ Still open from this investigation:
 
 ---
 
+## RESOLVED 2026-07-11: stale `$tick_iters` carried across invocations of a guarded loop
+
+Latent multi-run bug noted during the graph-viz session. tick_guard's
+counter reset only fired on the yield path; a natural loop exit left
+the counter holding its accumulated value, so the NEXT invocation of
+the same guarded loop in the same session — a re-run of the entry
+point, or an inner guarded loop re-entered by an enclosing loop —
+started with a stale budget and could yield mid-run even though the
+run itself fits comfortably under the limit, leaving any synchronous
+reader of `$ret` with a partial result.
+
+Reproduced in sim before fixing (`scripts/multirun_guard.mcaml` +
+`tools/sim_check_multirun.py`, now the 7th verify_canary suite): two
+back-to-back runs each using ~75% of the budget; run 2 returned run
+1's stale `$ret`. Fix: `Tick_guard.reset_cmd` — one
+`scoreboard players set $tick_iters_<target> vars 0` appended by
+main.ml at the tail of the guarded entry file, pre-tick_split (same
+pattern as the §4.4 heap reset). Iterations leave the file early via
+`return run` and yields via `return 0`, so the trailing reset runs
+exactly once, in the frame that takes the natural exit. Deliberate
+trade-off: the budget is per-invocation — consecutive invocations in
+one tick no longer share accounting, which is what the per-loop
+counter design promised anyway. Canary: every guarded entry file
+gained exactly this one trailing line (74 lines across the 6 suites,
+zero other changes); all sim checkers pass.
+
+---
+
 (Add new entries above this line.)
