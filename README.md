@@ -276,7 +276,22 @@ MCAML_OUT=build ./mcaml < prog.mcaml         # env-var alternative
 ```
 
 The output directory is created if it doesn't exist. There is no module
-system yet — "linking" is concatenation. To use the math library:
+system yet (no namespacing), but a program can splice other files in
+with an `include` directive — a line consisting of exactly
+`include "path"` is replaced by that file's contents before lexing:
+
+```ocaml
+include "lib/math.mcaml"
+
+fun main(): float = relu_f(3.0)
+```
+
+Relative paths resolve against the including file's directory (against
+the cwd for the stdin program itself); each file is spliced at most
+once per compile, which also makes include cycles harmless; a missing
+file is a compile error. Since the semantics are exactly `cat`,
+declaration order still matters: include a library before using its
+names. Plain concatenation keeps working too:
 
 ```sh
 cat lib/math.mcaml my_prog.mcaml | ./mcaml -o build

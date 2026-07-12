@@ -700,8 +700,14 @@ let write_files out_dir final_files : unit =
 let () =
   let out_dir = parse_out_dir () in
   ensure_dir out_dir;
-  let lexbuf = Lexing.from_channel stdin in
   try
+    (* Pre-lex include splicing (`include "path"` lines). Inside the
+       try so a missing include file exits 2 via the Failure arm like
+       every other rejection. Relative paths resolve against the cwd
+       for the stdin program itself, then against each including
+       file's own directory below. *)
+    let source = Source_include.expand (In_channel.input_all stdin) in
+    let lexbuf = Lexing.from_string source in
     let program = Parser.prog Lexer.read lexbuf in
     check_reserved_names program;
 

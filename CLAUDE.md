@@ -31,6 +31,7 @@ Historical note: before Milestone 2 the codegen emitted Minecraft commands direc
 ### Module layout
 
 **Frontend**
+- `source_include.ml` — pre-lex `include "path"` splicing (line-wise directive, once-per-file, includer-relative paths, `cat` semantics). Runs on the raw stdin text in `main.ml` before the lexer.
 - `ast.ml` — AST types. `typ` includes `TInt`/`TBool`/`TUnit`/`TSelector`/`TPos` plus `TArr of typ * int` and `TMat of typ * int * int` for arrays and matrices.
 - `lexer.mll` — ocamllex source (generates `lexer.ml`, checked in).
 - `parser.mly` — menhir grammar (generates `parser.ml`/`.mli`, checked in). Uses a `seq_expr`/`expr` split to avoid a reduce/reduce conflict between list-separator `;` inside `[| … |]` and statement-level `Seq`.
