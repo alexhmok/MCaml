@@ -107,6 +107,17 @@ let register_type_decl (name : string) (params : string list)
      || not ((name.[0] >= 'a' && name.[0] <= 'z') || name.[0] = '_') then
     raise (Error (Printf.sprintf
       "type name '%s' must start with a lowercase letter" name));
+  (* G4b: multi-param decls make duplicate binders expressible
+     (`type ('a, 'a) t = ...`) — reject before registration so the
+     List.combine-based instantiation sites never silently shadow. *)
+  let rec first_dup = function
+    | [] -> None
+    | p :: rest -> if List.mem p rest then Some p else first_dup rest
+  in
+  (match first_dup params with
+   | Some p -> raise (Error (Printf.sprintf
+       "duplicate type parameter '%s in declaration of %s" p name))
+   | None -> ());
   (* Register the name (and its param list/arity) before validating
      fields so self-recursive/self-applied fields resolve — D3,
      extended by G4 to the param list too (`type 'a tree = Leaf | Node

@@ -1239,11 +1239,15 @@ self-recursion with source-order generalization.
       A true n-ary `(t1, t2) -> r` surface form would need `LPAREN
       nonempty_typ_comma_list RPAREN ARROW typ`, which shares a
       `LPAREN typ` prefix with the existing grouping atom `LPAREN typ
-      RPAREN` and cannot be disambiguated by menhir's LALR(1) lookahead
-      at the decision point; deferred as a mechanical follow-up. A
+      RPAREN` and was believed non-disambiguable by menhir's LALR(1)
+      lookahead at the decision point; deferred as a mechanical
+      follow-up. [CORRECTED 2026-07-11, G4b session: that belief was
+      wrong — the decision point is COMMA vs RPAREN, one token, and
+      menhir left-factors the shared prefix with zero conflicts. The
+      n-ary form landed with G4b.] A
       2+-ary LAMBDA EXPRESSION (`fun (x, y) -> ...`) is fully usable
       regardless — only an EXPLICIT annotation for a 2+-ary function
-      TYPE is out of v1 scope. `TFun` right-associates (`int -> int ->
+      TYPE was out of v1 scope (closed by G4b). `TFun` right-associates (`int -> int ->
       int` = a function returning a function), needed no extra grammar.
       Typing: all 12 functions from decision 1 got their TFun arm
       (`occurs`, `tvar_bindable`, `unify`, `zonk_default`, `copy_with`,
@@ -1794,6 +1798,24 @@ self-recursion with source-order generalization.
       `type 'a cell = { v : 'a }` (G4c) — neither needed by the D8
       nil-story target, which only needs `node option` as a field
       type.)
+- [x] G4b. Multi-param decls (`type ('a, 'b) either = ...`), multi-arg
+      type application (`(int, bool) either`), and — same grammar
+      shape, so folded in — n-ary arrow annotations (`(t1, t2) -> r`,
+      closing F1's arity-0/1 scope cut). Landed 2026-07-11 (approved
+      Stage 2 item from the language-limitations analysis). One
+      `typ_comma_list` helper serves both new LPAREN forms; the F1-era
+      LALR(1)-infeasibility claim was empirically refuted (zero menhir
+      conflicts — see the corrected F1 entry above). Typing side was
+      already N-ary by construction (`check_typ_ok` arity checker,
+      `subst_typarams`, `instantiate_ctor`); the one genuinely new
+      typing check is duplicate-param rejection
+      (`type ('a, 'a) t` → "duplicate type parameter") in
+      `register_type_decl`. Pinned by `test/test_parser_g4b.ml`
+      (alcotest AST-shape checks incl. grouping/tuple-arrow
+      back-compat) and e2e probes (multi-param either + match +
+      2-ary lambda through `(int, int) -> int`, arity + dup
+      rejections). All 9 canary hashes byte-identical. G4c
+      (parameterized records) remains deferred.
 
 ## 3. Load-bearing design decisions
 

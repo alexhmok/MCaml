@@ -62,6 +62,8 @@ let strip_tyvar tv = String.sub tv 1 (String.length tv - 1)
 %type <Ast.typ> typ
 %type <Ast.typ> typ_atom
 %type <Ast.typ list> star_typ_list
+%type <Ast.typ list> typ_comma_list
+%type <string list> tyvar_comma_list
 %type <(string * Ast.typ)> param
 %type <Ast.binop> binop
 %type <(string * Ast.typ) list> param_list
@@ -128,6 +130,10 @@ definition:
      decls are a deferred follow-up. */
   | TYPE tv = TYVAR name = ID EQUAL opt_bar ctors = ctor_list
     { TypeDecl(name, [strip_tyvar tv], ctors) }
+  /* G4b: multi-param decl, e.g. `type ('a, 'b) either = ...`.
+     Duplicate param names are rejected in typing (register_type_decl). */
+  | TYPE LPAREN tvs = tyvar_comma_list RPAREN name = ID EQUAL opt_bar ctors = ctor_list
+    { TypeDecl(name, List.map strip_tyvar tvs, ctors) }
   /* D8: record declaration. Fields in decl order; registration and
      the global-field-namespace check live in typing.ml. */
   | TYPE name = ID EQUAL LBRACE fields = record_field_decls RBRACE
@@ -174,28 +180,34 @@ param:
    itself; two or more become TTuple.
    Phase F: `t -> r` / `() -> r` arrow-type ANNOTATION syntax (distinct
    from the Lambda EXPRESSION grammar above, which needs no arrow
-   surface syntax at all since a lambda's own type is inferred). v1
-   scope: arity 0 and arity 1 only, mirroring G4's own single-param
-   scope cut for type application (§13.11 decision 4) — a true n-ary
-   `(t1, t2) -> r` surface form would need `LPAREN
-   nonempty_typ_comma_list RPAREN ARROW typ`, which shares a prefix
-   with the existing `LPAREN typ RPAREN` grouping atom below (both
-   start `LPAREN typ`) and cannot be disambiguated by menhir's LALR(1)
-   lookahead at the point the parser must choose between them; the
-   single-arg case sidesteps this entirely (no LPAREN at the front) and
-   arity>=2 HOF parameters are deferred as a mechanical follow-up (a
-   2+-ary LAMBDA EXPRESSION `fun (x, y) -> ...` is still fully usable
-   and infers its own TFun([tx;ty],tret) type — only an EXPLICIT
-   annotation for one is out of v1 scope). Right-recursive on [typ]
-   itself so `int -> int -> int` (a function returning a function,
-   decision 2's HOF-factory case) associates right with zero extra
-   grammar. */
+   surface syntax at all since a lambda's own type is inferred).
+   G4b: the n-ary form `(t1, t2) -> r` and multi-arg type application
+   `(t1, t2) name` joined via [typ_comma_list]. F1's session notes
+   claimed the shared `LPAREN typ` prefix with the grouping atom could
+   not be LALR(1)-disambiguated; that was wrong — the decision point is
+   COMMA vs RPAREN, one token, and menhir left-factors the prefix with
+   zero conflicts (verified by running menhir on this exact grammar,
+   2026-07-11). Right-recursive on [typ] itself so `int -> int -> int`
+   (a function returning a function, decision 2's HOF-factory case)
+   associates right with zero extra grammar. */
 typ:
   | t = star_typ_list ARROW ret = typ
       { TFun ([(match t with [x] -> x | ts -> TTuple ts)], ret) }
   | LPAREN RPAREN ARROW ret = typ
       { TFun ([], ret) }
+  /* G4b: n-ary arrow annotation `(t1, t2) -> r`. */
+  | LPAREN t = typ COMMA rest = typ_comma_list RPAREN ARROW ret = typ
+      { TFun (t :: rest, ret) }
   | ts = star_typ_list { match ts with [t] -> t | ts -> TTuple ts }
+
+typ_comma_list:
+  | t = typ { [t] }
+  | t = typ COMMA rest = typ_comma_list { t :: rest }
+
+/* G4b: `('a, 'b)` decl-side param list. */
+tyvar_comma_list:
+  | tv = TYVAR { [tv] }
+  | tv = TYVAR COMMA rest = tyvar_comma_list { tv :: rest }
 
 star_typ_list:
   | t = typ_atom { [t] }
@@ -220,9 +232,13 @@ typ_atom:
   | LPAREN t = typ RPAREN { t }   /* D7: grouping, e.g. a tuple-typed ctor field `of (int * int) * t` */
   /* G4: postfix type application, e.g. `int option`, `int option
      option`, `(int * int) option`. Left-recursive on typ_atom so it
-     composes with LPAREN-grouping and nests for free. v1: single arg
-     only (§13.11 decision 4). */
+     composes with LPAREN-grouping and nests for free. */
   | t = typ_atom name = ID { TAdt (name, [t]) }
+  /* G4b: multi-arg type application `(int, bool) either`. Shares its
+     LPAREN prefix with the grouping atom above; disambiguated at
+     COMMA vs RPAREN (one token — zero menhir conflicts). */
+  | LPAREN t = typ COMMA rest = typ_comma_list RPAREN name = ID
+      { TAdt (name, t :: rest) }
   /* G4/decision 5: `list` joins the postfix grammar (`float list`,
      `t list`); the bare T_LIST keyword above stays `int list` for
      back-compat. */

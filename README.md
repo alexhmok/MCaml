@@ -111,7 +111,7 @@ version, not per-type clones.
 | `list` | Cons list of ints. |
 | `t1 * t2 * …` | Tuple. |
 | `{ f1 : t; … }` | Record (declared via `type`). |
-| `t -> t` | Function value (lambdas; no partial application). Only one-argument function types can be written as annotations; multi-argument lambdas work but have their types inferred. |
+| `t -> t`, `(t1, t2) -> t` | Function value (lambdas; no partial application). N-ary annotations use the parenthesized comma form; `t1 * t2 -> t` is a one-argument function taking a tuple. |
 | `sel`, `pos` | Minecraft entity selector / position (see interop). |
 
 ### Numbers
@@ -170,6 +170,12 @@ fun demo(): int =
   let p = { x = 9; y = 16 } in     (* record literal, field access p.x *)
   area(Rect(a, b)) + sum(l, 0) + p.x + p.y
 ```
+
+Type declarations can be parameterized: `type 'a box = Box of 'a`,
+`type ('a, 'b) either = Left of 'a | Right of 'b`. Application is
+postfix — `int box`, `int box box`, `(int * int) box` — with the
+parenthesized comma form for multi-argument types: `(int, bool) either`.
+Records cannot be parameterized yet.
 
 Patterns nest (`Node(Leaf(a), _)`), support int literals, wildcards
 (`_`), and variable binders; the checker rejects non-exhaustive and
