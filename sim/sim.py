@@ -20,11 +20,20 @@ class _ReturnFromFunction(Exception):
         self.value = value
 
 
+# Unmodeled world-mutating commands recorded into World.viz (see below).
+_VIZ_COMMANDS = ("setblock ", "fill ", "summon ", "kill ", "particle ",
+                 "tellraw ")
+
+
 class World:
     def __init__(self):
         self.scores: dict[str, int] = {"$c256": 256}
         self.storage: dict[str, dict] = {}
         self.say: list[str] = []
+        # World-mutating commands (setblock/fill/...) are not modeled, but
+        # executed ones are logged here so tests can assert on the
+        # visualization command stream.
+        self.viz: list[str] = []
 
 
 def load(name: str) -> list[str]:
@@ -330,6 +339,11 @@ def _exec_plain(world: World, cmd: str, depth: int, macros: dict | None = None) 
         if val is None:
             return 0
         return int(val) * scale
+
+    for _p in _VIZ_COMMANDS:
+        if cmd.startswith(_p):
+            world.viz.append(cmd)
+            return None
 
     return None
 

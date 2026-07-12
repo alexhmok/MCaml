@@ -30,6 +30,19 @@ PACK_MCMETA = {
     }
 }
 
+# Vanilla counts EVERY command in a function chain against
+# maxCommandChainLength (default 65536), including `execute if/unless`
+# lines whose conditions fail. MCaml's guard-chain codegen emits exactly
+# such lines — a compiled if/match dispatch runs its full command count
+# no matter which arm is taken — so one scheduled step of a nontrivial
+# program can exceed the vanilla limit and silently stop mid-chain
+# (observed: graph-viz bfs_step froze after ~25 loop iterations at
+# 65536 commands on 1.21.4; sim.py counts only taken commands and
+# never sees this). Raise the rule at load. Overridable/skippable via
+# --chain-length.
+CHAIN_LENGTH_DEFAULT = 10_000_000
+CHAIN_LENGTH_LINE = "gamerule maxCommandChainLength {n}\n"
+
 INIT_MCFUNCTION = """\
 scoreboard objectives add vars dummy
 data modify storage mcaml:stk frames set value []
@@ -72,7 +85,8 @@ def collect_mcfunctions(input_dir: Path) -> list[Path]:
     return files
 
 
-def build_tree(staging: Path, name: str, sources: list[Path]) -> None:
+def build_tree(staging: Path, name: str, sources: list[Path],
+               chain_length: int = CHAIN_LENGTH_DEFAULT) -> None:
     pack_root = staging / name
     fn_dir = pack_root / "data" / "mcaml" / "function"
     tag_dir = pack_root / "data" / "minecraft" / "tags" / "function"
@@ -82,7 +96,10 @@ def build_tree(staging: Path, name: str, sources: list[Path]) -> None:
     (pack_root / "pack.mcmeta").write_text(
         json.dumps(PACK_MCMETA, indent=2) + "\n"
     )
-    (fn_dir / "init.mcfunction").write_text(INIT_MCFUNCTION)
+    init_text = INIT_MCFUNCTION
+    if chain_length > 0:
+        init_text = CHAIN_LENGTH_LINE.format(n=chain_length) + init_text
+    (fn_dir / "init.mcfunction").write_text(init_text)
     has_globals = any(src.name == "__globals_init.mcfunction" for src in sources)
     load_json = LOAD_JSON_WITH_GLOBALS if has_globals else LOAD_JSON
     (tag_dir / "load.json").write_text(
@@ -125,6 +142,10 @@ def main() -> None:
                     help="datapack name (root dir name inside the pack)")
     ap.add_argument("--output", required=True, type=Path,
                     help="output path: .zip for zipped pack, dir for loose")
+    ap.add_argument("--chain-length", type=int, default=CHAIN_LENGTH_DEFAULT,
+                    help="maxCommandChainLength set by init.mcfunction at "
+                         f"load (default {CHAIN_LENGTH_DEFAULT}; 0 = leave "
+                         "the game rule untouched)")
     args = ap.parse_args()
 
     if not args.input.is_dir():
@@ -139,7 +160,7 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as td:
         staging = Path(td)
-        build_tree(staging, args.name, sources)
+        build_tree(staging, args.name, sources, args.chain_length)
         staging_pack = staging / args.name
         if zip_mode:
             emit_zip(staging_pack, args.output)

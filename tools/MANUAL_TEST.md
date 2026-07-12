@@ -20,8 +20,11 @@ This is the gate that catches what `sim.py` cannot:
 - Minecraft Java Edition 1.20.5 or later (the `pack_format: 41`
   baseline; `supported_formats: [41, 81]` widens the accepted range
   through 1.21.x).
-- A creative-mode test world. A fresh flat world is fine; nothing in
-  the pack touches blocks or entities.
+- A creative-mode test world. A fresh flat world is fine; the test
+  suites don't touch blocks or entities. (Exception: the graph
+  visualization demo — `mcaml_graph`, see tools/README.md — builds
+  block structures around 0,58,0 and summons tagged `text_display`
+  entities; `/function mcaml:graph_despawn` removes everything.)
 - `mcaml` built from the project root per CLAUDE.md.
 
 ## Procedure
@@ -78,7 +81,16 @@ This is the gate that catches what `sim.py` cannot:
 
    The output must include `vars`. If it doesn't, `init.mcfunction`
    didn't run — check `data/minecraft/tags/function/load.json` in the
-   packed datapack.
+   packed datapack. Also confirm the chain limit was raised:
+
+   ```
+   /gamerule maxCommandChainLength
+   ```
+
+   should print 10000000 (the packer default), not 65536. At the
+   vanilla 65536, long-running steps can stop silently mid-chain
+   ("Command execution stopped due to limit" appears only in the
+   server log, not chat) and any `schedule`-driven animation freezes.
 
 5. **Run the entrypoint.** For `test_full_chain.mcaml` (parameterless):
 

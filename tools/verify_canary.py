@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Refactor gate: compile the 5 MCaml test programs, run their sim
+"""Refactor gate: compile the 6 MCaml test programs, run their sim
 checkers, and print a canary hash per build (sha256 over the sorted-by-name
 concatenation of the emitted .mcfunction files).
 
 Usage:  python3 tools/verify_canary.py
-Exit 0 iff all five suites compile and pass. Compare hashes across
+Exit 0 iff all six suites compile and pass. Compare hashes across
 commits to prove a refactor is byte-identical.
 """
 import hashlib
@@ -19,6 +19,7 @@ SUITES = [
     (["lib/math.mcaml", "scripts/mc_test_suite_phase_e.mcaml"], "/tmp/build_e", "tools/sim_check_phase_e.py"),
     (["lib/math.mcaml", "scripts/stress_test.mcaml"], "/tmp/build_s1", "tools/sim_check_stress.py"),
     (["lib/math.mcaml", "scripts/stress_test_2.mcaml"], "/tmp/build_s2", "tools/sim_check_stress2.py"),
+    (["scripts/graph_world.mcaml", "scripts/graph_algos.mcaml"], "/tmp/build_graph", "tools/sim_check_graph.py"),
 ]
 
 

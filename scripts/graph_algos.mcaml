@@ -1,0 +1,491 @@
+(* Graph algorithms with live in-world visualization.
+   Compile concatenated after the generated world layer:
+
+       cat scripts/graph_world.mcaml scripts/graph_algos.mcaml | ./mcaml -o build_graph
+
+   Each algorithm is a <name>_start / <name>_step pair. _step performs ONE
+   logical step, recolors the affected blocks, then reschedules itself via
+   `schedule function mcaml:<name>_step 20t` unless finished. All state
+   lives in global val arrays (storage mcaml:heap, tick-persistent) plus
+   the raw scoreboard flag $graph_done that the harness / in-game user
+   polls. st[15] holds the active-algorithm token so starting a new
+   algorithm orphans any pending schedule from the previous one.
+
+   Graph sizes come from gsz (emitted by tools/gen_graph_viz.py):
+   gsz[0]=nodes A, gsz[1]=edges A, gsz[2]=nodes B (sink = gsz[2]-1),
+   gsz[3]=edges B. The val arrays below are CAPACITIES and must satisfy
+   nodes <= 32, edges <= 64, flow nodes^2 <= 144; resizing the graphs
+   within those caps is a generator-only change.
+
+   Scan-order contract with tools/sim_check_graph.py references:
+   edges scanned in ascending index order; BFS marks at enqueue;
+   min-scans take the FIRST minimum. INF = 999999; "none" = 0 with +1
+   encoding in par. *)
+
+(* Control block:
+   st[0]=done  st[1]=queue head  st[2]=queue tail / stack ptr
+   st[3]=cursor  st[4]=count  st[5]=accumulator (MST weight / flow)
+   st[6]=vlog length  st[7]=prev current node + 1 (0 = none)
+   st[8]=phase (kruskal)  st[9]=edge under consideration (kruskal)
+   st[15]=active algo token (1=bfs 2=dfs 3=dijkstra 4=prim 5=kruskal 6=ek) *)
+val st   = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]
+val dist = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]
+val vis  = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]
+val par  = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]   (* parent node + 1; 0 = none *)
+val pare = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]   (* parent edge idx + 1; 0 = none *)
+val best = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]   (* Prim keys *)
+val dsu  = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]   (* union-find parents *)
+val stk  = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]   (* queue / stack, cap 64 *)
+val eord = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]   (* Kruskal sorted edge order *)
+val est  = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]   (* per-edge logical state *)
+val cap  = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]   (* EK capacity matrix, idx u*gsz[2]+v *)
+val flw  = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]   (* EK flow matrix, skew-symmetric *)
+val vlog = [| 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0;
+              0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 |]   (* event log for the harness *)
+
+(* ---------------------------------------------------------- shared *)
+
+fun vlog_push (x: int) : unit =
+  if st[6] < 64 then (
+    vlog[st[6]] := x;
+    st[6] := st[6] + 1
+  ) else ()
+
+fun reset_node_state () : unit =
+  for i = 0 to 32 do
+    dist[i] := 0; vis[i] := 0; par[i] := 0; pare[i] := 0; best[i] := 0
+  done;
+  for i = 0 to 64 do vlog[i] := 0 done;
+  for i = 0 to 16 do st[i] := 0 done
+
+(* Recolor the previously-current node lime (visited). *)
+fun retire_current () : unit =
+  if st[7] > 0 then viz_node(st[7] - 1, 3) else ()
+
+fun finish (msg: int) : unit =
+  st[0] := 1;
+  cmd! "scoreboard players set $graph_done vars 1"
+
+(* ------------------------------------------------------------- BFS *)
+
+fun bfs_start () : unit =
+  cmd! "scoreboard players set $graph_done vars 0";
+  graph_reset();
+  reset_node_state();
+  st[15] := 1;
+  stk[0] := 0; vis[0] := 1; st[2] := 1;
+  viz_node(0, 1);
+  cmd! "say [bfs] start from node 0";
+  cmd! "schedule function mcaml:bfs_step 20t"
+
+fun bfs_step () : unit =
+  if (st[15] = 1) && (st[0] = 0) then (
+    retire_current();
+    let u = stk[st[1]] in
+    st[1] := st[1] + 1;
+    viz_node(u, 2);
+    st[7] := u + 1;
+    vlog_push(u);
+    for j = 0 to gsz[1] do
+      let a = eu[j] in
+      let b = ev[j] in
+      let v = if a = u then b else if b = u then a else 0 - 1 in
+      if v >= 0 then (
+        if vis[v] = 0 then (
+          vis[v] := 1;
+          par[v] := u + 1;
+          pare[v] := j + 1;
+          dist[v] := dist[u] + 1;
+          stk[st[2]] := v;
+          st[2] := st[2] + 1;
+          viz_edge(j, 2);
+          viz_node(v, 1)
+        ) else ()
+      ) else ()
+    done;
+    if st[1] = st[2] then (
+      retire_current();
+      cmd! "say [bfs] done - depths shown by visit wave";
+      finish(0)
+    ) else
+      cmd! "schedule function mcaml:bfs_step 20t"
+  ) else ()
+
+(* ------------------------------------------------------------- DFS *)
+
+fun dfs_start () : unit =
+  cmd! "scoreboard players set $graph_done vars 0";
+  graph_reset();
+  reset_node_state();
+  st[15] := 2;
+  stk[0] := 0; st[2] := 1;
+  viz_node(0, 1);
+  cmd! "say [dfs] start from node 0";
+  cmd! "schedule function mcaml:dfs_step 20t"
+
+fun dfs_step () : unit =
+  if (st[15] = 2) && (st[0] = 0) then (
+    retire_current();
+    (* pop until an unvisited node surfaces (stale duplicates are skipped) *)
+    let u = ref (0 - 1) in
+    for k = 0 to 64 do
+      if (!u < 0) && (st[2] > 0) then (
+        let t = stk[st[2] - 1] in
+        st[2] := st[2] - 1;
+        if vis[t] = 0 then u := t else ()
+      ) else ()
+    done;
+    if !u < 0 then (
+      cmd! "say [dfs] done";
+      finish(0)
+    ) else (
+      let un = !u in
+      vis[un] := 1;
+      viz_node(un, 2);
+      st[7] := un + 1;
+      vlog_push(un);
+      if pare[un] > 0 then viz_edge(pare[un] - 1, 2) else ();
+      for j = 0 to gsz[1] do
+        let a = eu[j] in
+        let b = ev[j] in
+        let v = if a = un then b else if b = un then a else 0 - 1 in
+        if v >= 0 then (
+          if vis[v] = 0 then (
+            par[v] := un + 1;
+            pare[v] := j + 1;
+            stk[st[2]] := v;
+            st[2] := st[2] + 1;
+            viz_node(v, 1)
+          ) else ()
+        ) else ()
+      done;
+      cmd! "schedule function mcaml:dfs_step 20t"
+    )
+  ) else ()
+
+(* -------------------------------------------------------- Dijkstra *)
+
+fun dijkstra_start () : unit =
+  cmd! "scoreboard players set $graph_done vars 0";
+  graph_reset();
+  reset_node_state();
+  st[15] := 3;
+  for i = 0 to gsz[0] do dist[i] := 999999 done;
+  dist[0] := 0;
+  viz_node(0, 1);
+  cmd! "say [dijkstra] start from node 0";
+  cmd! "schedule function mcaml:dijkstra_step 20t"
+
+fun dijkstra_step () : unit =
+  if (st[15] = 3) && (st[0] = 0) then (
+    retire_current();
+    (* settle the unvisited node with the smallest tentative distance *)
+    let u = ref (0 - 1) in
+    let bestd = ref 999999 in
+    for i = 0 to gsz[0] do
+      if (vis[i] = 0) && (dist[i] < !bestd) then (
+        bestd := dist[i];
+        u := i
+      ) else ()
+    done;
+    if !u < 0 then (
+      for i = 0 to gsz[0] do
+        if pare[i] > 0 then viz_edge(pare[i] - 1, 2) else ()
+      done;
+      cmd! "say [dijkstra] done - shortest-path tree in lime";
+      finish(0)
+    ) else (
+      let un = !u in
+      vis[un] := 1;
+      viz_node(un, 2);
+      st[7] := un + 1;
+      vlog_push(un);
+      for j = 0 to gsz[1] do
+        let a = eu[j] in
+        let b = ev[j] in
+        let v = if a = un then b else if b = un then a else 0 - 1 in
+        if v >= 0 then (
+          if vis[v] = 0 then (
+            let nd = dist[un] + ew[j] in
+            if nd < dist[v] then (
+              (* a better route supersedes v's old candidate edge *)
+              if pare[v] > 0 then viz_edge(pare[v] - 1, 0) else ();
+              dist[v] := nd;
+              par[v] := un + 1;
+              pare[v] := j + 1;
+              viz_edge(j, 1);
+              viz_node(v, 1)
+            ) else ()
+          ) else ()
+        ) else ()
+      done;
+      cmd! "schedule function mcaml:dijkstra_step 20t"
+    )
+  ) else ()
+
+(* ------------------------------------------------------------ Prim *)
+
+fun prim_start () : unit =
+  cmd! "scoreboard players set $graph_done vars 0";
+  graph_reset();
+  reset_node_state();
+  st[15] := 4;
+  for i = 0 to gsz[0] do best[i] := 999999 done;
+  best[0] := 0;
+  viz_node(0, 1);
+  cmd! "say [prim] start from node 0";
+  cmd! "schedule function mcaml:prim_step 20t"
+
+fun prim_step () : unit =
+  if (st[15] = 4) && (st[0] = 0) then (
+    retire_current();
+    (* pick the unvisited node with the cheapest crossing edge *)
+    let u = ref (0 - 1) in
+    let bestw = ref 999999 in
+    for i = 0 to gsz[0] do
+      if (vis[i] = 0) && (best[i] < !bestw) then (
+        bestw := best[i];
+        u := i
+      ) else ()
+    done;
+    if !u < 0 then (
+      cmd! "say [prim] done - MST in lime";
+      finish(0)
+    ) else (
+      let un = !u in
+      vis[un] := 1;
+      viz_node(un, 2);
+      st[7] := un + 1;
+      if pare[un] > 0 then (
+        viz_edge(pare[un] - 1, 2);
+        st[5] := st[5] + ew[pare[un] - 1];
+        vlog_push(pare[un] - 1)          (* vlog records ACCEPTED EDGES *)
+      ) else ();
+      for j = 0 to gsz[1] do
+        let a = eu[j] in
+        let b = ev[j] in
+        let v = if a = un then b else if b = un then a else 0 - 1 in
+        if v >= 0 then (
+          if vis[v] = 0 then (
+            if ew[j] < best[v] then (
+              if pare[v] > 0 then viz_edge(pare[v] - 1, 0) else ();
+              best[v] := ew[j];
+              par[v] := un + 1;
+              pare[v] := j + 1;
+              viz_edge(j, 1);
+              viz_node(v, 1)
+            ) else ()
+          ) else ()
+        ) else ()
+      done;
+      cmd! "schedule function mcaml:prim_step 20t"
+    )
+  ) else ()
+
+(* --------------------------------------------------------- Kruskal *)
+
+fun dsu_find (x: int) : int =
+  if dsu[x] = x then x else dsu_find(dsu[x])
+
+(* Index of the lightest edge in eord[i..gsz[1]-1]. Top-level (not inline
+   in the sort loop) because a ref bound inside an outer for body can't be
+   dereferenced from a nested lifted loop. *)
+fun eord_min_from (i: int) : int =
+  let m = ref i in
+  for j = i + 1 to gsz[1] do
+    if ew[eord[j]] < ew[eord[!m]] then m := j else ()
+  done;
+  !m
+
+fun kruskal_start () : unit =
+  cmd! "scoreboard players set $graph_done vars 0";
+  graph_reset();
+  reset_node_state();
+  st[15] := 5;
+  for i = 0 to gsz[0] do dsu[i] := i done;
+  for j = 0 to gsz[1] do eord[j] := j; est[j] := 0 done;
+  (* selection sort by weight, ascending; weights are distinct so stable *)
+  for i = 0 to gsz[1] do
+    let m = eord_min_from(i) in
+    let t = eord[i] in
+    eord[i] := eord[m];
+    eord[m] := t
+  done;
+  cmd! "say [kruskal] start - edges sorted by weight";
+  cmd! "schedule function mcaml:kruskal_step 20t"
+
+(* Two-phase animation: phase 0 (st[8]=0) pulls the next cheapest edge and
+   colors it orange (considering); phase 1 decides accept/reject via
+   union-find. st[9] holds the edge under consideration. *)
+fun kruskal_step () : unit =
+  if (st[15] = 5) && (st[0] = 0) then (
+    if st[8] = 0 then (
+      if (st[4] = gsz[0] - 1) || (st[3] >= gsz[1]) then (
+        cmd! "say [kruskal] done - MST in lime";
+        finish(0)
+      ) else (
+        let e = eord[st[3]] in
+        st[3] := st[3] + 1;
+        st[9] := e;
+        viz_edge(e, 1);
+        st[8] := 1;
+        cmd! "schedule function mcaml:kruskal_step 20t"
+      )
+    ) else (
+      let e = st[9] in
+      let ru = dsu_find(eu[e]) in
+      let rv = dsu_find(ev[e]) in
+      if ru = rv then (
+        viz_edge(e, 3);
+        est[e] := 2
+      ) else (
+        dsu[ru] := rv;
+        viz_edge(e, 2);
+        est[e] := 1;
+        st[5] := st[5] + ew[e];
+        st[4] := st[4] + 1;
+        vlog_push(e);
+        viz_node(eu[e], 3);
+        viz_node(ev[e], 3)
+      );
+      st[8] := 0;
+      cmd! "schedule function mcaml:kruskal_step 20t"
+    )
+  ) else ()
+
+(* ---------------------------------------- Edmonds-Karp max-flow/min-cut *)
+
+(* Forward flow-edge index for (u,v), or -1 when (u,v) is only a residual
+   back-edge (then there is nothing to recolor). *)
+fun fedge_idx (u: int, v: int) : int =
+  let r = ref (0 - 1) in
+  for j = 0 to gsz[3] do
+    if (fu[j] = u) && (fv[j] = v) then r := j else ()
+  done;
+  !r
+
+fun ek_start () : unit =
+  cmd! "scoreboard players set $graph_done vars 0";
+  graph_reset();
+  reset_node_state();
+  st[15] := 6;
+  for i = 0 to 144 do cap[i] := 0; flw[i] := 0 done;
+  for j = 0 to gsz[3] do cap[fu[j] * gsz[2] + fv[j]] := fc[j] done;
+  cmd! "say [maxflow] start: source S (blue) to sink T (red)";
+  cmd! "schedule function mcaml:ek_step 40t"
+
+(* One step = one full augmenting-path phase: repaint transients, BFS the
+   residual graph, then either augment along the parent path or finish by
+   painting the min cut. Sink node id = gsz[2] - 1 (last). *)
+fun ek_step () : unit =
+  if (st[15] = 6) && (st[0] = 0) then (
+    (* sink bound to a plain int local: `ref (gsz[2] - 1)` would defeat
+       for_lift's ref detection (globals aren't typeable at that stage) *)
+    let sink = gsz[2] - 1 in
+    (* clear last step's transient colors: edges idle/saturated, inner nodes idle *)
+    for j = 0 to gsz[3] do
+      if cap[fu[j] * gsz[2] + fv[j]] - flw[fu[j] * gsz[2] + fv[j]] = 0 then
+        viz_fedge(j, 5)
+      else
+        viz_fedge(j, 0)
+    done;
+    for i = 1 to sink do viz_fnode(i, 0) done;
+    (* BFS over the residual graph from S=0 *)
+    for i = 0 to gsz[2] do vis[i] := 0; par[i] := 0 done;
+    let qh = ref 0 in
+    let qt = ref 1 in
+    stk[0] := 0;
+    vis[0] := 1;
+    for it = 0 to gsz[2] do
+      if !qh < !qt then (
+        let u = stk[!qh] in
+        qh := !qh + 1;
+        for v = 0 to gsz[2] do
+          if (vis[v] = 0) && (cap[u * gsz[2] + v] - flw[u * gsz[2] + v] > 0) then (
+            vis[v] := 1;
+            par[v] := u + 1;
+            stk[!qt] := v;
+            qt := !qt + 1
+          ) else ()
+        done
+      ) else ()
+    done;
+    if vis[sink] = 0 then (
+      (* no augmenting path: paint the min cut and finish *)
+      for i = 1 to sink do
+        if vis[i] = 1 then viz_fnode(i, 6) else viz_fnode(i, 7)
+      done;
+      for j = 0 to gsz[3] do
+        if (vis[fu[j]] = 1) && (vis[fv[j]] = 0) then viz_fedge(j, 3) else ()
+      done;
+      cmd! "say [maxflow] done - min cut in red, flow value in $graph_flow";
+      cmd! "execute store result score $graph_flow vars run data get storage mcaml:heap __g_st[5] 1";
+      finish(0)
+    ) else (
+      (* bottleneck along the parent path T..S *)
+      let b = ref 999999 in
+      let v = ref sink in
+      for k = 0 to gsz[2] do
+        if !v > 0 then (
+          let u = par[!v] - 1 in
+          if cap[u * gsz[2] + !v] - flw[u * gsz[2] + !v] < !b then
+            b := cap[u * gsz[2] + !v] - flw[u * gsz[2] + !v]
+          else ();
+          v := u
+        ) else ()
+      done;
+      (* augment and paint the path *)
+      v := sink;
+      for k = 0 to gsz[2] do
+        if !v > 0 then (
+          let u = par[!v] - 1 in
+          flw[u * gsz[2] + !v] := flw[u * gsz[2] + !v] + !b;
+          flw[!v * gsz[2] + u] := flw[!v * gsz[2] + u] - !b;
+          let e = fedge_idx(u, !v) in
+          if e >= 0 then (
+            if cap[u * gsz[2] + !v] - flw[u * gsz[2] + !v] = 0 then viz_fedge(e, 5)
+            else viz_fedge(e, 4)
+          ) else ();
+          if (!v > 0) && (!v < sink) then viz_fnode(!v, 1) else ();
+          v := u
+        ) else ()
+      done;
+      st[5] := st[5] + !b;
+      vlog_push(!b);
+      cmd! "say [maxflow] augmented along yellow path";
+      cmd! "schedule function mcaml:ek_step 40t"
+    )
+  ) else ()
