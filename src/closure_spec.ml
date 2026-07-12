@@ -88,6 +88,13 @@ let chase_copies (info : def_info) (v : vreg) : vreg =
   let visited = Hashtbl.create 8 in
   let rec go v =
     if Hashtbl.mem visited v then v
+    (* $ref_* slots are shared, by name, with every for_lift helper of
+       the enclosing function (and written by RefSet from any of them),
+       so per-function def counting says nothing about what a ref slot
+       holds at runtime — stop the chase here and let the caller treat
+       it as unresolvable (decision-8 follow-up: ref-held closures
+       always take the apply-dispatch path). *)
+    else if String.starts_with ~prefix:"$ref_" v then v
     else begin
       Hashtbl.replace visited v ();
       match Hashtbl.find_opt info.def_count v,
@@ -103,12 +110,17 @@ let chase_copies (info : def_info) (v : vreg) : vreg =
    through single-def ICopy chains) an IClosureMake. *)
 let resolve_origin (info : def_info) (v : vreg) : (string * vreg list) option =
   let t = chase_copies info v in
-  match Hashtbl.find_opt info.def_count t with
-  | Some 1 ->
-      (match Hashtbl.find_opt info.def_instr t with
-       | Some (IClosureMake (_, fname, caps)) -> Some (fname, caps)
-       | _ -> None)
-  | _ -> None
+  (* A $ref_-rooted operand is never resolvable: the slot is writable
+     by name from other functions (for_lift helpers), so a single
+     in-function IClosureMake def proves nothing (see chase_copies). *)
+  if String.starts_with ~prefix:"$ref_" t then None
+  else
+    match Hashtbl.find_opt info.def_count t with
+    | Some 1 ->
+        (match Hashtbl.find_opt info.def_instr t with
+         | Some (IClosureMake (_, fname, caps)) -> Some (fname, caps)
+         | _ -> None)
+    | _ -> None
 
 (* ---- F6a: per-lambda specialize/escape diagnostic report ----
 
@@ -195,14 +207,31 @@ let note_escape (lam_fname : string) (fname : string) (reason : string) : unit =
    known, deliberate gap rather than silently pretended-complete. *)
 let note_unresolved_closure_use (info : def_info) (fname : string) (v : vreg) : unit =
   let t = chase_copies info v in
-  match Hashtbl.find_opt info.def_count t with
-  | Some n when n <> 1 ->
-      List.iter (fun i -> match i with
-        | IClosureMake (_, lam_fname, _) ->
-            note_escape lam_fname fname "ambiguous control-flow merge"
-        | _ -> ()
-      ) (find_or info.all_defs t [])
-  | _ -> ()
+  if String.starts_with ~prefix:"$ref_" t then
+    (* Decision-8 follow-up made this reachable: a closure read back out
+       of a ref. Attribute every IClosureMake THIS function wrote into
+       the slot (best-effort — a for_lift helper's write is invisible
+       here, same caveat as the merge case). *)
+    List.iter (fun i -> match i with
+      | IClosureMake (_, lam_fname, _) ->
+          note_escape lam_fname fname "stored in a ref"
+      | _ -> ()
+    ) (find_or info.all_defs t [])
+  else if t = "$ret" then
+    (* Also decision-8-reachable: a HOF-factory return that survived
+       un-inlined. The producing lambda lives in the factory, not this
+       function, so there is no IClosureMake here to attribute — the
+       report stays silent for this site (documented best-effort gap). *)
+    ()
+  else
+    match Hashtbl.find_opt info.def_count t with
+    | Some n when n <> 1 ->
+        List.iter (fun i -> match i with
+          | IClosureMake (_, lam_fname, _) ->
+              note_escape lam_fname fname "ambiguous control-flow merge"
+          | _ -> ()
+        ) (find_or info.all_defs t [])
+    | _ -> ()
 
 (* ---- same-function case ---- *)
 
@@ -257,9 +286,19 @@ let only_directly_applied (callee : cfg_func) (idx : int) : string option =
                        then "forwarded across a self-tail back-edge"
                        else "forwarded through 2+ HOF hops")
   in
+  let check_ref_store d s =
+    (* A copy into a $ref_ slot is a real leak, not alias propagation:
+       the ref outlives this analysis (readable/writable by name from
+       for_lift helpers, deref-able after the decision-8 follow-up), so
+       a clone that drops the parameter would leave the stored handle
+       dangling. *)
+    if !reason = None && String.starts_with ~prefix:"$ref_" d
+       && Hashtbl.mem aliases s then
+      reason := Some "stored in a ref"
+  in
   Array.iter (fun (b : block) ->
     List.iter (fun i -> match i with
-      | ICopy (_, s) -> ignore s (* alias propagation edge; not itself a leak *)
+      | ICopy (d, s) -> check_ref_store d s (* else: alias edge, not a leak *)
       | IApply (_, cl, args) ->
           (* closure-operand membership is the intended direct-call use;
              appearing in args (forwarded as a plain value) disqualifies. *)

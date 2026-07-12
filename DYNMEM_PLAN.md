@@ -4901,6 +4901,35 @@ knormal message stays exactly as-is; `test_lambdas.py`'s new
 with the same message) so a future session doesn't silently regress or
 accidentally "fix" this boundary without re-opening the decision.
 
+**RE-OPENED AND LIFTED 2026-07-11** (the language-limitations analysis
+session formally re-opened this per the paragraph above; approved by
+the user as a named Stage 2 item). knormal now seeds `closure_env`
+from three additional shapes it can prove closure-typed WITHOUT a full
+per-variable type environment: (a) `let g = f(args)` where `f`'s
+registered `fun_sigs` return type is `TFun` (HOF-factory return — the
+exact `make_adder` case this decision originally scoped out), (b)
+`let g = !r` where the whole-program `seed_ref_env` prepass marked `r`
+closure-holding (its `ref` initializer or any `:=` RHS is a Closure
+literal or a TFun-returning call), and (c) `let h = g` where `g` is
+already tracked. All three lower to `KApply` and ride F5's existing
+apply-dispatch runtime unchanged. Soundness guard that made (b) safe:
+`closure_spec`'s `chase_copies`/`resolve_origin` now treat any
+`$ref_`-rooted operand as unresolvable (a ref slot is written by name
+from for_lift helpers — other functions — so per-function def counting
+proves nothing; pinned by `test_closure_flow.mcaml`'s
+`overwrite_in_loop`, which must return 20, not the
+wrongly-specialized-initializer 11), and `only_directly_applied` now
+counts a copy INTO a `$ref_` slot as a disqualifying "stored in a ref"
+use rather than a transparent alias edge. What still rejects (same
+loud knormal message, updated wording): a local bound from a call
+through a closure that itself returns a closure (no sig to consult),
+and polymorphic functions instantiated at TFun. Suite:
+`scripts/test_closure_flow.mcaml` + `tools/sim_check_closure_flow.py`
+(9th verify_canary suite: leaf factory specializes, non-leaf factory
+apply-dispatches, ref-then-call, loop-overwrite soundness, alias). The
+old `test_lambdas.py` `/tmp` harness (already absent from disk) pinned
+the rejection and is superseded by this suite's positive pins.
+
 **9. F6 decisions (diagnostics threading, hot-loop check placement,
 attribution completeness).** Settled while implementing F6, per the
 same protocol as decisions 1–8.
@@ -4953,7 +4982,12 @@ therefore only implements attribution for the reasons that ARE
 reachable (ambiguous merge, 2+-hop forwarding, self-tail forwarding,
 budget-exceeded); the other two are left as comments explaining why
 they're absent rather than dead, unreachable branches pretending to
-handle them.
+handle them. [Update 2026-07-11: the decision-8 lift made both shapes
+reachable. "stored in a ref" is now attributed (best-effort, from the
+IClosureMakes this function wrote into the slot); a `$ret`-rooted
+factory-return site stays unattributed — the producing lambda lives in
+the factory, not the calling function — and is documented as such at
+the match arm.]
 
 *`MCAML_STRICT_HOT`'s "detected natural loop OR TCO self-tail loop
 body" is one check, not two — confirmed by direct read, not assumed.*

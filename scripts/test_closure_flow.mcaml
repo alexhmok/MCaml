@@ -1,0 +1,53 @@
+(* Decision-8 follow-up regression (§13.12): closure values flowing
+   through factory returns, refs, and aliases — the shapes knormal
+   rejected before it learned to seed closure_env from a TFun-returning
+   signature, a closure-holding ref, or an alias of a tracked local.
+   All lower to KApply; closure_spec specializes what inlining exposes
+   and leaves $ref_/$ret-rooted operands to F5's apply-dispatch. *)
+
+(* --- HOF-factory return, leaf factory (inliner exposes the
+       IClosureMake, so this specializes to zero dispatch) --- *)
+fun make_adder(k: int): int -> int =
+  fun (y: int) -> y + k
+
+fun factory_leaf(): int =
+  let g = make_adder(5) in
+  g(10)                          (* 15 *)
+
+(* --- HOF-factory return, non-leaf factory (calls a helper, so the
+       inliner leaves it; the call site runs real apply-dispatch) --- *)
+fun bump(x: int): int = x + 1
+
+fun make_scaler(k: int): int -> int =
+  let k2 = bump(k) in
+  fun (y: int) -> y * k2
+
+fun factory_dispatch(): int =
+  let g = make_scaler(2) in      (* k2 = 3 *)
+  g(7)                           (* 21 *)
+
+(* --- ref-then-call --- *)
+fun ref_call(): int =
+  let r = ref (fun (y: int) -> y + 1) in
+  let g = !r in
+  g(4)                           (* 5 *)
+
+(* --- soundness: the ref is overwritten from inside a for-lifted
+       helper (a different function writing the same $ref_ slot by
+       name). closure_spec must NOT specialize the deref to the
+       initializer lambda — the call must see the latest cell. --- *)
+fun overwrite_in_loop(): int =
+  let r = ref (fun (y: int) -> y + 1) in
+  (for i = 0 to 2 do
+    r := (fun (y: int) -> y * 2)
+  done);
+  let g = !r in
+  g(10)                          (* 20, NOT 11 *)
+
+(* --- alias of a tracked closure local --- *)
+fun use_alias(f: int -> int, x: int): int =
+  let h = f in
+  h(h(x))
+
+fun alias_call(): int =
+  use_alias(fun (y: int) -> y + 3, 10)   (* 16 *)

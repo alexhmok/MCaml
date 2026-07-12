@@ -123,6 +123,26 @@ let dyn_env : (string, string) Hashtbl.t = Hashtbl.create 16
    function named after the local vreg. *)
 let closure_env : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* Refs known to hold a closure handle (§13.12 decision-8 follow-up):
+   a ref whose initializer or any `:=` RHS is a Closure literal or a
+   call to a TFun-returning function. Seeded by [seed_ref_env]'s
+   whole-program prepass (order-independent, like ref_env itself) so a
+   later `let g = !r in g(x)` can seed closure_env for g. NOT cleared
+   per-definition — ref slots persist across defs (for_lift helpers
+   reference enclosing refs by slot name). *)
+let closure_ref_env : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+(* Does registered top-level function [f] return a closure? Drives the
+   HOF-factory Let seeding below. zonk_default is destructive on
+   unbound tvars, but by the time knormal runs, main.ml's zonk_program
+   pass has already defaulted every residual tvar in every signature —
+   this call is effectively read-only. *)
+let returns_closure (f : string) : bool =
+  match Hashtbl.find_opt Typing.fun_sigs f with
+  | Some (_, ret) ->
+      (match Typing.zonk_default ret with TFun _ -> true | _ -> false)
+  | None -> false
+
 (* Compile-time environment mapping user-level binder names to array storage IDs.
    Arrays are NOT first-class runtime values in Milestone 1: a `let a = [|..|]`
    binds `a` at compile time to a storage id like "arr3". Cleared at entry to
@@ -176,7 +196,21 @@ let rec seed_refs_expr (e : expr) : unit =
   match e with
   | Let (x, Ref e1, e2) ->
       Hashtbl.replace ref_env x ("$ref_" ^ x);
+      (match e1 with
+       | Closure _ -> Hashtbl.replace closure_ref_env x ()
+       | App (f, _) when returns_closure f ->
+           Hashtbl.replace closure_ref_env x ()
+       | _ -> ());
       seed_refs_expr e1; seed_refs_expr e2
+  (* `r := <closure-producing expr>` also marks r closure-holding, so
+     assignment order relative to the deref-then-call site (including
+     across for_lift helper boundaries) can't matter. *)
+  | RefSet (Var r, (Closure _ as v)) ->
+      Hashtbl.replace closure_ref_env r ();
+      seed_refs_expr v
+  | RefSet (Var r, (App (f, _) as v)) when returns_closure f ->
+      Hashtbl.replace closure_ref_env r ();
+      seed_refs_expr v
   | Int _ | Float _ | Bool _ | Str _ | Var _ | Selector _ | Coord _
   | Command _ | Unit | Nil -> ()
   | BinOp (_, a, b) | Let (_, a, b) | Seq (a, b) | Cons (a, b)
@@ -385,15 +419,37 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
      `x(...)`) are recognized as closure application (KApply) rather
      than falling through to the generic App arm's global KCall. This
      is a purely syntactic trigger — mirrors normalize_fun's existing
-     TFun-param seeding — and deliberately does NOT cover the case
-     where [e1] is an ordinary function call whose return happens to be
-     TFun-typed (a HOF-factory pattern): knormal has no per-variable
-     type environment to detect that shape, so it is scoped out for v1
-     and caught defensively (loud failure, not a silent miscompile) by
-     the fun_sigs membership check in the generic App arm below. *)
+     TFun-param seeding. *)
   | Let (x, Closure (fname, captured_exprs), e2) ->
       Hashtbl.replace closure_env x ();
       let k1 = normalize_to (Some x) (Closure (fname, captured_exprs)) in
+      let k2 = normalize_to dest e2 in
+      KSeq (k1, k2)
+
+  (* §13.12 decision-8 follow-up: three more binding shapes knormal can
+     prove closure-typed WITHOUT a full per-variable type environment —
+     a call whose registered signature returns TFun (a HOF factory), a
+     deref of a ref the seed_ref_env prepass marked closure-holding,
+     and a plain alias of an already-tracked closure local. Each seeds
+     closure_env so a later `x(...)` lowers to KApply; closure_spec
+     deliberately treats $ref_-rooted and $ret-rooted apply operands as
+     unresolvable, so these route through F5's apply-dispatch runtime
+     (or specialize when inlining exposes the IClosureMake directly). *)
+  | Let (x, (App (f, _) as e1), e2) when returns_closure f ->
+      Hashtbl.replace closure_env x ();
+      let k1 = normalize_to (Some x) e1 in
+      let k2 = normalize_to dest e2 in
+      KSeq (k1, k2)
+
+  | Let (x, (Deref (Var r) as e1), e2) when Hashtbl.mem closure_ref_env r ->
+      Hashtbl.replace closure_env x ();
+      let k1 = normalize_to (Some x) e1 in
+      let k2 = normalize_to dest e2 in
+      KSeq (k1, k2)
+
+  | Let (x, Var v, e2) when Hashtbl.mem closure_env v ->
+      Hashtbl.replace closure_env x ();
+      let k1 = normalize_to (Some x) (Var v) in
       let k2 = normalize_to dest e2 in
       KSeq (k1, k2)
 
@@ -831,20 +887,22 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
 
   | App (f, _args) when not (Hashtbl.mem Typing.fun_sigs f) ->
       (* Defensive: [f] is neither a registered top-level function/
-         lambda-helper nor a closure_env-tracked local — the only way
-         to reach this arm is a local TFun-typed binding that
-         closure_env didn't seed (e.g. `let g = make_adder(5) in
-         g(10)` — a HOF-factory-return then call, which typing accepts
-         via §13.12 decision 1's value-application arm but which v1's
-         knormal cannot resolve without a per-variable type
-         environment). Fail loudly rather than silently emitting a
-         bogus KCall against a nonexistent global function named after
-         a local vreg. *)
+         lambda-helper nor a closure_env-tracked local. After the
+         decision-8 follow-up, lambda literals, TFun params, HOF-factory
+         returns, closure-holding ref derefs, and plain aliases of any
+         of those all seed closure_env — what remains here is a local
+         TFun-typed binding knormal still can't prove closure-typed
+         without a real type environment (e.g. the result of calling a
+         closure that itself returns a closure, or a polymorphic
+         function instantiated at TFun). Fail loudly rather than
+         silently emitting a bogus KCall against a nonexistent global
+         function named after a local vreg. *)
       failwith (Printf.sprintf
-        "closure application through '%s': calling a closure value \
-         obtained from something other than a direct lambda literal or \
-         a function parameter (e.g. a HOF-factory return) is not yet \
-         lowered in v1 — bind the lambda directly with `let %s = fun ...`"
+        "closure application through '%s': knormal cannot prove this \
+         local holds a closure (supported sources: lambda literal, \
+         function parameter, HOF-factory return, closure-holding ref \
+         deref, alias of one of those) — bind the closure to '%s' \
+         through one of those shapes"
         f f)
 
   | App (f, args) ->

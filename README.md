@@ -198,6 +198,15 @@ entirely — no allocation, no dispatch. Unresolvable cases fall back to
 runtime dispatch; set `MCAML_STRICT_HOT=1` to turn dispatch inside a
 hot loop into a compile error.
 
+Closures also flow through factory returns
+(`let g = make_adder(5) in g(10)`), `ref` cells
+(`let r = ref (fun …) in …; let g = !r in g(4)` — always dispatched at
+runtime, so an overwritten ref calls the latest value), and plain
+aliases (`let h = f`). Still rejected, loudly: storing a closure in a
+tuple/record/ADT field, and call-position locals the compiler can't
+prove closure-typed (e.g. the result of a closure that itself returns
+a closure).
+
 ### Regions
 
 `region (fun () -> …)` runs its body in an arena: heap allocations made
