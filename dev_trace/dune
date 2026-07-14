@@ -1,0 +1,7 @@
+; Throwaway pipeline X-ray executable (not part of the shipped compiler).
+; Reads a .mcaml program on stdin, prints every IR stage to stdout.
+(executable
+ (name tracer)
+ (modules tracer)
+ (libraries mcaml)
+ (flags (-g)))

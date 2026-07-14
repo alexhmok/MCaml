@@ -68,6 +68,7 @@ Historical note: before Milestone 2 the codegen emitted Minecraft commands direc
 **Driver**
 - `codegen.ml` — split into `compile_def_to_cfg` (AST → cfg_func) and `compile_cfg_to_files` (optimize → regalloc → codegen_cfg). Legacy `compile_def` still exists as a convenience wrapper.
 - `main.ml` — three-phase driver: build cfg table, run `Inline.run`, emit. Reads stdin, writes `.mcfunction` files in source order. `MCAML_DUMP_CFG=1` dumps post-regalloc CFG; `MCAML_NO_INLINE=1` skips Phase 2.
+- `dev_trace/tracer.ml` — dev-only pipeline X-ray executable (`_build/default/dev_trace/tracer.exe < prog.mcaml`): mirrors main.ml's pass sequence but dumps the full IR at every stage boundary (raw AST → alpha → partial_app → for_lift → typing table → kexpr/tco → CFG per phase → tick_split/tick_guard). It duplicates the driver call sequence BY HAND — when adding a pass to main.ml, add it here too or the trace lies. Scope stops at Tick_guard: main.ml's driver-level file post-processing (globals-init/apply-dispatch synthesis, deadval filtering, tick-budget exit resets) is deliberately not mirrored; use `./mcaml`'s real output for final files. Its `trace.txt` output is gitignored.
 
 ## Build & run
 
