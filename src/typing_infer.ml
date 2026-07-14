@@ -449,8 +449,22 @@ let rec infer env e =
             fname (List.length param_types) n_caps))
       in
       List.iter2 (fun c ct ->
+        (* The reachable mismatch is a capture whose type for_lift's
+           pre-build_sigs oracle could not resolve (an App of a fun
+           with omitted annotations falls back to TInt there, so the
+           helper's capture param was minted as int). Ground-annotated
+           producers are covered by register_ground_sigs; say how to
+           fix the rest instead of claiming a compiler bug. *)
+        let cap_desc =
+          match c with Var n -> Printf.sprintf " '%s'" n | _ -> ""
+        in
         unify_msg (infer env c) ct
-          "internal: closure capture type mismatch — this is a compiler bug")
+          (Printf.sprintf
+             "lambda capture%s: the captured value's type was not \
+              resolvable when the lambda was lifted (helper %s). If \
+              it is produced by a function call, annotate that \
+              function's parameter and return types."
+             cap_desc fname))
         caps cap_types;
       TFun (own_types, ret_type)
 
@@ -616,9 +630,15 @@ let infer (env : (string * typ) list) (e : expr) : typ =
    type error (§13.10 decision 6, a documented strengthening over the
    pre-E decorative return type) — then generalizes the signature into
    fun_schemes for later call sites. *)
-let type_fun_def (name : string) (params : (string * typ) list)
+(* [extra_env] carries bindings that are visible to the body but are
+   NOT part of the signature — today the ref-typed captures a __lam
+   helper borrows by slot name (For_lift.ref_captures_of, threaded in
+   by main.ml). They participate in inference only; generalization
+   still uses [params] alone. *)
+let type_fun_def ?(extra_env : (string * typ) list = [])
+    (name : string) (params : (string * typ) list)
     (ret : typ) (body : expr) : unit =
-  let tbody = infer params body in
+  let tbody = infer (extra_env @ params) body in
   (try unify ret tbody
    with Unify_fail _ ->
      raise (Error (Printf.sprintf

@@ -17,6 +17,8 @@ val register_type_decl :
   string -> string list -> Ast.constructor list -> unit
 val register_record_decl : string -> (string * Ast.typ) list -> unit
 val build_sigs : Ast.program -> unit
+val register_ground_sigs : Ast.program -> unit
 val infer : (string * Ast.typ) list -> Ast.expr -> Ast.typ
 val type_fun_def :
+  ?extra_env:(string * Ast.typ) list ->
   string -> (string * Ast.typ) list -> Ast.typ -> Ast.expr -> unit

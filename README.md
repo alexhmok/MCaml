@@ -198,20 +198,25 @@ fun demo(): int =
   apply_twice(add_k, 5)                   (* HOF call *)
 ```
 
-Lambdas capture by value. When the compiler can resolve which lambda
-reaches a call site (the common case), the closure is specialized away
-entirely — no allocation, no dispatch. Unresolvable cases fall back to
-runtime dispatch; set `MCAML_STRICT_HOT=1` to turn dispatch inside a
-hot loop into a compile error.
+Lambdas capture by value — except `ref` cells, which are captured by
+reference (a ref is a stable scoreboard slot, so a lambda that mutates
+a captured ref is visible to the enclosing scope, same as a `for`
+body). When the compiler can resolve which lambda reaches a call site
+(the common case), the closure is specialized away entirely — no
+allocation, no dispatch. Unresolvable cases fall back to runtime
+dispatch; set `MCAML_STRICT_HOT=1` to turn dispatch inside a hot loop
+into a compile error.
 
 Closures also flow through factory returns
 (`let g = make_adder(5) in g(10)`), `ref` cells
 (`let r = ref (fun …) in …; let g = !r in g(4)` — always dispatched at
 runtime, so an overwritten ref calls the latest value), and plain
-aliases (`let h = f`). Still rejected, loudly: storing a closure in a
-tuple/record/ADT field, and call-position locals the compiler can't
-prove closure-typed (e.g. the result of a closure that itself returns
-a closure).
+aliases (`let h = f`); a lambda may also *capture* a closure-valued
+local (`let g = make_adder(5) in fun (y: int) -> g(y)`), provided the
+function producing it has annotated parameter and return types. Still
+rejected, loudly: storing a closure in a tuple/record/ADT field, and
+call-position locals the compiler can't prove closure-typed (e.g. the
+result of a closure that itself returns a closure).
 
 Explicit partial application works on top-level functions: an
 under-applied call evaluates the supplied arguments once and yields a

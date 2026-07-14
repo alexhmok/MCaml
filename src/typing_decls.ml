@@ -229,3 +229,37 @@ let build_sigs (prog : program) : unit =
         Hashtbl.replace fun_sigs name (List.map snd params, ret)
     | Val _ | TypeDecl _ | RecordDecl _ -> ()
   ) prog
+
+(* Pre-for_lift approximation of [build_sigs] (2026-07-14). for_lift's
+   Let-threading oracle calls [infer] BEFORE the real [build_sigs]
+   runs, so every App it inferred used to miss [fun_sigs] and fall
+   back to TInt — which minted `int` capture params for a lambda
+   capturing a factory-returned closure, and real typing then died on
+   an internal capture-type mismatch. Registering fully-annotated
+   (ground) signatures up front lets the oracle see e.g.
+   [make_adder : (int) -> (int -> int)]. Signatures containing ANY
+   TVar (i.e. any omitted annotation) are skipped: registering them
+   would let the oracle's exploratory unifications destructively bind
+   tvar refs shared with the def before real typing runs. No
+   validation here — [build_sigs] later clears the table and rebuilds
+   it from the post-for_lift program with [check_typ_ok]. *)
+let register_ground_sigs (prog : program) : unit =
+  let rec ground (t : typ) : bool =
+    match t with
+    | TInt | TFloat | TBool | TUnit | TSelector | TPos -> true
+    | TArrStatic (e, _) | TArrDyn e | TRef e | TList e -> ground e
+    | TMat (e, _, _) -> ground e
+    | TAdt (_, args) -> List.for_all ground args
+    | TTuple ts -> List.for_all ground ts
+    | TFun (ps, r) -> List.for_all ground ps && ground r
+    | TParam _ -> true
+    | TVar _ -> false
+  in
+  List.iter (fun d ->
+    match d with
+    | Fun (name, params, ret, _) ->
+        let tys = List.map snd params in
+        if List.for_all ground tys && ground ret then
+          Hashtbl.replace fun_sigs name (tys, ret)
+    | Val _ | TypeDecl _ | RecordDecl _ -> ()
+  ) prog

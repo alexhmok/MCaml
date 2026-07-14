@@ -167,7 +167,9 @@ let type_user_funs program =
   List.iter (function
     | Fun (name, params, ret, body)
       when not (For_lift.is_synthetic_name name) ->
-        Typing.type_fun_def name params ret body
+        Typing.type_fun_def
+          ~extra_env:(For_lift.ref_captures_of name)
+          name params ret body
     | _ -> ()
   ) program
 
@@ -714,6 +716,14 @@ let () =
     (* Alpha-rename once up front so for_lift sees globally-unique binders. *)
     let program = List.map (Alpha.h Alpha.M.empty) program in
     register_type_decls program;
+
+    (* Register fully-annotated fun signatures so for_lift's
+       Let-threading oracle (Typing.infer) resolves App return types
+       instead of falling back to TInt — required for a lambda that
+       CAPTURES a factory-returned closure to get a correctly-typed
+       capture param. build_sigs below clears and rebuilds the table
+       from the post-for_lift program. *)
+    Typing.register_ground_sigs program;
 
     (* Desugar explicit partial application (`let g = add(1)`) into
        let-temps + a lambda BEFORE for_lift, which closure-converts

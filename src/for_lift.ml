@@ -36,12 +36,32 @@ let fresh_hi_name () =
    contain the substring "__for" (unlike fresh_name) so
    [is_synthetic_name]'s substring check does not mistake it for a
    for-loop helper and skip its real typing — a lambda helper takes
-   every capture as an explicit leading param (no borrowed enclosing-
-   scope names), so it needs and gets ordinary top-level typing, unlike
-   a for-helper. *)
+   every non-ref capture as an explicit leading param, so it needs and
+   gets ordinary top-level typing, unlike a for-helper. Ref-typed
+   captures are borrowed by name like a for-helper's (see
+   [ref_captures] below), which is why typing needs the side table. *)
 let fresh_lambda_name parent =
   incr counter;
   Printf.sprintf "%s__lam%d" parent !counter
+
+(* Ref-typed free variables captured by each __lam helper, keyed by
+   helper name. Refs are filtered out of a helper's params by
+   [capture_list] (they resolve to globally-stable scoreboard slot
+   names, referenced directly by name — the same mechanism for-helpers
+   use), but unlike a for-helper a lambda helper IS typed as an
+   ordinary top-level fun, so typing would report the borrowed name as
+   an undefined variable. main.ml threads this table into
+   [Typing.type_fun_def]'s [extra_env] so the borrowed refs type-check.
+   (Typing cannot read it directly: for_lift already depends on Typing
+   for the Let-threading oracle, so the dependency must point this
+   way.) *)
+let ref_captures : (string, (string * Ast.typ) list) Hashtbl.t =
+  Hashtbl.create 16
+
+let ref_captures_of (name : string) : (string * Ast.typ) list =
+  match Hashtbl.find_opt ref_captures name with
+  | Some l -> l
+  | None -> []
 
 (* Is this def name a synthesized for helper? Used by main.ml to skip
    typing (helpers reference the enclosing function's locals directly,
@@ -271,6 +291,17 @@ let rec walk (parent : string) (env : typ M.t) (e : expr)
       let fvs = free_vars bound_names body' in
       let fv_list = capture_list env fvs in
       let synth = fresh_lambda_name parent in
+      (* Ref-typed fvs are not in [fv_list] (see [capture_list]); the
+         helper body references them by their globally-stable slot
+         names. Record them so typing can bind them. *)
+      let ref_fvs =
+        S.elements fvs
+        |> List.filter_map (fun n ->
+             match M.find_opt n env with
+             | Some (TRef _ as t) -> Some (n, t)
+             | _ -> None)
+      in
+      if ref_fvs <> [] then Hashtbl.replace ref_captures synth ref_fvs;
       let helper_params = fv_list @ params in
       let fv_args = List.map (fun (n, _) -> Var n) fv_list in
       (* E4-style optional return annotation: mint an unbound tvar so
