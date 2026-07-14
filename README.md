@@ -111,7 +111,7 @@ version, not per-type clones.
 | `list` | Cons list of ints. |
 | `t1 * t2 * …` | Tuple. |
 | `{ f1 : t; … }` | Record (declared via `type`). |
-| `t -> t`, `(t1, t2) -> t` | Function value (lambdas; no partial application). N-ary annotations use the parenthesized comma form; `t1 * t2 -> t` is a one-argument function taking a tuple. |
+| `t -> t`, `(t1, t2) -> t` | Function value. N-ary annotations use the parenthesized comma form; `t1 * t2 -> t` is a one-argument function taking a tuple. |
 | `sel`, `pos` | Minecraft entity selector / position (see interop). |
 
 ### Numbers
@@ -212,6 +212,14 @@ aliases (`let h = f`). Still rejected, loudly: storing a closure in a
 tuple/record/ADT field, and call-position locals the compiler can't
 prove closure-typed (e.g. the result of a closure that itself returns
 a closure).
+
+Explicit partial application works on top-level functions: an
+under-applied call evaluates the supplied arguments once and yields a
+closure over the rest — `let add5 = add(5) in add5(10)`, or `add()` to
+use a named function as a value. There is no implicit currying
+(`f(1)(2)` is not syntax), and functions taking array/matrix/`ref`
+parameters can't be partially applied (those arguments aren't
+first-class values).
 
 ### Regions
 

@@ -715,6 +715,11 @@ let () =
     let program = List.map (Alpha.h Alpha.M.empty) program in
     register_type_decls program;
 
+    (* Desugar explicit partial application (`let g = add(1)`) into
+       let-temps + a lambda BEFORE for_lift, which closure-converts
+       the synthesized Lambda like any user-written one. *)
+    let program = Partial_app.run program in
+
     (* Hoist every `for` loop into its own top-level tail-recursive helper. *)
     let program = For_lift.run program in
 

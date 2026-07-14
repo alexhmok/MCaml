@@ -143,6 +143,26 @@ let returns_closure (f : string) : bool =
       (match Typing.zonk_default ret with TFun _ -> true | _ -> false)
   | None -> false
 
+(* Is the VALUE of this expression a closure handle, judged from what
+   knormal can see without a per-variable type environment (§13.12
+   decision-8 follow-up)? Closure literals, tracked locals, calls to
+   TFun-returning functions, derefs of closure-holding refs, and any
+   let/seq/if whose value position(s) qualify — the let/seq chain case
+   is what partial_app's desugar produces (`let t = a in fun p -> ...`).
+   Env lookups (closure_env / closure_ref_env) are populated for the
+   function being normalized, so this is meaningful during normalize;
+   called from the seed prepass (before any normalize) it degrades to
+   the purely syntactic arms, which is all the prepass needs. *)
+let rec value_is_closure (e : expr) : bool =
+  match e with
+  | Closure _ -> true
+  | Var v -> Hashtbl.mem closure_env v
+  | App (f, _) -> returns_closure f
+  | Deref (Var r) -> Hashtbl.mem closure_ref_env r
+  | Let (_, _, b) | Seq (_, b) -> value_is_closure b
+  | If (_, a, b) -> value_is_closure a && value_is_closure b
+  | _ -> false
+
 (* Compile-time environment mapping user-level binder names to array storage IDs.
    Arrays are NOT first-class runtime values in Milestone 1: a `let a = [|..|]`
    binds `a` at compile time to a storage id like "arr3". Cleared at entry to
@@ -196,19 +216,15 @@ let rec seed_refs_expr (e : expr) : unit =
   match e with
   | Let (x, Ref e1, e2) ->
       Hashtbl.replace ref_env x ("$ref_" ^ x);
-      (match e1 with
-       | Closure _ -> Hashtbl.replace closure_ref_env x ()
-       | App (f, _) when returns_closure f ->
-           Hashtbl.replace closure_ref_env x ()
-       | _ -> ());
+      (* value_is_closure's env-lookup arms are empty at prepass time;
+         the syntactic arms (Closure literal, TFun-returning call,
+         let/seq/if chains over those) are what matters here. *)
+      if value_is_closure e1 then Hashtbl.replace closure_ref_env x ();
       seed_refs_expr e1; seed_refs_expr e2
   (* `r := <closure-producing expr>` also marks r closure-holding, so
      assignment order relative to the deref-then-call site (including
      across for_lift helper boundaries) can't matter. *)
-  | RefSet (Var r, (Closure _ as v)) ->
-      Hashtbl.replace closure_ref_env r ();
-      seed_refs_expr v
-  | RefSet (Var r, (App (f, _) as v)) when returns_closure f ->
+  | RefSet (Var r, v) when value_is_closure v ->
       Hashtbl.replace closure_ref_env r ();
       seed_refs_expr v
   | Int _ | Float _ | Bool _ | Str _ | Var _ | Selector _ | Coord _
@@ -414,42 +430,19 @@ let rec normalize_to (dest : string option) (e : expr) : kexpr =
   | Ref _ ->
       failwith "ref literal must be bound with let: let r = ref e in ..."
 
-  (* Phase F (F2 completion): let-binding a direct lambda literal. Seeds
-     closure_env so later uses of [x] within this function (a call
-     `x(...)`) are recognized as closure application (KApply) rather
-     than falling through to the generic App arm's global KCall. This
-     is a purely syntactic trigger — mirrors normalize_fun's existing
-     TFun-param seeding. *)
-  | Let (x, Closure (fname, captured_exprs), e2) ->
-      Hashtbl.replace closure_env x ();
-      let k1 = normalize_to (Some x) (Closure (fname, captured_exprs)) in
-      let k2 = normalize_to dest e2 in
-      KSeq (k1, k2)
-
-  (* §13.12 decision-8 follow-up: three more binding shapes knormal can
-     prove closure-typed WITHOUT a full per-variable type environment —
-     a call whose registered signature returns TFun (a HOF factory), a
-     deref of a ref the seed_ref_env prepass marked closure-holding,
-     and a plain alias of an already-tracked closure local. Each seeds
-     closure_env so a later `x(...)` lowers to KApply; closure_spec
-     deliberately treats $ref_-rooted and $ret-rooted apply operands as
-     unresolvable, so these route through F5's apply-dispatch runtime
-     (or specialize when inlining exposes the IClosureMake directly). *)
-  | Let (x, (App (f, _) as e1), e2) when returns_closure f ->
+  (* Phase F (F2 completion), generalized by the §13.12 decision-8
+     follow-up: let-binding anything knormal can prove closure-valued —
+     a lambda literal, a call whose registered signature returns TFun
+     (HOF factory), a deref of a ref the seed_ref_env prepass marked
+     closure-holding, an alias of a tracked local, or a let/seq/if
+     chain whose value position(s) qualify (partial_app's desugar
+     produces exactly the let-chain shape). Seeds closure_env so a
+     later `x(...)` lowers to KApply; closure_spec treats $ref_- and
+     $ret-rooted apply operands as unresolvable, so unspecializable
+     cases route through F5's apply-dispatch runtime. *)
+  | Let (x, e1, e2) when value_is_closure e1 ->
       Hashtbl.replace closure_env x ();
       let k1 = normalize_to (Some x) e1 in
-      let k2 = normalize_to dest e2 in
-      KSeq (k1, k2)
-
-  | Let (x, (Deref (Var r) as e1), e2) when Hashtbl.mem closure_ref_env r ->
-      Hashtbl.replace closure_env x ();
-      let k1 = normalize_to (Some x) e1 in
-      let k2 = normalize_to dest e2 in
-      KSeq (k1, k2)
-
-  | Let (x, Var v, e2) when Hashtbl.mem closure_env v ->
-      Hashtbl.replace closure_env x ();
-      let k1 = normalize_to (Some x) (Var v) in
       let k2 = normalize_to dest e2 in
       KSeq (k1, k2)
 

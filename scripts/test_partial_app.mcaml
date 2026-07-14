@@ -1,0 +1,38 @@
+(* Explicit partial application regression (§13.12 decision-1 explicit-
+   form lift, approved Stage 2 item 2026-07-11): under-applied calls to
+   top-level funs desugar to let-temps + a lambda (Partial_app.run,
+   between alpha and for_lift). Covers local binding, argument
+   position, factory return (rides the decision-8 apply path),
+   multi-remaining-param, zero-supplied eta-expansion, and the
+   evaluate-once guarantee for supplied args (eval_once = 2, not 3). *)
+
+val counter = [| 0 |]
+
+fun add(a: int, b: int): int = a + b
+fun add3(a: int, b: int, c: int): int = a + b + c
+fun apply1(f: int -> int, x: int): int = f(x)
+fun bump(): int = (counter[0] := counter[0] + 1; counter[0])
+fun mk(): int -> int = add(2)
+
+fun local_pa(): int =
+  let add5 = add(5) in
+  add5(10)                        (* 15 *)
+
+fun arg_pa(): int =
+  apply1(add(3), 4)               (* 7 *)
+
+fun factory_pa(): int =
+  let g = mk() in
+  g(5)                            (* 7 *)
+
+fun multi_rest(): int =
+  let g = add3(1) in
+  g(2, 3)                         (* 6 *)
+
+fun zero_supplied(): int =
+  let f = add() in
+  f(1, 2)                         (* 3 *)
+
+fun eval_once(): int =
+  let g = add(bump()) in          (* bump runs ONCE, counter=1 *)
+  g(0) + g(0)                     (* 1 + 1 = 2, NOT 3 *)

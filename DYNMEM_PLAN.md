@@ -4510,6 +4510,21 @@ minting a NEW closure capturing the args-so-far) with no existing
 machinery to build on — a scope explosion the phase's 3–4-session
 budget doesn't include. Deferred as a mechanical G-follow-up (G5?) if
 ever needed, same posture as G4's deferred multi-param type decls.
+[Update 2026-07-11: the EXPLICIT form landed as an approved Stage 2
+item — `src/partial_app.ml`, a post-alpha/pre-for_lift desugar that
+rewrites a syntactically under-applied call to a known top-level fun
+(`let g = add(1)`, including zero-supplied `add()` eta-expansion) into
+let-temps (supplied args evaluate once) + a Lambda, which then rides
+the ordinary Phase F pipeline; the factory-return use rides the
+decision-8 lift. No currying runtime was built: full auto-currying
+(implicit currying at every call site, curried TYPES driving
+application) remains rejected exactly as this decision states, and
+knormal still rejects calling the result of a closure-returning
+closure. Targets with array/matrix/ref params are skipped (not
+first-class values) and keep the plain arity error. Suite:
+`scripts/test_partial_app.mcaml` + `tools/sim_check_partial_app.py`
+(10th verify_canary suite) + `test/test_partial_app.ml` alcotest
+shape pins.]
 `tvar_bindable` (`typing.ml:141-154`) gets a `TFun _ -> None` arm
 (bindable, joining `TInt | TFloat | TBool | TList _ | TTuple _ | TAdt _
 | TVar _`) — a closure handle is one scoreboard int, which is exactly

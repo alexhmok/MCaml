@@ -5,7 +5,7 @@ A small ML-like language that compiles to Minecraft `.mcfunction` files. Written
 ## Pipeline
 
 ```
-source → lex → parse → alpha → for_lift →
+source → lex → parse → alpha → partial_app → for_lift →
   Phase 1 (per Fun): type → knormal → tco → cfg_build → function table
   Phase 2a        : inline (leaf-splice over full table)
   Phase 2b        : monomorphize (specialize array-param templates)
@@ -36,6 +36,7 @@ Historical note: before Milestone 2 the codegen emitted Minecraft commands direc
 - `lexer.mll` — ocamllex source (generates `lexer.ml`, checked in).
 - `parser.mly` — menhir grammar (generates `parser.ml`/`.mli`, checked in). Uses a `seq_expr`/`expr` split to avoid a reduce/reduce conflict between list-separator `;` inside `[| … |]` and statement-level `Seq`.
 - `alpha.ml` — scope analysis; renames every user binder to `name_N` for uniqueness.
+- `partial_app.ml` — explicit partial application: an under-applied call to a known top-level fun desugars to let-temps (supplied args evaluate once) + a lambda, which for_lift then closure-converts like any other. Skips targets with array/matrix/ref params; no implicit currying.
 - `typing.ml` — type checker, split into units re-exported through this facade (`include` chain, so the historical `Typing.*` interface and `Typing.Error`'s identity are preserved): `typing_core.ml` (the shared `Error` exception + global tables: `fun_sigs`, `global_vals`, `adt_decls`/`ctor_info`, `record_decls`/`record_fields`), `typing_unify.ml` (HM unification engine, schemes/generalization, `subst_typarams`), `typing_decls.ml` (type/record registration + validators + `build_sigs`), `typing_patterns.ml` (pattern typing + Maranget usefulness), `typing_infer.ml` (the `infer` walk + `type_fun_def`). `App` types calls against the global `fun_sigs` table (populated from the post-for_lift program); a lookup miss falls back to `TInt` (covers synthesized helpers and untyped callees). Quirk: nested `Array` literals with matching inner lengths promote to `TMat`.
 
 **Middle end**
