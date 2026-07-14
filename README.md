@@ -256,21 +256,43 @@ strings.
 
 ## Building
 
-Prerequisites:
-
-- OCaml and [dune](https://dune.build/) 3.0+
-- `ocamllex` and [menhir](http://gallium.inria.fr/~fpottier/menhir/) —
-  only needed if you modify the lexer or grammar; generated
-  `lexer.ml` / `parser.ml` / `parser.mli` are checked in
-- Python 3 — for the datapack packager and simulator tooling in
-  `tools/`
-
-Build:
+### Quick start
 
 ```sh
 cd MCaml
-dune build        # produces _build/default/src/main.exe
+./setup.sh        # installs opam + OCaml deps if missing, builds, runs tests
 ```
+
+`setup.sh` is idempotent — it skips anything already installed. Run
+`./setup.sh --check` to see what's missing without changing anything.
+It installs opam via your system package manager (Homebrew / apt /
+dnf / pacman) if absent, initializes it, then installs the OCaml
+dependencies declared in `mcaml.opam`.
+
+### Manual setup
+
+If you already have [opam](https://opam.ocaml.org/doc/Install.html):
+
+```sh
+opam install . --deps-only --with-test   # dune, menhir, alcotest (test-only)
+dune build                               # produces _build/default/src/main.exe
+```
+
+Prerequisites (what the above installs):
+
+- OCaml (≥ 4.14) and [dune](https://dune.build/) 3.0+
+- `ocamllex` (ships with OCaml) and
+  [menhir](http://gallium.inria.fr/~fpottier/menhir/) — only needed if
+  you modify the lexer or grammar; generated
+  `lexer.ml` / `parser.ml` / `parser.mli` are checked in
+- [alcotest](https://github.com/mirage/alcotest) — test-only, for
+  `dune test`
+- Python 3 (stdlib only, no pip packages) — for the datapack packager
+  and simulator tooling in `tools/`
+
+Dependencies are declared in `dune-project` (the `package` stanza);
+`mcaml.opam` is generated from it by `dune build` — edit the former,
+never the latter.
 
 `./mcaml` at the repo root is a symlink to the built executable.
 
