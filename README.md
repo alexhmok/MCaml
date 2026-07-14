@@ -363,7 +363,8 @@ name `init` is reserved by the compiler for this reason. Zip output is
 deterministic — rebuilding an unchanged program produces a
 byte-identical archive.
 
-Drop the pack into a world's `datapacks/` directory and `/reload`.
+Drop the pack into a world's `datapacks/` directory and run `/reload` and `/function mcaml:init`
+in game to set up registers and storage.
 
 ### Calling compiled functions in-game
 
