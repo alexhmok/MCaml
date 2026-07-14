@@ -505,6 +505,27 @@ and modulo are floor-semantics, exactly matching scoreboard `/=` and
 `%=` (verified in-game). `sim/sim.py` and the constant folder implement
 the same rules, so folded and runtime results always agree.
 
+**Known hazard: calling a long-running loop from a wrapper.** When a
+tick_guard-instrumented loop yields mid-run (`schedule … 1t; return 0`),
+Minecraft returns control to the *immediate caller* — one level, not
+the whole chain. A wrapper entry point that plain-calls such a loop
+therefore resumes right away: it reads a partial `$ret`, and — worse —
+its own end-of-invocation heap reset then wipes `mcaml:scratch` /
+`mcaml:objpool` while the loop's scheduled continuation still depends
+on that state next tick (confirmed by direct repro; the full
+adjudication lives in a comment block in `src/main.ml`). There is
+deliberately no compiler check for this: every self-recursive loop
+gets the yield machinery whether or not it will ever exceed its budget
+for real inputs, so a static rejection cannot tell "structurally has a
+loop" from "will actually span ticks" and broke working programs when
+it was tried. The safe pattern (`stress_test.mcaml`'s S8): make the
+self-tail loop itself the sole public entry — fold one-time setup into
+a first-iteration guard inside it — and store results that must
+survive ticks in a `ref`, reading its `$ref_result_<N>` slot from
+chat. Loops that stay comfortably under the per-tick budget
+(`MCAML_TICK_COMMANDS / body cost` iterations) never yield and are
+safe to call from wrappers.
+
 ## Compiler architecture
 
 ```
