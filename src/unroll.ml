@@ -53,10 +53,17 @@ let limit =
 
 let no_unroll = Cfg.pass_disabled "MCAML_NO_UNROLL"
 
-(* Walk a block forward and return the most recent IConst value bound
-   to [v], if [v]'s most recent definition in the block is an IConst
-   (i.e., not overwritten by a non-IConst later in the same block). *)
-let const_def_in_block (b : block) (v : vreg) : int option =
+(* Return the most recent IConst value bound to [v] among [prefix] —
+   the caller-block instructions STRICTLY BEFORE the call site — if
+   that most recent definition is an IConst (i.e., not overwritten by
+   a non-IConst later in the prefix). Scanning past the call would be
+   unsound: Phase 3 runs optimize→regalloc→codegen per function in
+   source order, so the enclosing function is usually already
+   register-allocated when its __for helper unrolls, and physical
+   $rN slots are freely REUSED after the call — a post-call
+   [IConst($r1, k)] says nothing about the argument's value at call
+   time (this miscompiled trip counts before 2026-07-14). *)
+let const_def_in_prefix (prefix : instr list) (v : vreg) : int option =
   let result = ref None in
   List.iter (fun i ->
     match i with
@@ -65,24 +72,28 @@ let const_def_in_block (b : block) (v : vreg) : int option =
         (match instr_def i with
          | Some d when d = v -> result := None
          | _ -> ())
-  ) b.instrs;
+  ) prefix;
   !result
 
-(* Collect every (caller_block, args) pair where caller_block contains
-   an [ICall(_, target, args)]. Templates are skipped. *)
+(* Collect every (pre-call instrs, args) pair where a caller block
+   contains an [ICall(_, target, args)]. The prefix is per CALL SITE,
+   not per block, so two calls in one block each see only their own
+   preceding instructions. Templates are skipped. *)
 let collect_call_sites
     (fn_table : (string, cfg_func) Hashtbl.t)
     (target : string)
-  : (block * vreg list) list =
+  : (instr list * vreg list) list =
   let acc = ref [] in
   Hashtbl.iter (fun _ cfg ->
     if not cfg.is_template then
       Array.iter (fun (b : block) ->
+        let before = ref [] in
         List.iter (fun i ->
-          match i with
-          | ICall (_, f, args) when f = target ->
-              acc := (b, args) :: !acc
-          | _ -> ()
+          (match i with
+           | ICall (_, f, args) when f = target ->
+               acc := (List.rev !before, args) :: !acc
+           | _ -> ());
+          before := i :: !before
         ) b.instrs
       ) cfg.blocks
   ) fn_table;
@@ -100,11 +111,11 @@ let resolve_lo_hi
   | _ ->
       let rec loop acc = function
         | [] -> acc
-        | (b, args) :: rest ->
+        | (prefix, args) :: rest ->
             (match args with
              | a0 :: a1 :: _ ->
-                 (match const_def_in_block b a0,
-                        const_def_in_block b a1 with
+                 (match const_def_in_prefix prefix a0,
+                        const_def_in_prefix prefix a1 with
                   | Some lo, Some hi ->
                       (match acc with
                        | None -> loop (Some (lo, hi)) rest
