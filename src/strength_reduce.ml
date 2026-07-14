@@ -291,10 +291,36 @@ type cls =
 let classify (cfg : cfg_func) (basics : basic_iv list)
   : (vreg, cls) Hashtbl.t * derived_iv list =
   let cls : (vreg, cls) Hashtbl.t = Hashtbl.create 32 in
+  (* Multi-def poisoning (2026-07-14). An if-merge temp is defined in
+     BOTH guarded arms of a conditional; classifying it from whichever
+     def the walk sees first (the [not (Hashtbl.mem cls d)] gates
+     below) treated a conditional value — e.g. the else-arm's
+     [-20 * i] hidden behind a then-arm IConst — as a loop-invariant
+     stride/base, and the carrier rewrite silently miscompiled the
+     loop. Any vreg with more than one defining instruction anywhere
+     in the function is therefore never classified at all. Basic IVs
+     are exactly the entry-copy + latch-increment multi-def shape the
+     analysis is built around, but they are pre-seeded below and the
+     [mem] gates keep them; the poison filter only blocks NEW
+     classifications. *)
+  let def_counts : (vreg, int) Hashtbl.t = Hashtbl.create 32 in
+  Array.iter (fun (b : block) ->
+    List.iter (fun i ->
+      match instr_def i with
+      | Some d ->
+          Hashtbl.replace def_counts d
+            (1 + (try Hashtbl.find def_counts d with Not_found -> 0))
+      | None -> ()
+    ) b.instrs
+  ) cfg.blocks;
+  let multi_def v =
+    (try Hashtbl.find def_counts v with Not_found -> 0) > 1
+  in
   let params = param_copies_in_entry cfg in
   let inv_params = invariant_params cfg params in
   List.iter (fun (lv, idx) ->
-    if Hashtbl.mem inv_params idx then Hashtbl.replace cls lv Inv
+    if Hashtbl.mem inv_params idx && not (multi_def lv) then
+      Hashtbl.replace cls lv Inv
   ) params;
   List.iter (fun iv ->
     Hashtbl.replace cls iv.iv_vreg
@@ -313,14 +339,15 @@ let classify (cfg : cfg_func) (basics : basic_iv list)
   let step_instr blk_label instr =
     match instr with
     | IConst (d, _) ->
-        if not (Hashtbl.mem cls d) then Hashtbl.replace cls d Inv
+        if not (Hashtbl.mem cls d) && not (multi_def d) then
+          Hashtbl.replace cls d Inv
     | ICopy (d, s) ->
-        if not (Hashtbl.mem cls d) then
+        if not (Hashtbl.mem cls d) && not (multi_def d) then
           (match Hashtbl.find_opt cls s with
            | Some c -> Hashtbl.replace cls d c
            | None -> ())
     | IBinOp (d, op, x, y) ->
-        if not (Hashtbl.mem cls d) then begin
+        if not (Hashtbl.mem cls d) && not (multi_def d) then begin
           let cx = Hashtbl.find_opt cls x in
           let cy = Hashtbl.find_opt cls y in
           let result : cls option =
