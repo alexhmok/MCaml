@@ -67,7 +67,8 @@ fun main(): int =
   )
 ```
 
-In-game, after loading the compiled datapack: run
+In-game, after loading the compiled datapack: run `/function mcaml:init` 
+then load parameter values `/scoreboard players set param_0 vars n`, `/scoreboard players set param_1 vars a`, `/scoreboard players set param_2 vars c`. For this example, test case is set up for `n = 0`, `a = 0`, `b = 1`. Then run 
 `/function mcaml:main`, then read the return value with
 `/scoreboard players get $ret vars`.
 
