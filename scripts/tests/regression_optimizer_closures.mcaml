@@ -1,0 +1,91 @@
+(* Regression pins for the four 2026-07-14 bug-hunt fixes. Each entry
+   point returns int per the §4.4 public-entry contract; the checker is
+   tools/sim_check_regression.py.
+
+   1. unroll_stale — unroll.ml resolved lo/hi from the LAST IConst in
+      the caller block, including defs AFTER the ICall; with the caller
+      already regalloc'd ($rN slot reuse) the trip count came from an
+      unrelated post-call constant (here: 4 - (-12) = 16 instead of 3).
+      Fixed by resolving from the per-call-site instruction prefix.
+   2. sr_ifmerge_* — strength_reduce.ml classified an if-merge temp
+      (defined in BOTH guarded arms) from whichever def the walk saw
+      first, so a conditional value posed as a loop-invariant
+      stride/base and the carrier rewrite miscompiled. Fixed by
+      poisoning multi-def vregs in classify.
+   3. lambda_ref_* — a lambda capturing an enclosing ref died in
+      typing ("Undefined variable: r_N"): capture_list filters TRef
+      fvs from helper params, and unlike __for helpers, __lam helpers
+      are really typed. Fixed by threading For_lift.ref_captures_of
+      into type_fun_def's extra_env.
+   4. factory_capture / pa_capture — a lambda capturing a
+      factory-returned (or partially-applied) closure died with an
+      internal capture-type mismatch: for_lift's Let oracle ran before
+      build_sigs, so the App fell back to TInt. Fixed by
+      register_ground_sigs before partial_app/for_lift. *)
+
+(* --- 1: unroll trip-count from stale post-call constants --- *)
+fun unroll_stale(): int =
+  let acc0 = 0 - 15 in
+  let r = ref acc0 in
+  (for i = 1 to 4 do r := !r * acc0 done);
+  !r + (0 - 12)                     (* (-15)^4 - 12 = 50613 *)
+
+(* --- 2: SR if-merge misclassification --- *)
+fun sr_ifmerge_mul(): int =
+  let acc0 = 0 - 17 in
+  let r = ref acc0 in
+  (for i = 0 to 4 do
+    r := !r + ((if acc0 >= 6 then 14 else (0 - 20) * i) * i)
+  done);
+  !r                                (* -17 - 20*(0+1+4+9) = -297 *)
+
+fun sr_ifmerge_add(): int =
+  let acc0 = 0 - 17 in
+  let r = ref acc0 in
+  (for i = 0 to 4 do
+    r := !r + (i + (if acc0 != (0 - 17) then acc0 else i))
+  done);
+  !r                                (* -17 + 2*(0+1+2+3) = -5 *)
+
+(* SR must still FIRE on the legit derived-IV shape (value pin only;
+   the carrier rewrite is visible as $ref_sr slots in the build). *)
+fun sr_legit_inner(row: int, j: int, cols: int, acc: int): int =
+  if j >= cols then acc
+  else (let idx = row * cols + j in
+        sr_legit_inner(row, j + 1, cols, acc + idx))
+
+fun sr_legit(): int = sr_legit_inner(2, 0, 4, 0)   (* 8+9+10+11 = 38 *)
+
+(* --- 3: lambda capturing refs --- *)
+fun lambda_ref_loop(): int =
+  let r = ref 0 in
+  let bump = fun (x: int) -> (r := !r + x; !r) in
+  (for i = 1 to 5 do
+    let _ = bump(i) in ()
+  done);
+  !r                                (* 1+2+3+4 = 10 *)
+
+fun lambda_ref_shared(): int =
+  let r = ref 5 in
+  let inc = fun (x: int) -> (r := !r + x; 0) in
+  let dbl = fun (x: int) -> (r := !r * x; 0) in
+  let _ = inc(3) in
+  let _ = dbl(2) in
+  let _ = inc(1) in
+  !r                                (* 17 *)
+
+(* --- 4: lambda capturing a factory-returned / partial-app closure --- *)
+fun make_outer(k: int): int -> int =
+  fun (x: int) -> x * k + 1
+
+fun factory_capture(): int =
+  let f = make_outer(3) in
+  let g = fun (y: int) -> f(y) + f(y + 1) in
+  g(2)                              (* 7 + 10 = 17 *)
+
+fun add2(a: int, b: int): int = a + b
+
+fun pa_capture(): int =
+  let f = add2(5) in
+  let g = fun (y: int) -> f(y) * 2 in
+  g(3)                              (* 16 *)

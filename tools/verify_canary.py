@@ -24,6 +24,7 @@ SUITES = [
     (["scripts/tests/test_nested_ref.mcaml"], "/tmp/build_nestedref", "tools/sim_check_nested_ref.py"),
     (["scripts/tests/test_closure_flow.mcaml"], "/tmp/build_closure_flow", "tools/sim_check_closure_flow.py"),
     (["scripts/tests/test_partial_app.mcaml"], "/tmp/build_partial_app", "tools/sim_check_partial_app.py"),
+    (["scripts/tests/regression_optimizer_closures.mcaml"], "/tmp/build_regr", "tools/sim_check_regression.py"),
 ]
 
 
