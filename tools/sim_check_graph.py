@@ -7,7 +7,7 @@ since the sim models `schedule` as a no-op), and asserts the results
 against Python reference implementations that share the layout tables in
 tools/gen_graph_viz.py:
 
-    cat scripts/graph_world.mcaml scripts/graph_algos.mcaml | ./mcaml -o build_graph
+    cat scripts/demos/graph_world.mcaml scripts/demos/graph_algos.mcaml | ./mcaml -o build_graph
     python3 tools/sim_check_graph.py build_graph
 
 The references MUST mirror the MCaml scan order exactly: edges in

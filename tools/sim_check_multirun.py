@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Multi-invocation tick_guard check for scripts/multirun_guard.mcaml.
+"""Multi-invocation tick_guard check for scripts/tests/multirun_guard.mcaml.
 
 Reproduces (and, once fixed, pins) the stale-$tick_iters bug: the
 per-loop budget counter is reset on the yield path but was historically
@@ -10,7 +10,7 @@ yield mid-run — even though the run fits comfortably inside the budget
 partial result. sim.py models `schedule` as a no-op, so a premature
 yield shows up here as run 2 returning run 1's stale $ret.
 
-    ./mcaml -o build_multirun < scripts/multirun_guard.mcaml
+    ./mcaml -o build_multirun < scripts/tests/multirun_guard.mcaml
     python3 tools/sim_check_multirun.py build_multirun
 """
 import os

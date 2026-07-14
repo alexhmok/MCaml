@@ -274,7 +274,7 @@ let run_whole_program_passes fn_table =
      Optimize.run out into a separate whole-table pre-pass (so this
      table could be computed from a post-DCE snapshot) was tried and
      reverted — it changed unroll.ml's cross-function caller-constant
-     resolution timing enough to make scripts/test_arr_set.mcaml (one
+     resolution timing enough to make scripts/tests/test_arr_set.mcaml (one
      of the five canaries) unroll differently, a real behavior change
      for a program that doesn't even use closures. Per §13's own
      escalation trigger ("an existing test changes its output or
@@ -347,7 +347,7 @@ let run_dump_hooks fn_table fn_order =
    after the loop's FIRST partial run, then crashes resuming the
    scheduled continuation next tick.
 
-   This is the exact hazard scripts/stress_test.mcaml's S8 comment
+   This is the exact hazard scripts/tests/stress_test.mcaml's S8 comment
    documents finding and works around by making the self-tail loop
    itself the sole public entry (folding any one-time setup into an
    `i = 1` guard inside the loop) rather than introducing a

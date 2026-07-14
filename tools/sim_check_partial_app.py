@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Partial-application check for scripts/test_partial_app.mcaml.
+"""Partial-application check for scripts/tests/test_partial_app.mcaml.
 
 Pins the Partial_app desugar end-to-end: local partial application
 (specializes), argument position, factory return (apply-dispatch),
@@ -8,7 +8,7 @@ evaluate-once guarantee (eval_once = 2 means the supplied argument's
 side effect ran once at binding time; 3 means it wrongly re-ran per
 call of the resulting closure).
 
-    ./mcaml -o build_partial_app < scripts/test_partial_app.mcaml
+    ./mcaml -o build_partial_app < scripts/tests/test_partial_app.mcaml
     python3 tools/sim_check_partial_app.py build_partial_app
 """
 import os

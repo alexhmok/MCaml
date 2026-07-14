@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-flight verifier for scripts/mc_test_suite_phase_d.mcaml.
+"""Pre-flight verifier for scripts/tests/mc_test_suite_phase_d.mcaml.
 
 Runs the compiled Phase D suite through sim/sim.py and asserts that
 all 40 synchronous checks pass, plus the §4.4 post-conditions: run_all_d
@@ -7,7 +7,7 @@ is a public entry, so the compiler-inserted arena reset must leave
 $objpool_next at 0 and the objpool cells list empty after it returns.
 Run after any compiler change, BEFORE re-packaging the in-game pack:
 
-    ./mcaml -o build_phase_d < scripts/mc_test_suite_phase_d.mcaml
+    ./mcaml -o build_phase_d < scripts/tests/mc_test_suite_phase_d.mcaml
     python3 tools/sim_check_phase_d.py build_phase_d
 
 Also greps the emitted files for the Phase D zero-cost dispatch

@@ -5,7 +5,7 @@ Importable constants (NODES_A, EDGES_A, NODES_B, EDGES_B, palettes) are
 shared by tools/sim_check_graph.py so the MCaml program and the Python
 reference implementations can never disagree about the graphs.
 
-Run as a script to (re)generate scripts/graph_world.mcaml:
+Run as a script to (re)generate scripts/demos/graph_world.mcaml:
 
     python3 tools/gen_graph_viz.py
 
@@ -247,7 +247,7 @@ def generate():
                  "   Graph layouts, palette, and world coordinates all live\n"
                  "   in the generator; rerun it after any layout change. *)")
 
-    # -- graph data vals (consumed by scripts/graph_algos.mcaml)
+    # -- graph data vals (consumed by scripts/demos/graph_algos.mcaml)
     # gsz = sizes: [N_A nodes; E_A edges; N_B flow nodes; E_B flow edges]
     # graph_algos.mcaml loops read bounds from here, so resizing the
     # graphs is a generator-only change.

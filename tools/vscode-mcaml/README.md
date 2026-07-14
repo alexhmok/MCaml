@@ -28,7 +28,7 @@ Symlink or copy this directory into your VS Code extensions folder:
 ln -s "$PWD" ~/.vscode/extensions/vscode-mcaml-0.1.0
 ```
 
-Then reload VS Code. Open any `.mcaml` file (e.g. `scripts/stress_test.mcaml`).
+Then reload VS Code. Open any `.mcaml` file (e.g. `scripts/tests/stress_test.mcaml`).
 
 ## Package as `.vsix` (optional)
 

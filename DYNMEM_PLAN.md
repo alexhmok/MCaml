@@ -52,7 +52,7 @@ work.
       (Already landed in A2 `204c42a` — six §4.3 lines are in `INIT_MCFUNCTION`.)
 - [x] A9. Per-invocation arena reset at public entry-point exits
 - [x] A10. Test program + simulator coverage
-      (`scripts/test_dyn_array.mcaml` has four straight-line sub-tests — basic,
+      (`scripts/tests/test_dyn_array.mcaml` has four straight-line sub-tests — basic,
       read-modify-write, multi-alloc, mixed static+dyn — validated through
       `/tmp/mcaml_out/test_dyn_array.py` against sim.py with zero simulator
       changes. **Follow-up landed**: cross-function TArrDyn passing and
@@ -62,7 +62,7 @@ work.
       scalar `_` arm already emits the handle `ICopy`, no edit needed),
       and (c) a `darr` surface keyword (`T_DARR` → `TArrDyn TInt`) so
       helpers can declare dyn-array params. Validated by
-      `scripts/test_dyn_array_params.mcaml` against `sim.py`: cross-func
+      `scripts/tests/test_dyn_array_params.mcaml` against `sim.py`: cross-func
       read (60), cross-func fill (45), and in-function for-loop over a
       dyn array (30).)
 
@@ -134,7 +134,7 @@ work.
       equivalent; the 1-cmd form is a future peephole, not a B7
       command-budget violation.)
 - [x] B8. Test program (e.g., tail-recursive Fibonacci list)
-      (`scripts/test_cons.mcaml` has 6 entry points: head/tail
+      (`scripts/tests/test_cons.mcaml` has 6 entry points: head/tail
       traversal, is_nil on empty/non-empty, tail-recursive `sum_list`
       driven from a 5-element list, and a cross-function
       `build3 → sum_list` round-trip exercising list-as-handle param
@@ -291,7 +291,7 @@ work.
       byte-identical vs. pre-Phase-C; both Python exit suites still
       green.)
 - [x] C6. Test: long-running `region`-wrapped computation with small return
-      (`scripts/test_regions.mcaml` has 5 entry points, all returning
+      (`scripts/tests/test_regions.mcaml` has 5 entry points, all returning
       `int` per §4.4's public-entry primitive-return contract:
       `test_region_int` (primitive exit path, 5-element list sum inside
       a region), `test_region_list_return` (walker round-trip — region
@@ -360,7 +360,7 @@ here are load-bearing design decisions; §13 has the full rationale.
       former rides through its existing `| _ -> None` catchalls so
       Mod simply contributes nothing to the IV classifier; the latter
       maps `Mod → "%"` for CFG dump readability).
-- [x] M8. Tests: `scripts/test_mod.mcaml` covers six cases: `13 % 10`
+- [x] M8. Tests: `scripts/tests/test_mod.mcaml` covers six cases: `13 % 10`
       (small), `1234 % 65536` (fractional-part probe for the Q16.16
       path that lands in N), `20 % 5` (exact multiple → 0), a chained
       `(13 % 10) % 3`, a `let`-bound variable dividend `100 % 8`, and
@@ -574,14 +574,14 @@ here are load-bearing design decisions; §13 has the full rationale.
       driver's reset sequence touches pool counters, not constants,
       and `$c256` is intentionally NEVER reset (would break every
       subsequent fmul/fdiv call). Documented in §4.1's extension.)
-- [x] N11. Tests: `scripts/test_fixed_point.mcaml` covering add/sub/mul/div, round-trip, overflow saturation, int↔float conversion
+- [x] N11. Tests: `scripts/tests/test_fixed_point.mcaml` covering add/sub/mul/div, round-trip, overflow saturation, int↔float conversion
       (N11 required int↔float conversions so added `to_float`/`to_int`
       as App-builtins first. `to_float(a)` lowers to `KBinOp(Mult,
       a, 65536)`; `to_int(a)` lowers to `KBinOp(Div, a, 65536)`. No
       new codegen — they ride through the existing Mult/Div path.
       Constraint: `to_float(a)` overflows int32 for |a| >= 32768; not
       runtime-guarded, caller's responsibility.
-      `scripts/test_fixed_point.mcaml` has 16 entry points:
+      `scripts/tests/test_fixed_point.mcaml` has 16 entry points:
       test_add, test_add_raw, test_sub_raw, test_neg_raw,
       test_mul_exact_raw, test_mul_lossy_raw, test_div_exact_raw,
       test_div_nonexact_raw, test_to_float_raw, test_to_int,
@@ -633,7 +633,7 @@ here are load-bearing design decisions; §13 has the full rationale.
       when `__globals_init.mcfunction` is present in the compiled
       source set; falls back to the original `["mcaml:init"]` otherwise.
       Canary-safe.
-- [x] G6. Tests: `scripts/test_globals.mcaml` has five entry points —
+- [x] G6. Tests: `scripts/tests/test_globals.mcaml` has five entry points —
       dynamic-index read, for-loop accumulation over a global,
       cross-function helper (helper reads globals, caller dispatches),
       float-encoded LUT (same storage, Q16.16 elements), and
@@ -968,7 +968,7 @@ which is MineTorch's project, not MCaml's.
 > Minecraft.
 
 > Phase D exhaustive in-game verification completed 2026-07-08
-> (post-D7/D8): scripts/mc_test_suite_phase_d.mcaml (commit `a7f6784`,
+> (post-D7/D8): scripts/tests/mc_test_suite_phase_d.mcaml (commit `a7f6784`,
 > 40 self-checking entries covering D1–D9 — ADT dispatch incl. the
 > elided last-ctor path, nested decision trees, bool/float/list/ADT
 > ctor fields, D6 list patterns, D7 tuples incl. eval-order pins, D8
@@ -1032,7 +1032,7 @@ which is MineTorch's project, not MCaml's.
       rules land and the pre-existing menhir unused-token warnings drop
       from 3 to 1 (only the IN precedence note remains). Zero new IR
       ops; zero codegen/optimizer/sim edits. Implementation commit
-      `6a653db`. Tests: `scripts/test_tuples_records.mcaml` (14 int-
+      `6a653db`. Tests: `scripts/tests/test_tuples_records.mcaml` (14 int-
       returning entries per §4.4: tuple round-trip/swap-through-helper/
       destructuring-let/wildcard/nested, tuple-in-ctor + ctor-in-tuple,
       record access/permuted literal/permuted pattern/omitted field/
@@ -1042,8 +1042,8 @@ which is MineTorch's project, not MCaml's.
       no-unused-obj_f grep pins + inexhaustive/redundant rejection
       probes). All 21 harness checks green; suite 66/66 + async; five
       canaries byte-identical; all six prior /tmp harnesses green.)
-- [x] D9. Tests: `scripts/test_adts.mcaml` covering variants, nested patterns, exhaustiveness errors, wildcard patterns
-      (`scripts/test_adts.mcaml` has 8 int-returning entry points per
+- [x] D9. Tests: `scripts/tests/test_adts.mcaml` covering variants, nested patterns, exhaustiveness errors, wildcard patterns
+      (`scripts/tests/test_adts.mcaml` has 8 int-returning entry points per
       §4.4's public-entry contract: test_ctor_fields (0/1/2-field
       ctors through a helper, complete-signature dispatch),
       test_nullary_enum (nullary-only enum, uniform {tag:k} cells),
@@ -1172,7 +1172,7 @@ self-recursion with source-order generalization.
       canary (arr-param templates throughout) byte-identical through
       the whole phase.)
 > Phase E exhaustive self-checking suite (post-E8):
-> `scripts/mc_test_suite_phase_e.mcaml` — 42 checks covering the full
+> `scripts/tests/mc_test_suite_phase_e.mcaml` — 42 checks covering the full
 > phase surface (core inference incl. partial/checked annotations, TCO
 > + non-tail recursion under inference, residual TInt defaulting; id/
 > swap/pair/fst/len/append/last instantiated across int/bool/float/
@@ -1195,7 +1195,7 @@ self-recursion with source-order generalization.
 > the in-game run (`/function mcaml:run_all_e`, expect ALL 42 PASSED
 > and `$objpool_next` = 0 after).
 
-- [x] E8. Tests: `scripts/test_polymorphism.mcaml` + /tmp harness
+- [x] E8. Tests: `scripts/tests/test_polymorphism.mcaml` + /tmp harness
       (Commit `ab19836`. 10 int-returning entries per §4.4: id at
       int/bool/list/tuple/ADT, len at three element types, swap at two
       tuple shapes, un-annotated inference from use, E3
@@ -1380,7 +1380,7 @@ self-recursion with source-order generalization.
       public entry point if something inside the program still calls
       it.
 
-      Verified end-to-end in `scripts/test_lambdas.mcaml` /
+      Verified end-to-end in `scripts/tests/test_lambdas.mcaml` /
       `/tmp/mcaml_out/test_lambdas.py`: a same-function immediate
       invocation and a cross-function HOF (`apply_twice`-style), both
       with and without captures, all fully specialize (grep confirms
@@ -1576,7 +1576,7 @@ self-recursion with source-order generalization.
       since it will bite the next person writing an Escaping-shape probe
       by hand.
 
-      Verified end-to-end via `scripts/test_lambdas.mcaml` (unchanged —
+      Verified end-to-end via `scripts/tests/test_lambdas.mcaml` (unchanged —
       still exactly the four Known-path entries) and the extended
       `/tmp/mcaml_out/test_lambdas.py` (uncommitted, same convention as
       every prior Phase F/G harness): the four Known-path entries still
@@ -1792,7 +1792,7 @@ self-recursion with source-order generalization.
       canaries byte-identical, suite 66/66+async, Phase D 40/40, Phase
       E 42/42, all 8 prior /tmp harnesses, new 22-check
       `test_param_types` harness (15 positive + 6 rejection probes) —
-      `scripts/test_param_types.mcaml` + `/tmp/mcaml_out/
+      `scripts/tests/test_param_types.mcaml` + `/tmp/mcaml_out/
       test_param_types.py`. Deferred as follow-ups: multi-param decls
       like `('a, 'b) either` (G4b) and parameterized record decls like
       `type 'a cell = { v : 'a }` (G4c) — neither needed by the D8
@@ -2151,7 +2151,7 @@ marked complete.
 
 ### Phase A exit tests (after A1–A9)
 
-- `scripts/test_dyn_array.mcaml` — programs that:
+- `scripts/tests/test_dyn_array.mcaml` — programs that:
   - `Array.make 10 0` then fill via `a[i] := i` in a loop, sum via another
     loop, assert result.
   - Pass a `TArrDyn` to a helper function, mutate, return.
@@ -2167,7 +2167,7 @@ marked complete.
 
 ### Phase B exit tests (after B1–B7)
 
-- `scripts/test_cons.mcaml` — programs that:
+- `scripts/tests/test_cons.mcaml` — programs that:
   - Build a list `1 :: 2 :: 3 :: []`, traverse with head/tail, sum, assert.
   - Tail-recursive `fibs_up_to` with accumulator + manual `reverse`. Verify
     output against a Python reference.
@@ -2178,7 +2178,7 @@ marked complete.
 
 ### Phase C exit tests (after C1–C5)
 
-- `scripts/test_regions.mcaml` — programs that:
+- `scripts/tests/test_regions.mcaml` — programs that:
   - Wrap a list-building loop in `region`, return an int. Verify the
     conspool is empty after the block.
   - Wrap a list-building loop in `region`, return the list. Verify the
@@ -2329,7 +2329,7 @@ Execution order:
      op or reuse `IBinOp` with an operand-type tag. Prefer reusing
      IBinOp unless a concrete reason forces otherwise — the
      optimization stack already handles IBinOp uniformly. Add
-     `scripts/test_fixed_point.mcaml` covering add/sub/mul/div,
+     `scripts/tests/test_fixed_point.mcaml` covering add/sub/mul/div,
      overflow saturation, int<->float conversion, and run it
      through /tmp/mcaml_out/sim.py. Commit per sub-task.
 
@@ -2418,7 +2418,7 @@ for_lift.ml (both free_vars and walk).
 Guardrails for this session:
 - Zero edits to knormal lowering, cfg, codegen, or any runtime file.
 - All existing outputs stay byte-identical: rebuild per CLAUDE.md, then
-  run `cat lib/math.mcaml scripts/mc_test_suite.mcaml | ./mcaml -o
+  run `cat lib/math.mcaml scripts/tests/mc_test_suite.mcaml | ./mcaml -o
   build_suite && python3 tools/sim_check_suite.py build_suite` (must
   print SUITE PASSED, 66 checks) plus the five canaries from §7.
 - Probe programs: a type decl + match that parses and types, an
@@ -2483,7 +2483,7 @@ consciously kept, ending at zero live references:
 
 Guardrails:
 - Baseline BEFORE the first edit: rebuild per CLAUDE.md, run
-  `cat lib/math.mcaml scripts/mc_test_suite.mcaml | ./mcaml -o
+  `cat lib/math.mcaml scripts/tests/mc_test_suite.mcaml | ./mcaml -o
   build_suite && python3 tools/sim_check_suite.py build_suite`
   (must print SUITE PASSED, 66 checks) and hash the five canaries
   (test_all, stress_nested_if, test_arr_set, primitives_v1,
@@ -2574,7 +2574,7 @@ New IR surface (this is the session that adds it — D4 added none):
   tag-read uniformity and is NOT worth it unless a concrete blocker
   appears. If you diverge from allocate-uniformly, stop and flag it.
 
-D9 scope: scripts/test_adts.mcaml + /tmp/mcaml_out/test_adts.py (same
+D9 scope: scripts/tests/test_adts.mcaml + /tmp/mcaml_out/test_adts.py (same
 uncommitted-harness convention; the four existing harnesses were
 regenerated pool-name-agnostic in the D4 session and are available).
 Cover: multi-ctor variants with 0/1/2+ fields, nested patterns
@@ -2686,7 +2686,7 @@ Guardrails:
 - New list-pattern lowering verified by CFG dump + command count on a
   probe (nil arm = the 2-cmd compare, cons arm = 3-cmd IHead/ITail
   reads) BEFORE extending the test suite.
-- Extend scripts/test_adts.mcaml (or a new scripts/test_list_match
+- Extend scripts/tests/test_adts.mcaml (or a new scripts/test_list_match
   .mcaml + harness) with list-pattern entries: []/cons dispatch,
   binder patterns h :: t, nested list-in-ctor and ctor-in-list
   patterns, a tail-recursive sum via match (replacing the is_nil/
@@ -2793,7 +2793,7 @@ Guardrails:
   extending the test suite: tuple build = 3+n cmds, field read =
   3 cmds, tuple/record match = zero obj_tag dispatches (grep the
   emitted file), unused pattern fields emit NO obj_f<k> read.
-- Tests: scripts/test_tuples_records.mcaml (or one file each) + /tmp
+- Tests: scripts/tests/test_tuples_records.mcaml (or one file each) + /tmp
   harness per D9 conventions: tuple build/match round-trip, tuple-in-
   ctor and ctor-in-tuple nesting, tuple as fun param/return (handle
   convention), record decl/literal/pattern with permuted fields,
@@ -2919,7 +2919,7 @@ pinned by existing tests/probes):
 Guardrails (the full battery, now EIGHT checks):
 - Baseline BEFORE the first edit: rebuild per CLAUDE.md; suite 66/66
   + async (tools/sim_check_suite.py); Phase D suite 40/40
-  (./mcaml -o build_phase_d < scripts/mc_test_suite_phase_d.mcaml;
+  (./mcaml -o build_phase_d < scripts/tests/mc_test_suite_phase_d.mcaml;
   python3 tools/sim_check_phase_d.py build_phase_d); hash the five
   canaries; all SEVEN /tmp harnesses green (test_dyn_array,
   test_cons, test_regions, test_fixed_point, test_adts,
@@ -2932,7 +2932,7 @@ Guardrails (the full battery, now EIGHT checks):
 - Zero new menhir conflicts. Every pre-existing typing error message
   that a test greps for keeps firing (rewrite the message text only
   if you update the probe in the same commit).
-- E8 tests: scripts/test_polymorphism.mcaml + /tmp harness per D9
+- E8 tests: scripts/tests/test_polymorphism.mcaml + /tmp harness per D9
   conventions — polymorphic id used at int/bool/list/tuple types in
   one program, first-order polymorphic list helpers, a
   tuple-polymorphic swap, value-restriction rejection probe, an
@@ -3044,7 +3044,7 @@ Guardrails (the full battery, now TEN checks):
   test_adts, test_list_match, test_tuples_records, test_polymorphism,
   test_param_types — regenerate per §2 conventions if /tmp was
   cleared; test_param_types.py isn't checked in, only its source
-  scripts/test_param_types.mcaml is — see G4's commit for the harness
+  scripts/tests/test_param_types.mcaml is — see G4's commit for the harness
   body to recreate).
 - Five canaries byte-identical until a phase task deliberately
   changes codegen for lambda-free programs (none should — lambdas are
@@ -3179,7 +3179,7 @@ Guardrails (the full battery, now TEN checks):
 - Five canaries byte-identical through the whole task (typing-only
   change — any drift is stop-and-investigate).
 - Zero new menhir conflicts; lexer audit per decision 3.
-- Exit tests: scripts/test_param_types.mcaml + /tmp harness per D9
+- Exit tests: scripts/tests/test_param_types.mcaml + /tmp harness per D9
   conventions — 'a option round-trip (Some/None dispatch through a
   polymorphic get_or), option at int/bool/tuple/ADT payloads in one
   program, nested `int option option`, `node option` record field
@@ -3327,7 +3327,7 @@ Guardrails (the full battery, now carrying forward all nine /tmp
 harnesses):
 - Baseline BEFORE the first edit — already verified clean as of commit
   `dc4f32c`; re-verify in the fresh session: rebuild per CLAUDE.md;
-  `cat lib/math.mcaml scripts/mc_test_suite.mcaml | ./mcaml -o
+  `cat lib/math.mcaml scripts/tests/mc_test_suite.mcaml | ./mcaml -o
   build_suite && python3 tools/sim_check_suite.py build_suite` (66/66
   + async); `python3 tools/sim_check_phase_d.py` (40/40); `python3
   tools/sim_check_phase_e.py` (42/42 + 12 probes); hash the five
@@ -3502,7 +3502,7 @@ about the F1/F2 typing layer (they shouldn't; F3/F4 sit below typing).
 
 Guardrails (the full battery, now including F1/F2's baseline):
 - Baseline BEFORE the first edit — rebuild per CLAUDE.md; `cat
-  lib/math.mcaml scripts/mc_test_suite.mcaml | ./mcaml -o build_suite
+  lib/math.mcaml scripts/tests/mc_test_suite.mcaml | ./mcaml -o build_suite
   && python3 tools/sim_check_suite.py build_suite` (66/66 + async);
   `python3 tools/sim_check_phase_d.py` (40/40); `python3
   tools/sim_check_phase_e.py` (42/42 + 12 probes); hash the five
@@ -3576,7 +3576,7 @@ status` is clean before starting.
 shapes to zero-cost ordinary `ICall`s (same-function immediate
 invocation, and cross-function single-hop through one HOF parameter,
 both with and without captures) — verified in
-`scripts/test_lambdas.mcaml`. Everything else is deliberately left as a
+`scripts/tests/test_lambdas.mcaml`. Everything else is deliberately left as a
 surviving `IClosureMake`/`IApply` pair that hits a loud
 `codegen_cfg.ml` stub the instant it's actually compiled:
 `(!r_holding_a_closure)(...)`-style ref-then-call patterns (these
@@ -3646,7 +3646,7 @@ extending it is a legitimate FUTURE follow-up, not F5's task).
 **Guardrails, extending session 3's own battery:**
 - Baseline BEFORE the first edit: rebuild per CLAUDE.md; the same full
   battery session 3 ran (suite 66/66+async, Phase D 40/40, Phase E
-  42/42+12, all nine `/tmp` harnesses) plus `scripts/test_lambdas.mcaml`
+  42/42+12, all nine `/tmp` harnesses) plus `scripts/tests/test_lambdas.mcaml`
   via `/tmp/mcaml_out/test_lambdas.py` (uncommitted — recreate it from
   this session's description if it's not in your working `/tmp` state)
   — all green, five canaries byte-identical (this session's own
@@ -3656,7 +3656,7 @@ extending it is a legitimate FUTURE follow-up, not F5's task).
 - The five canaries must STILL be byte-identical after F5 lands — F5 is
   new machinery that only fires on Escaping closures, and the canary
   programs contain none.
-- `scripts/test_lambdas.mcaml`'s four Known-path entries must STILL
+- `scripts/tests/test_lambdas.mcaml`'s four Known-path entries must STILL
   compile to the exact zero-apply-dispatch output session 3 verified
   (grep for `apply`/`closure(`/`obj_tag`/`obj_f` — none should appear)
   — F5 must not regress F3+F4's zero-cost path by, e.g., accidentally
@@ -4522,7 +4522,7 @@ application) remains rejected exactly as this decision states, and
 knormal still rejects calling the result of a closure-returning
 closure. Targets with array/matrix/ref params are skipped (not
 first-class values) and keep the plain arity error. Suite:
-`scripts/test_partial_app.mcaml` + `tools/sim_check_partial_app.py`
+`scripts/tests/test_partial_app.mcaml` + `tools/sim_check_partial_app.py`
 (10th verify_canary suite) + `test/test_partial_app.ml` alcotest
 shape pins.]
 `tvar_bindable` (`typing.ml:141-154`) gets a `TFun _ -> None` arm
@@ -4811,7 +4811,7 @@ runs interleaved with regalloc/codegen ONE FUNCTION AT A TIME via
 separate whole-table pre-pass (Optimize for every function, THEN
 regalloc+codegen for every function) to get a post-DCE snapshot changed
 `unroll.ml`'s cross-function caller-constant-resolution timing enough
-that `scripts/test_arr_set.mcaml` — one of the five canaries, which
+that `scripts/tests/test_arr_set.mcaml` — one of the five canaries, which
 uses no closures at all — started unrolling a loop it previously
 didn't. The exact mechanism was not fully root-caused (plausibly:
 `unroll.ml`'s "resolve `lo`/`hi` from the unique caller's `IConst`
@@ -4961,7 +4961,7 @@ use rather than a transparent alias edge. What still rejects (same
 loud knormal message, updated wording): a local bound from a call
 through a closure that itself returns a closure (no sig to consult),
 and polymorphic functions instantiated at TFun. Suite:
-`scripts/test_closure_flow.mcaml` + `tools/sim_check_closure_flow.py`
+`scripts/tests/test_closure_flow.mcaml` + `tools/sim_check_closure_flow.py`
 (9th verify_canary suite: leaf factory specializes, non-leaf factory
 apply-dispatches, ref-then-call, loop-overwrite soundness, alias). The
 old `test_lambdas.py` `/tmp` harness (already absent from disk) pinned

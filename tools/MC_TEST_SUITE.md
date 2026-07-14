@@ -5,14 +5,14 @@ real Minecraft (Java Edition, 1.21.x). The suite is self-checking: every
 check bumps `$pass` or `$fail` on the `vars` objective and prints a
 `[FAIL] <test name>` chat line on failure. Passing checks stay silent.
 
-Source: `scripts/mc_test_suite.mcaml` (66 synchronous checks + 1
+Source: `scripts/tests/mc_test_suite.mcaml` (66 synchronous checks + 1
 cross-tick async check). Companion sim gate: `tools/sim_check_suite.py`.
 
 ## 1. Build and package
 
 ```sh
 cd /Users/alexmok/MCaml
-cat lib/math.mcaml scripts/mc_test_suite.mcaml | ./mcaml -o build_suite
+cat lib/math.mcaml scripts/tests/mc_test_suite.mcaml | ./mcaml -o build_suite
 python3 tools/sim_check_suite.py build_suite        # must print SUITE PASSED
 python3 tools/pack_datapack.py --input build_suite \
     --name mcaml_test_suite --output dist/mcaml_test_suite.zip
@@ -148,7 +148,7 @@ follows the runtime it targets, not its host language.
 - **PASS line prints many times for the async test** — should not
   happen (the say is gated on `$async_done`); if it does, the gate
   ordering in `async_sum.mcfunction` was disturbed. See the
-  exit-branch re-execution note in `scripts/mc_test_suite.mcaml`.
+  exit-branch re-execution note in `scripts/tests/mc_test_suite.mcaml`.
 
 ## 7. What this suite cannot cover in game
 
@@ -156,8 +156,8 @@ follows the runtime it targets, not its host language.
   consumes them yet, so there is nothing observable to assert.
 - `tick_split` (Phase 4) — requires a >50k-command straight-line
   function; not practical to hand-author. Covered by sim tests only.
-- Type-error rejection (`scripts/test_fail.mcaml`) — compile-time only;
-  verify on the host with `./mcaml < scripts/test_fail.mcaml`, which
+- Type-error rejection (`scripts/tests/test_fail.mcaml`) — compile-time only;
+  verify on the host with `./mcaml < scripts/tests/test_fail.mcaml`, which
   prints `Type Error: …` and emits no files. Note the process still
   exits 0 (see TODO.md), so check the output, not the exit code.
 - Optimization A/B parity (`MCAML_NO_INLINE/LICM/SR/UNROLL/SROA`) —

@@ -121,7 +121,7 @@ populated-`preds` invariants the analyses rely on.
 Invoke:
 
 ```
-./mcaml -o build < scripts/test_full.mcaml   # writes .mcfunction files to build/
+./mcaml -o build < scripts/tests/test_full.mcaml   # writes .mcfunction files to build/
 MCAML_OUT=build ./mcaml < …                  # env var alternative
 ./mcaml < …                                  # no flag → files land in cwd (legacy)
 MCAML_DUMP_CFG=1 ./mcaml < …                 # stderr shows post-regalloc CFG + emitted commands
@@ -160,7 +160,7 @@ the project root to keep generated files out of the source tree.
 
 - Objective name: `vars` (hardcoded as `obj_name` in `codegen_helpers.ml`).
 - Physical slots: `$r0`, `$r1`, … minted by regalloc, per-function pool.
-- Return slot: `$ret`. **Caveat**: every function writes `$ret` on exit (unit-returning for_lift helpers write `0`), so the slot is only valid for the immediate next command in the caller — safe for synchronous call chains, *unsafe* across tick boundaries. A TCO'd loop whose scheduled continuations resume on later ticks will clobber `$ret` on every natural exit, overwriting whatever the original caller wrote. When a result must survive across tick boundaries, bind it to a ref (`let result = ref 0 in … ; result := expr; !result`) and read `$ref_result_<N>` directly — refs lower to reserved-namespace scoreboard slots that no function touches except via explicit user code. The demo in `scripts/demo_classifier.mcaml` shows the pattern.
+- Return slot: `$ret`. **Caveat**: every function writes `$ret` on exit (unit-returning for_lift helpers write `0`), so the slot is only valid for the immediate next command in the caller — safe for synchronous call chains, *unsafe* across tick boundaries. A TCO'd loop whose scheduled continuations resume on later ticks will clobber `$ret` on every natural exit, overwriting whatever the original caller wrote. When a result must survive across tick boundaries, bind it to a ref (`let result = ref 0 in … ; result := expr; !result`) and read `$ref_result_<N>` directly — refs lower to reserved-namespace scoreboard slots that no function touches except via explicit user code. The demo in `scripts/demos/demo_classifier.mcaml` shows the pattern.
 - Call params: `param_0`, `param_1`, ….
 - Tick budget slots: `$tick_iters_<fname>` — one counter per `tick_guard`-instrumented self-loop. Per-loop (not one shared counter) is a correctness requirement for nested loops: with a shared counter, the outer loop's iterations bump the inner loop's budget too, so the inner loop yields spuriously mid-iteration and leaves the outer's accumulator with a partial sum (MineTorch stage 9 hit exactly this in the MNIST matmul). The per-loop iteration limit is `MCAML_TICK_COMMANDS / body_cost` (per-function body cost via `Cost.estimate_block`); `MCAML_LOOP_ITER_LIMIT` is a legacy uniform override. `main.ml`'s `has_self_tail` check must filter on reachable blocks only (`Cfg.block_is_reachable`) so the unroller's stale dead `TTail` doesn't cause a guard to be prepended to a fully-unrolled helper. Without this filter, every call to such a helper bumps its counter and may yield mid-body, corrupting the caller. The counter is also reset to 0 on the natural-exit path (a trailing `scoreboard players set $tick_iters_<target> vars 0` appended to the guarded entry file, pre-tick_split) so a later invocation of the same loop never inherits a stale budget and yields prematurely — the budget is per-invocation.
 - Array scratch slot: `$arr_result` — used by macro getters, reserved. Parallel: `$arr_set_val` — used by per-aid macro setters (`<id>_set.mcfunction`) to pass the value-to-store without macro-substituting a scoreboard read; also reserved.
@@ -168,7 +168,7 @@ the project root to keep generated files out of the source tree.
 - Array storage: `storage mcaml:heap <aid>` where `<aid>` is a compile-time string like `arr3`.
 - Frame stack for non-tail calls: `storage mcaml:stk frames` — an NBT list; each frame is a compound `{r0: …, r1: …, …}`.
 - Macro getter path: `storage mcaml:tmp args.idx` is the index passed to `function mcaml:<aid>_get with storage mcaml:tmp args`.
-- Integer `/` and `%` are **floor** semantics (floorDiv/floorMod, `-7 / 2 = -4`, `-7 % 3 = 2`), matching vanilla scoreboard `/=`/`%=` as measured in-game 2026-07-07 — NOT OCaml's truncating operators. `const_fold.ml` (including the FMult/FDiv internal divisions) and `sim.py` implement the same; `scripts/mc_test_suite.mcaml` t04/t05, t07/t08, t61/t62 pin fold/runtime parity.
+- Integer `/` and `%` are **floor** semantics (floorDiv/floorMod, `-7 / 2 = -4`, `-7 % 3 = 2`), matching vanilla scoreboard `/=`/`%=` as measured in-game 2026-07-07 — NOT OCaml's truncating operators. `const_fold.ml` (including the FMult/FDiv internal divisions) and `sim.py` implement the same; `scripts/tests/mc_test_suite.mcaml` t04/t05, t07/t08, t61/t62 pin fold/runtime parity.
 - Booleans are integers 0/1; `if` compares against `matches 1`.
 - Comparison binops use `execute store success score … if score …`; `Neq` uses `unless score … =`.
 - `And`/`Or` compile to scoreboard `<` (min) / `>` (max) — correct for 0/1 operands.
@@ -177,12 +177,13 @@ the project root to keep generated files out of the source tree.
 
 ## Test programs
 
-- `scripts/test_all.mcaml` — arith, in_range, classify, fib, sum_to, driver (covers arithmetic, booleans, branches, TCO, non-tail calls).
-- `scripts/stress_nested_if.mcaml` — regression test for the KIf cond liveness trap; nested conditionals with many locals in each branch.
-- `scripts/test_arr_set.mcaml` — indexed-store regression: static set, dynamic for-loop set, read-modify-write (`a[i] := a[i] + 1`), matrix set. Covers the full IArrSet end-to-end path.
-- `scripts/primitives_v1.mcaml` — stage-1 microGPT primitives: `dot`, `vec_add_into`, `vec_scale_into` (all N=4) plus per-input driver functions. Cross-validated against `primitives_ref.py` via `test_primitives_v1.py`.
-- `scripts/demo_classifier.mcaml` — representative end-to-end pipeline: 3-class integer classifier built from the primitives, 500-iter batch loop over 4 samples. Exercises both tick mechanisms (`tick_guard` via the loop; compile with `MCAML_LOOP_ITER_LIMIT=30`) and demonstrates the cross-tick ref pattern for the final result.
-- `scripts/test_core.mcaml`, `test_fib.mcaml`, `test_fib_tco.mcaml`, `test_tco.mcaml`, `debug_ret.mcaml` — smaller single-feature smoke tests.
+- `scripts/tests/test_all.mcaml` — arith, in_range, classify, fib, sum_to, driver (covers arithmetic, booleans, branches, TCO, non-tail calls).
+- `scripts/tests/stress_nested_if.mcaml` — regression test for the KIf cond liveness trap; nested conditionals with many locals in each branch.
+- `scripts/tests/test_arr_set.mcaml` — indexed-store regression: static set, dynamic for-loop set, read-modify-write (`a[i] := a[i] + 1`), matrix set. Covers the full IArrSet end-to-end path.
+- `scripts/tests/primitives_v1.mcaml` — stage-1 microGPT primitives: `dot`, `vec_add_into`, `vec_scale_into` (all N=4) plus per-input driver functions. Cross-validated against `primitives_ref.py` via `test_primitives_v1.py`.
+- `scripts/demos/feature_tour.mcaml` — whirlwind tour of the language surface (floor arith, TCO, closures/HOFs, ADTs+match, records/tuples/lists, arrays/matrices/monomorphized array params, Q16.16 floats). Entry `tour` tellraws each section and returns checksum 6509; every section is also callable standalone.
+- `scripts/demos/demo_classifier.mcaml` — representative end-to-end pipeline: 3-class integer classifier built from the primitives, 500-iter batch loop over 4 samples. Exercises both tick mechanisms (`tick_guard` via the loop; compile with `MCAML_LOOP_ITER_LIMIT=30`) and demonstrates the cross-tick ref pattern for the final result.
+- `scripts/tests/test_core.mcaml`, `test_fib.mcaml`, `test_fib_tco.mcaml`, `test_tco.mcaml`, `debug_ret.mcaml` — smaller single-feature smoke tests.
 - `/tmp/mcaml_out/` — working directory for test artifacts, simulators (`sim.py`, `arrsim.py`, `nested_sim.py`, `stress_run.py`), and stress/array test sources.
 
 ## Simulator

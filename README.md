@@ -315,7 +315,7 @@ The compiler reads one program from **stdin** and writes one
 `.mcfunction` file per compiled function:
 
 ```sh
-./mcaml -o build < scripts/test_all.mcaml    # files land in build/
+./mcaml -o build < scripts/tests/test_all.mcaml    # files land in build/
 MCAML_OUT=build ./mcaml < prog.mcaml         # env-var alternative
 ./mcaml < prog.mcaml                         # no flag: files land in cwd
 ```
@@ -378,7 +378,7 @@ Every top-level function is callable from chat:
 `$ret` is only guaranteed until the next function call. If a
 computation spreads across ticks (a long loop under tick_guard), store
 the final result in a `ref` inside the program and read its
-`$ref_result_<N>` slot instead — see `scripts/demo_classifier.mcaml`
+`$ref_result_<N>` slot instead — see `scripts/demos/demo_classifier.mcaml`
 for the pattern.
 
 ### Example programs

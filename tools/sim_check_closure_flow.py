@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decision-8 follow-up check for scripts/test_closure_flow.mcaml.
+"""Decision-8 follow-up check for scripts/tests/test_closure_flow.mcaml.
 
 Pins the closure-flow shapes knormal rejected before the §13.12
 decision-8 follow-up (factory-return-then-call, ref-then-call, aliases)
@@ -8,7 +8,7 @@ must NOT be specialized to its initializer lambda — overwrite_in_loop
 returning 11 instead of 20 means closure_spec resolved through a
 $ref_ slot it cannot see all writers of.
 
-    ./mcaml -o build_closure_flow < scripts/test_closure_flow.mcaml
+    ./mcaml -o build_closure_flow < scripts/tests/test_closure_flow.mcaml
     python3 tools/sim_check_closure_flow.py build_closure_flow
 """
 import os

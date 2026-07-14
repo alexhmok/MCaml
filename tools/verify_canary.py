@@ -14,16 +14,16 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUITES = [
-    (["lib/math.mcaml", "scripts/mc_test_suite.mcaml"], "/tmp/build_suite", "tools/sim_check_suite.py"),
-    (["lib/math.mcaml", "scripts/mc_test_suite_phase_d.mcaml"], "/tmp/build_d", "tools/sim_check_phase_d.py"),
-    (["lib/math.mcaml", "scripts/mc_test_suite_phase_e.mcaml"], "/tmp/build_e", "tools/sim_check_phase_e.py"),
-    (["lib/math.mcaml", "scripts/stress_test.mcaml"], "/tmp/build_s1", "tools/sim_check_stress.py"),
-    (["lib/math.mcaml", "scripts/stress_test_2.mcaml"], "/tmp/build_s2", "tools/sim_check_stress2.py"),
-    (["scripts/graph_world.mcaml", "scripts/graph_algos.mcaml"], "/tmp/build_graph", "tools/sim_check_graph.py"),
-    (["scripts/multirun_guard.mcaml"], "/tmp/build_multirun", "tools/sim_check_multirun.py"),
-    (["scripts/test_nested_ref.mcaml"], "/tmp/build_nestedref", "tools/sim_check_nested_ref.py"),
-    (["scripts/test_closure_flow.mcaml"], "/tmp/build_closure_flow", "tools/sim_check_closure_flow.py"),
-    (["scripts/test_partial_app.mcaml"], "/tmp/build_partial_app", "tools/sim_check_partial_app.py"),
+    (["lib/math.mcaml", "scripts/tests/mc_test_suite.mcaml"], "/tmp/build_suite", "tools/sim_check_suite.py"),
+    (["lib/math.mcaml", "scripts/tests/mc_test_suite_phase_d.mcaml"], "/tmp/build_d", "tools/sim_check_phase_d.py"),
+    (["lib/math.mcaml", "scripts/tests/mc_test_suite_phase_e.mcaml"], "/tmp/build_e", "tools/sim_check_phase_e.py"),
+    (["lib/math.mcaml", "scripts/tests/stress_test.mcaml"], "/tmp/build_s1", "tools/sim_check_stress.py"),
+    (["lib/math.mcaml", "scripts/tests/stress_test_2.mcaml"], "/tmp/build_s2", "tools/sim_check_stress2.py"),
+    (["scripts/demos/graph_world.mcaml", "scripts/demos/graph_algos.mcaml"], "/tmp/build_graph", "tools/sim_check_graph.py"),
+    (["scripts/tests/multirun_guard.mcaml"], "/tmp/build_multirun", "tools/sim_check_multirun.py"),
+    (["scripts/tests/test_nested_ref.mcaml"], "/tmp/build_nestedref", "tools/sim_check_nested_ref.py"),
+    (["scripts/tests/test_closure_flow.mcaml"], "/tmp/build_closure_flow", "tools/sim_check_closure_flow.py"),
+    (["scripts/tests/test_partial_app.mcaml"], "/tmp/build_partial_app", "tools/sim_check_partial_app.py"),
 ]
 
 

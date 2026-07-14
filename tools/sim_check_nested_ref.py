@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Nested-ref regression check for scripts/test_nested_ref.mcaml.
+"""Nested-ref regression check for scripts/tests/test_nested_ref.mcaml.
 
 Pins the for_lift nested-ref ordering fix (Knormal.seed_ref_env): a ref
 bound inside an outer for body is dereferenced/assigned from a nested
@@ -7,7 +7,7 @@ inner for. Before the fix this SHAPE failed to compile ("not a
 ref-bound variable"), so reaching the sim at all is most of the test;
 the $ret checks pin the lowering end-to-end.
 
-    ./mcaml -o build_nestedref < scripts/test_nested_ref.mcaml
+    ./mcaml -o build_nestedref < scripts/tests/test_nested_ref.mcaml
     python3 tools/sim_check_nested_ref.py build_nestedref
 """
 import os

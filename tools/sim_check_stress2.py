@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-flight verifier for scripts/stress_test_2.mcaml.
+"""Pre-flight verifier for scripts/tests/stress_test_2.mcaml.
 
 Runs the compiled suite's `run_stress2` through sim/sim.py and asserts
 all 6 checks pass. Every expected constant is recomputed independently
@@ -9,7 +9,7 @@ itself — same discipline as tools/sim_check_stress.py.
 
 Run after any compiler change, BEFORE re-packaging the in-game pack:
 
-    cat lib/math.mcaml scripts/stress_test_2.mcaml | ./mcaml -o build_stress2
+    cat lib/math.mcaml scripts/tests/stress_test_2.mcaml | ./mcaml -o build_stress2
     python3 tools/sim_check_stress2.py build_stress2
 """
 import os

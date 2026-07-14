@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Pre-flight verifier for scripts/mc_test_suite.mcaml.
+"""Pre-flight verifier for scripts/tests/mc_test_suite.mcaml.
 
 Runs the compiled suite through sim/sim.py and asserts that all 64
 synchronous checks pass and that the async tick_guard loop completes
 with the right sum when re-driven tick by tick. Run this after any
 compiler change, BEFORE re-packaging the in-game datapack:
 
-    cat lib/math.mcaml scripts/mc_test_suite.mcaml | ./mcaml -o build_suite
+    cat lib/math.mcaml scripts/tests/mc_test_suite.mcaml | ./mcaml -o build_suite
     python3 tools/sim_check_suite.py build_suite
 """
 import sys

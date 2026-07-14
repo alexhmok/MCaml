@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-flight verifier for scripts/stress_test.mcaml.
+"""Pre-flight verifier for scripts/tests/stress_test.mcaml.
 
 Two layers:
 
@@ -22,7 +22,7 @@ that is wrong in BOTH places can't silently agree with itself.
 
 Run after any compiler change, BEFORE re-packaging the in-game pack:
 
-    cat lib/math.mcaml scripts/stress_test.mcaml | ./mcaml -o build_stress
+    cat lib/math.mcaml scripts/tests/stress_test.mcaml | ./mcaml -o build_stress
     python3 tools/sim_check_stress.py build_stress
 """
 import os

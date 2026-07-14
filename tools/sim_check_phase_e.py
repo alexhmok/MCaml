@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-flight verifier for scripts/mc_test_suite_phase_e.mcaml.
+"""Pre-flight verifier for scripts/tests/mc_test_suite_phase_e.mcaml.
 
 Three layers, mirroring (and extending) tools/sim_check_phase_d.py:
 
@@ -25,7 +25,7 @@ Three layers, mirroring (and extending) tools/sim_check_phase_d.py:
 
 Run after any compiler change, BEFORE re-packaging the in-game pack:
 
-    ./mcaml -o build_phase_e < scripts/mc_test_suite_phase_e.mcaml
+    ./mcaml -o build_phase_e < scripts/tests/mc_test_suite_phase_e.mcaml
     python3 tools/sim_check_phase_e.py build_phase_e
 """
 import os

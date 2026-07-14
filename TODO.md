@@ -116,7 +116,7 @@ started with a stale budget and could yield mid-run even though the
 run itself fits comfortably under the limit, leaving any synchronous
 reader of `$ret` with a partial result.
 
-Reproduced in sim before fixing (`scripts/multirun_guard.mcaml` +
+Reproduced in sim before fixing (`scripts/tests/multirun_guard.mcaml` +
 `tools/sim_check_multirun.py`, now the 7th verify_canary suite): two
 back-to-back runs each using ~75% of the budget; run 2 returned run
 1's stale `$ret`. Fix: `Tick_guard.reset_cmd` — one

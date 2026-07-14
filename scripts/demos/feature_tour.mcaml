@@ -1,0 +1,121 @@
+(* feature_tour.mcaml — a whirlwind tour of MCaml's language surface
+   in one datapack. Compile + pack:
+
+     ./mcaml -o build < scripts/demos/feature_tour.mcaml
+     python3 tools/pack_datapack.py --input build --name tour --output tour_pack
+
+   In-game: /function mcaml:tour prints each section's result to chat
+   and leaves a checksum in $ret:
+
+     /scoreboard players get $ret vars      (expect 6509)
+
+   Each section is also callable on its own: /function mcaml:tour_adts,
+   /function mcaml:tour_tco, etc. *)
+
+(* ---- type declarations: ADTs and records ---------------------- *)
+type shape = Point | Circle of int | Rect of int * int
+type vec2 = { x : int; y : int }
+
+(* ---- top-level globals (initialized at datapack load) ---------- *)
+val lut = [| 1; 2; 4; 8; 16 |]
+
+(* ---- 1. integer arithmetic: floor division and modulo ----------
+   / and % match vanilla scoreboard /= and %= (floor semantics),
+   not OCaml's truncating operators: -7 / 2 = -4, -7 % 3 = 2. *)
+fun tour_arith(): int =
+  let q = (0 - 7) / 2 in
+  let r = (0 - 7) % 3 in
+  q * 100 + r                          (* -398 *)
+
+(* ---- 2. tail recursion compiles to an in-place loop ------------
+   No stack frames; the self-call becomes a jump with rewritten
+   params, and tick_guard budgets it against the per-tick limit. *)
+fun fib(n: int, a: int, b: int): int =
+  if n = 0 then a else fib(n - 1, b, a + b)
+
+fun tour_tco(): int = fib(20, 0, 1)    (* 6765 *)
+
+(* ---- 3. closures and higher-order functions -------------------- *)
+fun apply_twice(f: int -> int, x: int): int = f(f(x))
+
+fun tour_closures(): int =
+  let step = 4 in
+  let bump = fun (y: int) -> y + step in       (* captures step *)
+  bump(1) + apply_twice(fun (y: int) -> y * 2, 3)   (* 5 + 12 = 17 *)
+
+(* ---- 4. ADTs and pattern matching -------------------------------
+   The checker rejects non-exhaustive and redundant matches. *)
+fun area(s: shape): int =
+  match s with
+  | Point      -> 0
+  | Circle(r)  -> 3 * r * r
+  | Rect(w, h) -> w * h
+
+fun tour_adts(): int =
+  area(Point) + area(Circle(3)) + area(Rect(4, 5))   (* 0 + 27 + 20 = 47 *)
+
+(* ---- 5. records, tuples, lists, pipeline ------------------------ *)
+fun sum_list(l: list, acc: int): int =
+  match l with
+  | []     -> acc
+  | h :: t -> sum_list(t, acc + h)     (* tail call -> loop *)
+
+fun tour_data(): int =
+  let p = { x = 3; y = 4 } in
+  let (a, b) = (10, 20) in
+  let l = [1; 2; 3; 4] in
+  p.x + p.y + (b - a) + sum_list(l, 0) + (l |> head)
+                                       (* 7 + 10 + 10 + 1 = 28 *)
+
+(* ---- 6. arrays, matrices, array parameters ----------------------
+   Typed array params are specialized per call site (monomorphization);
+   small non-escaping arrays are promoted to scalars by SROA. *)
+fun dot4(u: arr[int, 4], v: arr[int, 4]): int =
+  let r = ref 0 in
+  for i = 0 to 4 do
+    r := !r + u[i] * v[i]
+  done;
+  !r
+
+fun tour_arrays(): int =
+  let a = [| 1; 2; 3; 4 |] in
+  a[0] := a[0] + lut[2];               (* a[0] = 1 + 4 = 5 *)
+  let m = [| [| 1; 2 |]; [| 3; 4 |] |] in   (* promotes to mat[int, 2, 2] *)
+  let w = [| 2; 2; 2; 2 |] in
+  dot4(a, w) + m[1, 0]                 (* 28 + 3 = 31 *)
+
+(* ---- 7. Q16.16 fixed-point floats ------------------------------- *)
+fun tour_floats(): int =
+  let x = 1.5 *. 3.0 in                (* 4.5 *)
+  let y = x +. 0.25 in                 (* 4.75 *)
+  to_int(y *. 4.0)                     (* 19 *)
+
+(* ---- entry point -------------------------------------------------
+   $ret holds each call's return immediately afterward, so tellraw
+   can read it straight off the scoreboard. *)
+fun tour(): int =
+  cmd! "say === MCaml feature tour ===";
+
+  let s1 = tour_arith() in
+  cmd! "tellraw @a [\"floor div/mod     = \",{\"score\":{\"name\":\"$ret\",\"objective\":\"vars\"}},\"  (expect -398)\"]";
+
+  let s2 = tour_tco() in
+  cmd! "tellraw @a [\"fib(20) via TCO   = \",{\"score\":{\"name\":\"$ret\",\"objective\":\"vars\"}},\"  (expect 6765)\"]";
+
+  let s3 = tour_closures() in
+  cmd! "tellraw @a [\"closures + HOFs   = \",{\"score\":{\"name\":\"$ret\",\"objective\":\"vars\"}},\"  (expect 17)\"]";
+
+  let s4 = tour_adts() in
+  cmd! "tellraw @a [\"ADTs + match      = \",{\"score\":{\"name\":\"$ret\",\"objective\":\"vars\"}},\"  (expect 47)\"]";
+
+  let s5 = tour_data() in
+  cmd! "tellraw @a [\"records/lists     = \",{\"score\":{\"name\":\"$ret\",\"objective\":\"vars\"}},\"  (expect 28)\"]";
+
+  let s6 = tour_arrays() in
+  cmd! "tellraw @a [\"arrays + matmul   = \",{\"score\":{\"name\":\"$ret\",\"objective\":\"vars\"}},\"  (expect 31)\"]";
+
+  let s7 = tour_floats() in
+  cmd! "tellraw @a [\"Q16.16 floats     = \",{\"score\":{\"name\":\"$ret\",\"objective\":\"vars\"}},\"  (expect 19)\"]";
+
+  cmd! "say === tour complete: checksum in $ret ===";
+  s1 + s2 + s3 + s4 + s5 + s6 + s7     (* 6509 *)

@@ -33,7 +33,7 @@ This is the gate that catches what `sim.py` cannot:
 
    ```sh
    cd /Users/alexmok/MCaml
-   ./mcaml -o build/ < scripts/test_full_chain.mcaml
+   ./mcaml -o build/ < scripts/tests/test_full_chain.mcaml
    ```
 
    `build/` should now contain a flat directory of `.mcfunction`
@@ -154,7 +154,7 @@ This is the gate that catches what `sim.py` cannot:
    in a real runtime.
 
    ```sh
-   MCAML_NO_LICM=1 ./mcaml -o build/ < scripts/test_full_chain.mcaml
+   MCAML_NO_LICM=1 ./mcaml -o build/ < scripts/tests/test_full_chain.mcaml
    python3 tools/pack_datapack.py --input build/ --name mcaml_test \
        --output <save>/datapacks/mcaml_test/
    ```
